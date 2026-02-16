@@ -1,22 +1,24 @@
 [project]
 name = "eo-fm"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Earth Observation Foundation Model — LCZ classification with torchgeo"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "dask>=2026.1.2",
     "earthengine-api>=1.7.12",
+    "geotessera==0.7.5",
     "gdal==3.10.0",
     "geopandas>=1.1.2",
-    "geotessera>=0.7.4",
     "ipykernel>=7.1.0",
+    "lightning>=2.0",
     "loguru>=0.7.3",
     "matplotlib>=3.10.8",
     "python-dotenv>=1.2.1",
     "rioxarray>=0.21.0",
-    "torchgeo>=0.8.1",
+    "scikit-learn>=1.4",
+    "torchgeo>=0.9",
     "typer>=0.21.1",
     "wandb>=0.24.1",
+    "xee>=0.0.24",
     "zarr>=3.1.5",
 ]
