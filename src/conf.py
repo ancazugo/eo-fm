@@ -28,7 +28,7 @@ class SamplerConfig:
 
     patch_size: float = 256  # Patch size in pixels
     length: int = 1000  # Number of patches per epoch (RandomBatchGeoSampler)
-    stride: float = 256  # Stride for GridGeoSampler (val/test)
+    stride: float | None = None  # Stride for GridGeoSampler (val/test); defaults to patch_size
     batch_size: int = 32
 
 
@@ -56,7 +56,12 @@ class LightningConfig:
     """Configuration for PyTorch Lightning training."""
 
     task: str = "classification"  # "classification" or "segmentation"
-    model: str = "resnet18"  # Model name or backbone
+    model: str = "resnet18"  # Classification: any timm name (resnet18/34/50/101/152, vit_*).
+                              # Segmentation: SMP architecture (unet, deeplabv3+, segformer, upernet, dpt).
+    backbone: Optional[str] = None  # Segmentation only: SMP encoder backbone.
+                                     # resnet18/34/50/101/152, mit_b0-b5 (SegFormer),
+                                     # timm-universal-vit_base_patch16_224, etc.
+                                     # Defaults to "resnet50" if not set.
     num_classes: int = 17
     lr: float = 1e-3
     max_epochs: int = 50

@@ -159,8 +159,20 @@ def download_google_satellite(
             # Stack all bands into a single DataArray
             band_names = list(ds.data_vars)
             da = ds[band_names].to_dataarray(dim="band")
+
+            # Normalize y to descending (north-up), matching Tessera tile format.
+            # xee returns ascending y for UTM projections; flip so the tile is
+            # stored with y[0] > y[-1] (north at top) just like Tessera.
+            if da.sizes.get("y", 0) > 1 and float(da.y.values[0]) < float(da.y.values[-1]):
+                da = da.isel(y=slice(None, None, -1))
+
+            # Use integer band indices (0, 1, …, 63) instead of string labels
+            # ('A00', …, 'A63') to match the Tessera convention.
+            da = da.assign_coords(band=np.arange(len(band_names)))
+
             da = da.rio.set_spatial_dims(x_dim="x", y_dim="y")
             da = da.rio.write_crs(str(utm_crs))
+            da = da.rio.write_transform(da.rio.transform())
 
             da.to_dataset(name="embedding").to_zarr(str(zarr_path))
             downloaded += 1

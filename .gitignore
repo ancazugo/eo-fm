@@ -5,7 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
-
+lightning_logs/
 # Virtual environments
 .venv
 .env

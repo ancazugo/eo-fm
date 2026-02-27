@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from torchgeo.datasets import RasterDataset
+from torchgeo.datasets.geo import GeoDataset
 from torchgeo.datasets.utils import BoundingBox
 
 class LCZLabelDataset(RasterDataset):
@@ -93,3 +94,70 @@ class LCZLabelDataset(RasterDataset):
         )
 
         return cls(paths=output_dir, **kwargs)
+
+
+class VectorPatchLabelDataset(GeoDataset):
+    """Label dataset backed by a GeoPackage (or any fiona-readable vector file).
+
+    Each polygon feature is a labeled spatial patch. For a given bounding box
+    query, returns a constant-value mask tensor with the label of the first
+    intersecting feature. The mask shape (1, 1, 1) is compatible with
+    EmbeddingLabelDataModule's collate_fn for both classification (majority
+    vote) and segmentation (broadcast by UNetTask._prepare_mask).
+
+    Uses the torchgeo 0.9 geopandas-backed index (same as ZarrGeoDataset).
+
+    Args:
+        path: Path to the GeoPackage (or any fiona-readable vector file).
+        label_col: Column name containing integer class labels (1-based; 0 = nodata).
+        crs: Target CRS. Pass the embedding dataset's CRS so spatial queries align.
+    """
+
+    is_image = False
+
+    def __init__(
+        self,
+        path: str | Path,
+        label_col: str,
+        crs: Any | None = None,
+    ) -> None:
+        import geopandas as gpd
+        import pandas as pd
+        from datetime import datetime
+
+        super().__init__()
+        self.label_col = label_col
+
+        gdf = gpd.read_file(path)
+        if crs is not None:
+            gdf = gdf.to_crs(crs)
+        gdf = gdf.reset_index(drop=True)
+
+        self._res = 0.0  # No native raster resolution; sampler uses embedding's res
+
+        # Build geopandas GeoDataFrame index (torchgeo 0.9 API, matches ZarrGeoDataset)
+        mint = datetime(1900, 1, 1)
+        maxt = datetime(2100, 12, 31)
+        datetimes = [(mint, maxt)] * len(gdf)
+        time_index = pd.IntervalIndex.from_tuples(datetimes, closed="both", name="datetime")
+        self.index = gpd.GeoDataFrame(
+            {"label": gdf[label_col].astype(int).values},
+            index=time_index,
+            geometry=gdf.geometry.values,
+            crs=gdf.crs,
+        )
+
+    def __getitem__(self, index: Any) -> dict[str, Any]:
+        import torch
+
+        x, y, t = self._disambiguate_slice(index)
+
+        interval = __import__("pandas").Interval(t.start, t.stop)
+        df = self.index.iloc[self.index.index.overlaps(interval)]
+        df = df.cx[x.start : x.stop, y.start : y.stop]
+
+        if df.empty:
+            return {"mask": torch.zeros(1, 1, 1, dtype=torch.long)}
+
+        label_val = int(df.iloc[0]["label"])
+        return {"mask": torch.full((1, 1, 1), label_val, dtype=torch.long)}
