@@ -10,7 +10,6 @@ dependencies = [
     "gdal==3.10.0",
     "geopandas>=1.1.2",
     "ipykernel>=7.1.0",
-    "lightning>=2.0",
     "loguru>=0.7.3",
     "matplotlib>=3.10.8",
     "python-dotenv>=1.2.1",
@@ -21,4 +20,6 @@ dependencies = [
     "wandb>=0.24.1",
     "xee>=0.0.24",
     "zarr>=3.1.5",
+    "lightgbm>=4.6.0",
+    "xgboost>=3.2.0",
 ]
