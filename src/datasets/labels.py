@@ -3,9 +3,74 @@
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+import numpy as np
 from torchgeo.datasets import RasterDataset
 from torchgeo.datasets.geo import GeoDataset
 from torchgeo.datasets.utils import BoundingBox
+
+
+def rasterize_gdf(gdf, label_col: str, out_path: str | Path, res: float, nodata: int = 0) -> Path:
+    """Burn all polygon labels into a single north-up GeoTIFF.
+
+    All polygons are burned before any train/val/test splitting so the same pixel
+    always gets the same label value regardless of split. This avoids the ambiguity
+    that arises when overlapping polygons are rasterised independently per split.
+
+    Label encoding:
+    - Values 1–17 = LCZ classes (1-indexed, matching lcz_dict)
+    - Value 0      = nodata (pixels not covered by any polygon)
+
+    At training time shift by -1: classes become 0–16 and nodata becomes -1
+    (used as ignore_index in losses).
+
+    Args:
+        gdf: GeoDataFrame with geometry and label_col in the target CRS.
+        label_col: Column with 1-based integer class values.
+        out_path: Output GeoTIFF path (.tif).
+        res: Pixel size in CRS units (e.g. metres for UTM CRS).
+        nodata: Fill value for pixels not covered by any polygon.
+
+    Returns:
+        Path to the written GeoTIFF.
+    """
+    import rasterio
+    from rasterio.features import rasterize as rio_rasterize
+    from rasterio.transform import from_origin
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    minx, miny, maxx, maxy = gdf.total_bounds
+    width  = max(1, int(np.ceil((maxx - minx) / res)))
+    height = max(1, int(np.ceil((maxy - miny) / res)))
+    maxy_snap = miny + height * res
+    transform = from_origin(minx, maxy_snap, res, res)
+
+    shapes = (
+        (geom, int(val))
+        for geom, val in zip(gdf.geometry, gdf[label_col])
+    )
+    burned = rio_rasterize(
+        shapes,
+        out_shape=(height, width),
+        transform=transform,
+        fill=nodata,
+        dtype=np.uint8,
+    )
+
+    with rasterio.open(
+        str(out_path), "w",
+        driver="GTiff",
+        height=height, width=width,
+        count=1, dtype="uint8",
+        crs=gdf.crs,
+        transform=transform,
+        nodata=nodata,
+    ) as dst:
+        dst.write(burned, 1)
+
+    return out_path
+
 
 class LCZLabelDataset(RasterDataset):
     """Local Climate Zone label dataset backed by GeoTIFF files.
@@ -146,6 +211,24 @@ class VectorPatchLabelDataset(GeoDataset):
             geometry=gdf.geometry.values,
             crs=gdf.crs,
         )
+
+    @classmethod
+    def from_gdf(cls, gdf, label_col: str) -> "VectorPatchLabelDataset":
+        """Create a VectorPatchLabelDataset directly from a pre-split GeoDataFrame.
+
+        Bypasses file I/O; the GDF must already have the structure produced by
+        VectorPatchLabelDataset.__init__ (pd.IntervalIndex, 'label' column, CRS set).
+
+        Args:
+            gdf: Pre-split GeoDataFrame (e.g. from split_label_gdf()).
+            label_col: Column name for class labels (stored for reference).
+        """
+        obj = cls.__new__(cls)
+        super(VectorPatchLabelDataset, obj).__init__()
+        obj.label_col = label_col
+        obj._res = 0.0
+        obj.index = gdf
+        return obj
 
     def __getitem__(self, index: Any) -> dict[str, Any]:
         import torch

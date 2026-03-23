@@ -9,7 +9,7 @@ from typing import Optional
 class EmbeddingConfig:
     """Configuration for embedding dataset."""
 
-    name: str  # Registry key: "tessera", "google_satellite", "seamless"
+    name: str  # Registry key: "tessera", "alpha_earth", "seamless"
     root: str  # Path to embedding data directory
 
 
@@ -45,15 +45,24 @@ class SklearnConfig:
     alpha: float = 0.0001
     learning_rate_init: float = 0.001
     max_iter: int = 300
-    # RandomForest hyperparameters
+    # RandomForest / ExtraTrees hyperparameters
     n_estimators: int = 100
+    # LightGBM hyperparameters
+    num_leaves: int = 31
+    lgbm_learning_rate: float = 0.1
+    min_child_samples: int = 20
+    # XGBoost hyperparameters
+    xgb_max_depth: int = 6
+    xgb_learning_rate: float = 0.1
+    # Logistic Regression hyperparameters
+    logreg_C: float = 1.0
     # Cross-validation
     cv_folds: int = 5
 
 
 @dataclass
-class LightningConfig:
-    """Configuration for PyTorch Lightning training."""
+class TrainConfig:
+    """Configuration for pure-PyTorch training."""
 
     task: str = "classification"  # "classification" or "segmentation"
     model: str = "resnet18"  # Classification: any timm name (resnet18/34/50/101/152, vit_*).
@@ -62,12 +71,18 @@ class LightningConfig:
                                      # resnet18/34/50/101/152, mit_b0-b5 (SegFormer),
                                      # timm-universal-vit_base_patch16_224, etc.
                                      # Defaults to "resnet50" if not set.
+    weights: Optional[str] = None  # Pretrained weights: torchgeo weight name
+                                    # (e.g. "ResNet50_Weights.LANDSAT_TM_TOA_MOCO"),
+                                    # "imagenet" / "true" for ImageNet, or None for
+                                    # random initialisation.
     num_classes: int = 17
     lr: float = 1e-3
     max_epochs: int = 50
-    accelerator: str = "auto"
-    devices: int = 1
     output_dir: Optional[str] = None  # Checkpoint save directory
+
+
+# Backward-compat alias
+LightningConfig = TrainConfig
 
 
 @dataclass
@@ -90,5 +105,5 @@ class ExperimentConfig:
     label: LabelConfig
     sampler: SamplerConfig = field(default_factory=SamplerConfig)
     sklearn: SklearnConfig = field(default_factory=SklearnConfig)
-    lightning: LightningConfig = field(default_factory=LightningConfig)
+    train: TrainConfig = field(default_factory=TrainConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)

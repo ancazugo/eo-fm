@@ -6,20 +6,19 @@ from typing import Any
 
 import numpy as np
 import wandb
-from lightning.pytorch.loggers import WandbLogger
 from loguru import logger
 
 from conf import SklearnConfig, WandbConfig
 
 
-def get_wandb_logger(config: WandbConfig, run_config: dict | None = None, **kwargs: Any) -> WandbLogger:
-    """Create a WandB logger for Lightning training."""
-    return WandbLogger(
+def init_wandb_run(config: WandbConfig, run_config: dict | None = None, **kwargs: Any) -> "wandb.sdk.wandb_run.Run":
+    """Initialise a WandB run and return it."""
+    run = wandb.init(
         project=config.project,
-        log_model=False,
-        config=run_config,
+        config=run_config or {},
         **kwargs,
     )
+    return run
 
 
 def log_sklearn_metrics(metrics: dict[str, float], config: dict | None = None) -> None:
@@ -56,6 +55,7 @@ def log_confusion_matrix(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     class_names: list[str] | None = None,
+    key: str = "confusion_matrix",
 ) -> None:
     """Log a confusion matrix to the active WandB run.
 
@@ -63,6 +63,7 @@ def log_confusion_matrix(
         y_true: Ground truth labels (1-based LCZ class IDs).
         y_pred: Predicted labels (1-based LCZ class IDs).
         class_names: Optional list of class names for axis labels.
+        key: WandB log key (use different keys to log train/test separately).
     """
     from sklearn.metrics import confusion_matrix
 
@@ -79,13 +80,13 @@ def log_confusion_matrix(
             class_names[lbl] = lcz_dict.get(lbl, {}).get("name", str(lbl))
 
     wandb.log({
-        "confusion_matrix": wandb.plot.confusion_matrix(
+        key: wandb.plot.confusion_matrix(
             y_true=y_true.tolist(),
             preds=y_pred.tolist(),
             class_names=class_names,
         )
     })
-    logger.info(f"Logged confusion matrix to WandB ({len(labels)} classes)")
+    logger.info(f"Logged confusion matrix '{key}' to WandB ({len(labels)} classes)")
 
 
 def log_prediction_raster(raster_path: str | Path) -> None:
@@ -110,6 +111,7 @@ def run_sklearn_sweep(
     train_fn,
     wandb_config: WandbConfig,
     sweep_parameters: dict[str, Any],
+    dir: str | Path | None = None,
 ) -> str:
     """Run a WandB Bayesian sweep for sklearn hyperparameter tuning.
 
@@ -117,15 +119,22 @@ def run_sklearn_sweep(
         train_fn: Callable that takes no args, reads from wandb.config, and logs metrics.
         wandb_config: WandB configuration.
         sweep_parameters: Dict of parameter specs for wandb.sweep.
+        dir: Directory to store wandb run files. Defaults to wandb default (cwd/wandb).
 
     Returns:
         The sweep ID.
     """
+    import os
+
     sweep_config = {
         "method": wandb_config.sweep_method,
         "metric": {"name": wandb_config.sweep_metric, "goal": wandb_config.sweep_goal},
         "parameters": sweep_parameters,
     }
+
+    if dir is not None:
+        Path(dir).mkdir(parents=True, exist_ok=True)
+        os.environ["WANDB_DIR"] = str(dir)
 
     sweep_id = wandb.sweep(sweep=sweep_config, project=wandb_config.project)
     logger.info(f"Starting sweep {sweep_id} with {wandb_config.sweep_count} trials")

@@ -314,7 +314,13 @@ class ZarrGeoDataset(GeoDataset):
         """Open a Zarr store. Optionally wrapped by an LRU cache in ``__init__``."""
         # chunks=False disables dask, reducing per-patch overhead from ~4s to ~0.04s
         # for random 32×32 patch access patterns typical in training.
-        return xr.open_zarr(filepath, chunks=False)
+        ds = xr.open_zarr(filepath, chunks=False)
+        # Native geotessera zarr stores embedding as (y, x, band); normalise to
+        # (band, y, x) so __getitem__ logic works identically for both formats.
+        emb = ds["embedding"]
+        if emb.dims != ("band", "y", "x"):
+            ds = ds.assign(embedding=emb.transpose("band", "y", "x"))
+        return ds
 
     # ------------------------------------------------------------------
     # GeoDataset protocol
@@ -380,40 +386,76 @@ class ZarrGeoDataset(GeoDataset):
                 raise
             arrays.append(da)
 
+        # Compute target output size from the query slice before any branching.
+        target_h = round((y.stop - y.start) / abs(y.step))
+        target_w = round((x.stop - x.start) / abs(x.step))
+        abs_ystep = abs(y.step)
+        abs_xstep = abs(x.step)
+
         if not arrays:
-            raise IndexError(
-                f"No zarr tile contained data for query bounds "
-                f"x=[{x.start}, {x.stop}] y=[{y.start}, {y.stop}]"
-            )
+            # The query falls in a spatial gap between tiles (can happen with
+            # independently-projected UTM tiles like GeoTessera).  Return a
+            # zero-embedding patch so the DataLoader does not crash.
+            probe_path = self.index.iloc[0]["filepath"]
+            probe_ds = self._open_zarr_store(probe_path)
+            n_bands = probe_ds["embedding"].sizes["band"]
+            zero = torch.zeros(n_bands, target_h, target_w)
+            return {
+                "bounds": self._slice_to_tensor(index),
+                "transform": torch.zeros(9),
+                "image": zero,
+            }
 
         if len(arrays) == 1:
             merged = arrays[0]
         else:
-            # rasterio.merge (used by merge_arrays) requires transform.e < 0
-            # (north-up) and isel(y=::-1) leaves a stale cached transform that
-            # merge_arrays reads, so bypass rasterio entirely with a numpy mosaic.
-            # All clips share the same CRS and pixel size; place each one at its
-            # correct position using y/x coordinates.
-            res = abs(self._res[1]) if isinstance(self._res, tuple) else abs(self._res)
-            xres = abs(self._res[0]) if isinstance(self._res, tuple) else res
-
-            all_y = sorted(set(v for a in arrays for v in a.y.values.tolist()))
-            all_x = sorted(set(v for a in arrays for v in a.x.values.tolist()))
+            # Adjacent tessera tiles have independently-projected UTM coordinates
+            # that differ by 3–6 m at tile boundaries (sub-pixel misalignment).
+            # Coordinate-union placement (`sorted(set(y_values))`) creates duplicate
+            # or extra rows at boundaries, corrupting cross-tile patches.
+            #
+            # Fix: snap each zarr pixel to the output grid using rounding that
+            # tolerates both center-coordinate and edge-coordinate conventions:
+            #   row = floor((y.stop - ay) / ystep + 0.5) - 1
+            # For exact-integer inputs (edge convention, ay = y.stop-(k+1)*ystep):
+            #   → floor(k+1.5) - 1 = k  ✓
+            # For half-integer inputs (center convention, ay = y.stop-(k+0.5)*ystep):
+            #   → floor(k+1.0) - 1 = k  ✓
+            # For misaligned tiles (ay off by a fraction of ystep):
+            #   → rounds to nearest grid position  ✓
             n_bands = arrays[0].sizes["band"]
-            out = np.zeros((n_bands, len(all_y), len(all_x)), dtype=np.float32)
-
-            y_idx = {v: i for i, v in enumerate(all_y)}
-            x_idx = {v: i for i, v in enumerate(all_x)}
+            out = np.zeros((n_bands, target_h, target_w), dtype=np.float32)
 
             for a in arrays:
-                vals = a.values.astype(np.float32)  # (bands, h, w), triggers zarr read
-                ay = [y_idx[v] for v in a.y.values.tolist()]
-                ax = [x_idx[v] for v in a.x.values.tolist()]
-                out[np.ix_(range(n_bands), ay, ax)] = vals
+                # Normalise to north-up so ay_arr is always descending — required
+                # for the row-snapping formula below.  Values are forced to numpy
+                # here, so the stale rioxarray transform cache is not an issue.
+                if a.sizes.get("y", 0) > 1 and float(a.y.values[0]) < float(a.y.values[-1]):
+                    a = a.isel(y=slice(None, None, -1))
+                vals = a.values.astype(np.float32)  # (n_bands, h, w), north-up
+                ay_arr = a.y.values  # 1-D, descending (north-up)
+                ax_arr = a.x.values  # 1-D, ascending
 
-            # Build the merged DataArray with ascending y (same orientation as clips)
-            merged_y = np.array(all_y, dtype=np.float64)
-            merged_x = np.array(all_x, dtype=np.float64)
+                row_idx = (np.floor((y.stop - ay_arr) / abs_ystep + 0.5) - 1).astype(int)
+                col_idx = (np.floor((ax_arr - x.start) / abs_xstep + 0.5) - 1).astype(int)
+
+                r_mask = (row_idx >= 0) & (row_idx < target_h)
+                c_mask = (col_idx >= 0) & (col_idx < target_w)
+
+                r_valid = row_idx[r_mask]
+                c_valid = col_idx[c_mask]
+
+                if r_valid.size == 0 or c_valid.size == 0:
+                    continue
+
+                ri = np.where(r_mask)[0]
+                ci = np.where(c_mask)[0]
+                out[:, r_valid[:, None], c_valid[None, :]] = vals[:, ri[:, None], ci[None, :]]
+
+            # Build a merged DataArray with synthetic north-up coordinates aligned
+            # to the output grid (descending y so the flip check below is skipped).
+            merged_y = y.stop - (np.arange(target_h) + 1) * abs_ystep
+            merged_x = x.start + (np.arange(target_w) + 1) * abs_xstep
             merged = xr.DataArray(
                 out,
                 dims=["band", "y", "x"],
@@ -431,17 +473,30 @@ class ZarrGeoDataset(GeoDataset):
         data = merged.values.astype(np.float32)
         tensor = torch.from_numpy(data)
 
-        # Ensure consistent spatial dimensions (clip_box can be off by 1 pixel).
-        target_h = round((y.stop - y.start) / abs(y.step))
-        target_w = round((x.stop - x.start) / abs(x.step))
+        # Ensure consistent spatial dimensions (clip_box can be off by 1 pixel
+        # for single-tile queries; multi-tile output is already target_h×target_w).
+        # IMPORTANT: place the clipped data at its correct geographic offset within
+        # the full patch.  When the query extends beyond the tile (e.g. a patch at
+        # the north edge of the dataset whose bbox overshoots the tile), clip_box
+        # returns data starting at the tile boundary, not at the query origin.  We
+        # must compute the row/col offset so that the tile pixels land at the right
+        # geographic position in the padded tensor — otherwise data is shifted by
+        # up to patch_size pixels in the output raster.
         if tensor.ndim == 3:
             _, h, w = tensor.shape
             if h != target_h or w != target_w:
-                tensor = tensor[:, :target_h, :target_w]
-                if tensor.shape[1] < target_h or tensor.shape[2] < target_w:
-                    padded = torch.zeros(tensor.shape[0], target_h, target_w, dtype=tensor.dtype)
-                    padded[:, :tensor.shape[1], :tensor.shape[2]] = tensor
-                    tensor = padded
+                # Row offset: how many rows from the top of the full patch does the
+                # clipped data start?  merged.y.values[0] is the northernmost y of
+                # the clipped tile (after north-up flip); y.stop is the query north.
+                clip_north = float(merged.y.values[0])
+                clip_west = float(merged.x.values[0])
+                r_off = max(0, round((y.stop - clip_north) / abs_ystep))
+                c_off = max(0, round((clip_west - x.start) / abs_xstep))
+                padded = torch.zeros(tensor.shape[0], target_h, target_w, dtype=tensor.dtype)
+                r_end = min(r_off + h, target_h)
+                c_end = min(c_off + w, target_w)
+                padded[:, r_off:r_end, c_off:c_end] = tensor[:, : r_end - r_off, : c_end - c_off]
+                tensor = padded
 
         import rasterio.transform
 

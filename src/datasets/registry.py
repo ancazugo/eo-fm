@@ -22,11 +22,11 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "zarr_filename_crs": "EPSG:4326",
         "zarr_filename_is_center": True,
     },
-    "google_satellite": {
+    "alpha_earth": {
         "class": GoogleSatelliteEmbedding,
         "in_channels": 64,
         "resolution": 10,
-        "description": "Google Satellite Embedding (AlphaEarth) 64-band",
+        "description": "AlphaEarth 64-band satellite embeddings",
         # Zarr fast-path: tiles are named by bottom-left corner, 0.1° × 0.1° grid.
         # e.g. gse_2.2_48.8_2021.zarr → bottom-left (2.2, 48.8)
         "zarr_tile_size": 0.1,

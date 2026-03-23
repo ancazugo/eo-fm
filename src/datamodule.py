@@ -1,6 +1,5 @@
-"""LightningDataModule for combining embedding and label GeoDatasets."""
+"""DataModule for combining embedding and label GeoDatasets."""
 
-import lightning as L
 import pandas as pd
 from shapely.geometry.base import BaseGeometry
 from torch.utils.data import DataLoader
@@ -11,7 +10,7 @@ from torchgeo.samplers import GridGeoSampler, RandomBatchGeoSampler, Units
 from conf import SamplerConfig
 
 
-class EmbeddingLabelDataModule(L.LightningDataModule):
+class EmbeddingLabelDataModule:
     """DataModule that creates IntersectionDataset(embeddings, labels).
 
     Uses RandomBatchGeoSampler for training and GridGeoSampler for val/test.
@@ -22,6 +21,9 @@ class EmbeddingLabelDataModule(L.LightningDataModule):
         self,
         embedding_ds: GeoDataset,
         label_ds: GeoDataset | None = None,
+        train_label_ds: GeoDataset | None = None,
+        val_label_ds: GeoDataset | None = None,
+        test_label_ds: GeoDataset | None = None,
         sampler_config: SamplerConfig | None = None,
         task: str = "classification",
         train_roi: BaseGeometry | None = None,
@@ -32,13 +34,18 @@ class EmbeddingLabelDataModule(L.LightningDataModule):
         test_toi: pd.Interval | None = None,
         num_workers: int = 4,
         augment: bool = True,
+        pred_stride: float | None = None,
     ) -> None:
         """Initialize the DataModule.
 
         Args:
             embedding_ds: GeoDataset providing embedding rasters (returns "image" key).
-            label_ds: GeoDataset providing label rasters (returns "mask" key). Optional;
+            label_ds: GeoDataset providing label rasters (returns "mask" key). Used for
+                all splits when no per-split label datasets are provided. Optional;
                 if None the dataset is embedding-only (no confusion matrix will be computed).
+            train_label_ds: If set, used instead of label_ds for the training split.
+            val_label_ds: If set, used instead of label_ds for the validation split.
+            test_label_ds: If set, used instead of label_ds for the test split.
             sampler_config: Sampler hyperparameters (patch size, batch size, stride, length).
                 Defaults to SamplerConfig() if not provided.
             task: Task type ("classification" or "segmentation"). Controls how
@@ -53,9 +60,11 @@ class EmbeddingLabelDataModule(L.LightningDataModule):
             num_workers: Number of DataLoader worker processes.
             augment: Whether to apply random flips and rotation during training.
         """
-        super().__init__()
         self.embedding_ds = embedding_ds
         self.label_ds = label_ds
+        self.train_label_ds = train_label_ds
+        self.val_label_ds = val_label_ds
+        self.test_label_ds = test_label_ds
         self.cfg = sampler_config or SamplerConfig()
         self.task = task
         self.train_roi = train_roi
@@ -66,32 +75,26 @@ class EmbeddingLabelDataModule(L.LightningDataModule):
         self.test_toi = test_toi
         self.num_workers = num_workers
         self.augment = augment
-        self.dataset: IntersectionDataset | None = None
+        self._augment = augment
+        self.pred_stride = pred_stride
+        self.train_dataset: IntersectionDataset | GeoDataset | None = None
+        self.val_dataset: IntersectionDataset | GeoDataset | None = None
+        self.test_dataset: IntersectionDataset | GeoDataset | None = None
 
-        if augment:
-            import kornia.augmentation as K
-            aug_transforms = [
-                K.RandomHorizontalFlip(p=0.5),
-                K.RandomVerticalFlip(p=0.5),
-                K.RandomRotation(degrees=90.0, p=0.5),
-            ]
-            # Segmentation: transform image and mask with the same random params.
-            # Classification: label is a scalar — transform image only.
-            if task == "segmentation":
-                self._aug = K.AugmentationSequential(
-                    *aug_transforms, data_keys=["input", "mask"], same_on_batch=False
-                )
-            else:
-                self._aug = K.AugmentationSequential(
-                    *aug_transforms, data_keys=["input"], same_on_batch=False
-                )
+        # Augmentation uses exact pixel ops (flip, rot90) — no bilinear interpolation.
+        # Kornia's RandomRotation(degrees=90) rotates by a *random* angle in [-90, 90]
+        # using bilinear interpolation, which corrupts integer mask values and causes
+        # stitching artifacts. We use augment_batch() from train_unet instead.
 
-    def setup(self, stage: str | None = None) -> None:
-        """Create the dataset: intersection if labels are available, else embedding-only."""
-        if self.label_ds is not None:
-            self.dataset = self.embedding_ds & self.label_ds
-        else:
-            self.dataset = self.embedding_ds
+    def setup(self) -> None:
+        """Create per-split datasets: intersection if labels are available, else embedding-only."""
+        train_lbl = self.train_label_ds or self.label_ds
+        val_lbl = self.val_label_ds or self.label_ds
+        test_lbl = self.test_label_ds or self.label_ds
+
+        self.train_dataset = self.embedding_ds & train_lbl if train_lbl else self.embedding_ds
+        self.val_dataset = self.embedding_ds & val_lbl if val_lbl else self.embedding_ds
+        self.test_dataset = self.embedding_ds & test_lbl if test_lbl else self.embedding_ds
 
     def _collate_fn(self, batch: list[dict]) -> dict:
         """Collate samples, adapting labels for the task type.
@@ -128,21 +131,34 @@ class EmbeddingLabelDataModule(L.LightningDataModule):
         return collated
 
     def _train_collate_fn(self, batch: list[dict]) -> dict:
-        """Collate + apply training augmentations (flips, rotation)."""
+        """Collate + apply training augmentations (exact flips and 90° rotations)."""
         collated = self._collate_fn(batch)
-        if not self.augment:
+        if not self._augment:
             return collated
 
         import torch
+        from train_unet import augment_batch
+
         image = collated["image"].float()
 
         if self.task == "segmentation" and "mask" in collated:
-            # Kornia expects mask as (N, 1, H, W) float; returns same shape.
-            mask = collated["mask"].unsqueeze(1).float()
-            image, mask = self._aug(image, mask)
-            collated["mask"] = mask.squeeze(1).long()
+            image, mask = augment_batch(image, collated["mask"])
+            collated["mask"] = mask
         else:
-            image = self._aug(image)
+            # Classification: augment image only (label is a scalar).
+            aug_images = []
+            for img in image:
+                if torch.rand(1) < 0.5:
+                    img = img.flip(-1)
+                if torch.rand(1) < 0.5:
+                    img = img.flip(-2)
+                k = torch.randint(0, 4, (1,)).item()
+                if k:
+                    img = torch.rot90(img, k, dims=(-2, -1))
+                if torch.rand(1) < 0.5:
+                    img = img + torch.randn_like(img) * 0.05
+                aug_images.append(img)
+            image = torch.stack(aug_images)
 
         collated["image"] = image
         return collated
@@ -150,7 +166,7 @@ class EmbeddingLabelDataModule(L.LightningDataModule):
     def train_dataloader(self) -> DataLoader:
         """Return a DataLoader with RandomBatchGeoSampler for training."""
         sampler = RandomBatchGeoSampler(
-            self.dataset,
+            self.train_dataset,
             size=self.cfg.patch_size,
             batch_size=self.cfg.batch_size,
             length=self.cfg.length,
@@ -159,7 +175,7 @@ class EmbeddingLabelDataModule(L.LightningDataModule):
             units=Units.PIXELS,
         )
         return DataLoader(
-            self.dataset,
+            self.train_dataset,
             batch_sampler=sampler,
             num_workers=self.num_workers,
             collate_fn=self._train_collate_fn,
@@ -169,7 +185,7 @@ class EmbeddingLabelDataModule(L.LightningDataModule):
         """Return a DataLoader with GridGeoSampler for validation."""
         stride = self.cfg.stride or self.cfg.patch_size
         sampler = GridGeoSampler(
-            self.dataset,
+            self.val_dataset,
             size=self.cfg.patch_size,
             stride=stride,
             roi=self.val_roi,
@@ -177,7 +193,7 @@ class EmbeddingLabelDataModule(L.LightningDataModule):
             units=Units.PIXELS,
         )
         return DataLoader(
-            self.dataset,
+            self.val_dataset,
             batch_size=self.cfg.batch_size,
             sampler=sampler,
             num_workers=self.num_workers,
@@ -188,7 +204,7 @@ class EmbeddingLabelDataModule(L.LightningDataModule):
         """Return a DataLoader with GridGeoSampler for testing."""
         stride = self.cfg.stride or self.cfg.patch_size
         sampler = GridGeoSampler(
-            self.dataset,
+            self.test_dataset,
             size=self.cfg.patch_size,
             stride=stride,
             roi=self.test_roi,
@@ -196,7 +212,7 @@ class EmbeddingLabelDataModule(L.LightningDataModule):
             units=Units.PIXELS,
         )
         return DataLoader(
-            self.dataset,
+            self.test_dataset,
             batch_size=self.cfg.batch_size,
             sampler=sampler,
             num_workers=self.num_workers,
@@ -204,5 +220,25 @@ class EmbeddingLabelDataModule(L.LightningDataModule):
         )
 
     def predict_dataloader(self) -> DataLoader:
-        """Return a DataLoader with GridGeoSampler for prediction (same as test)."""
-        return self.test_dataloader()
+        """Return a DataLoader over the full embedding ROI for prediction.
+
+        Uses embedding_ds directly (no label intersection) so the GridGeoSampler
+        covers the entire bbox, not just where labeled test polygons exist.
+        Uses pred_stride if set (enables overlapping patches for smoother predictions).
+        """
+        stride = self.pred_stride or self.cfg.stride or self.cfg.patch_size
+        sampler = GridGeoSampler(
+            self.embedding_ds,
+            size=self.cfg.patch_size,
+            stride=stride,
+            roi=self.test_roi,
+            toi=self.test_toi,
+            units=Units.PIXELS,
+        )
+        return DataLoader(
+            self.embedding_ds,
+            batch_size=self.cfg.batch_size,
+            sampler=sampler,
+            num_workers=self.num_workers,
+            collate_fn=self._collate_fn,
+        )

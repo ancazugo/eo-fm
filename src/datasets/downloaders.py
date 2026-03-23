@@ -14,25 +14,33 @@ def download_tessera(
     bbox: list[float],
     output_dir: str | Path,
     year: int = 2024,
+    output_format: str = "zarr",
 ) -> Path:
     """Download Tessera embeddings for a bounding box with tile-level caching.
 
+    Uses the native GeoTessera export methods (export_embedding_zarr /
+    export_embedding_geotiff) which produce correctly geo-referenced tiles
+    with proper CRS, transform, and metadata attributes.
+
     Args:
         bbox: [west, south, east, north] in EPSG:4326.
-        output_dir: Directory to save Zarr stores.
+        output_dir: Directory to save tiles.
         year: Year of embeddings to download.
+        output_format: Output format, either "zarr" or "tif".
 
     Returns:
         Path to the output directory.
     """
+    if output_format not in ("zarr", "tif"):
+        raise ValueError(f"output_format must be 'zarr' or 'tif', got '{output_format}'")
+
     from geotessera import GeoTessera
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Use a temporary directory for geotessera's intermediate .npy downloads
-    # so they are cleaned up automatically after conversion to zarr.
-    # Without this, GeoTessera defaults to cwd and leaves large .npy files behind.
+    # Use a temporary directory for geotessera's intermediate .npy cache so
+    # large cache files are cleaned up automatically after export.
     tmpdir = tempfile.mkdtemp(prefix="geotessera_")
     gt = GeoTessera(embeddings_dir=tmpdir)
     tiles = gt.registry.load_blocks_for_region(bounds=bbox, year=year)
@@ -40,60 +48,48 @@ def download_tessera(
 
     downloaded, skipped = 0, 0
     for tile_year, lon, lat in tiles:
-        zarr_path = output_dir / f"grid_{lon}_{lat}_{tile_year}.zarr"
-        if zarr_path.exists():
+        stem = f"grid_{lon}_{lat}_{tile_year}"
+        ext = ".zarr" if output_format == "zarr" else ".tif"
+        out_path = output_dir / f"{stem}{ext}"
+        if out_path.exists():
             skipped += 1
             continue
 
-        embedding, crs, transform = gt.fetch_embedding(lon=lon, lat=lat, year=tile_year)
-        # embedding shape: (H, W, 128), float32
-
-        h, w, bands = embedding.shape
-        # Build pixel coordinates from affine transform
-        cols = np.arange(w)
-        rows = np.arange(h)
-        xs = transform.c + cols * transform.a + transform.b * 0  # x = c + col * a
-        ys = transform.f + rows * transform.e + transform.d * 0  # y = f + row * e
-
-        da = xr.DataArray(
-            data=np.moveaxis(embedding, -1, 0),  # (128, H, W)
-            dims=["band", "y", "x"],
-            coords={"band": np.arange(bands), "y": ys, "x": xs},
-        )
-        da = da.rio.set_spatial_dims(x_dim="x", y_dim="y")
-        da = da.rio.write_crs(crs)
-        da = da.rio.write_transform(transform)
-
-        da.to_dataset(name="embedding").to_zarr(str(zarr_path))
+        if output_format == "zarr":
+            gt.export_embedding_zarr(lon=lon, lat=lat, output_path=out_path, year=tile_year)
+        else:
+            gt.export_embedding_geotiff(lon=lon, lat=lat, output_path=out_path, year=tile_year)
         downloaded += 1
-        logger.debug(f"Downloaded tile grid_{lon}_{lat}_{tile_year}")
+        logger.debug(f"Downloaded tile {stem}")
 
-    # Clean up intermediate .npy files from the temp directory
     import shutil
-
     shutil.rmtree(tmpdir, ignore_errors=True)
 
     logger.info(f"Tessera download complete: {downloaded} downloaded, {skipped} cached")
     return output_dir
 
 
-def download_google_satellite(
+def download_alpha_earth(
     bbox: list[float],
     output_dir: str | Path,
     year: int = 2021,
+    output_format: str = "zarr",
 ) -> Path:
-    """Download Google Satellite Embeddings for a bounding box with tile-level caching.
+    """Download AlphaEarth embeddings for a bounding box with tile-level caching.
 
     Tiles the bbox into 0.1-degree grid cells for tile-level caching.
 
     Args:
         bbox: [west, south, east, north] in EPSG:4326.
-        output_dir: Directory to save Zarr stores.
+        output_dir: Directory to save tiles.
         year: Year of embeddings to download.
+        output_format: Output format, either "zarr" or "tif".
 
     Returns:
         Path to the output directory.
     """
+    if output_format not in ("zarr", "tif"):
+        raise ValueError(f"output_format must be 'zarr' or 'tif', got '{output_format}'")
     from pyproj import CRS
     from pyproj.aoi import AreaOfInterest
     from pyproj.database import query_utm_crs_info
@@ -121,7 +117,7 @@ def download_google_satellite(
     )
 
     total_tiles = len(lon_starts) * len(lat_starts)
-    logger.info(f"Google Satellite: {total_tiles} tiles for bbox={bbox}, year={year}")
+    logger.info(f"AlphaEarth: {total_tiles} tiles for bbox={bbox}, year={year}")
 
     downloaded, skipped = 0, 0
     for lon in lon_starts:
@@ -129,8 +125,9 @@ def download_google_satellite(
             # Round to avoid floating point drift in filenames
             lon_r = round(lon, 2)
             lat_r = round(lat, 2)
-            zarr_path = output_dir / f"gse_{lon_r}_{lat_r}_{year}.zarr"
-            if zarr_path.exists():
+            stem = f"gse_{lon_r}_{lat_r}_{year}"
+            out_path = output_dir / (f"{stem}.zarr" if output_format == "zarr" else f"{stem}.tif")
+            if out_path.exists():
                 skipped += 1
                 continue
 
@@ -174,12 +171,15 @@ def download_google_satellite(
             da = da.rio.write_crs(str(utm_crs))
             da = da.rio.write_transform(da.rio.transform())
 
-            da.to_dataset(name="embedding").to_zarr(str(zarr_path))
+            if output_format == "zarr":
+                da.to_dataset(name="embedding").to_zarr(str(out_path))
+            else:
+                da.rio.to_raster(str(out_path))
             downloaded += 1
-            logger.debug(f"Downloaded tile gse_{lon_r}_{lat_r}_{year}")
+            logger.debug(f"Downloaded tile {stem}")
 
     logger.info(
-        f"Google Satellite download complete: {downloaded} downloaded, {skipped} cached"
+        f"AlphaEarth download complete: {downloaded} downloaded, {skipped} cached"
     )
     return output_dir
 
