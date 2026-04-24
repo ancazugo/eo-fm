@@ -1,30 +1,31 @@
-"""Standalone U-Net segmentation trainer for LCZ classification.
+"""Standalone ResNet classification trainer for LCZ patch classification.
 
-Architecture: U-Net with configurable presets (nano/small/base/medium/large),
-multiclass Dice + CrossEntropy loss, ignore_index=-1 for unlabeled pixels.
+Architecture: timm ResNet variants (resnet18/34/50/101/152) with configurable
+presets (nano/small/base/medium/large), CrossEntropy loss, ignore_index=-1 for
+unlabeled patches.
 
-Designed for sparse vector labels (So2Sat GeoPackage): polygons are rasterized
-per patch so the network sees full spatial masks, not just patch-level scalars.
+Each patch receives a single class label via majority vote over valid mask pixels.
+Designed for sparse vector labels (So2Sat GeoPackage).
 
 Usage:
     # Single city (spatial x-axis split, default)
-    python src/train_unet.py train \\
-        --embedding tessera \\
-        --embedding-path /maps/acz25/phd-thesis-data/input/GeoTessera/2017/ \\
+    python src/train_resnet.py train \\
+        --embedding google_satellite \\
+        --embedding-path /maps/acz25/phd-thesis-data/input/Google/AlphaEarth/2017/ \\
         --label-path /maps/acz25/.../patches_reference_Nairobi.gpkg \\
         --label-column LCZ_class \\
-        --preset small --patch-size 64 --batch-size 8 --num-classes 17 \\
+        --preset base --patch-size 32 --batch-size 32 --num-classes 17 \\
         --bbox "36.45,-1.54,37.16,-0.96" --year 2017
 
     # Multiple cities, city-level split
-    python src/train_unet.py train \\
+    python src/train_resnet.py train \\
         --embedding tessera \\
         --embedding-path /maps/acz25/phd-thesis-data/input/GeoTessera/2017/ \\
         --label-path /maps/acz25/.../patches_reference_Nairobi.gpkg \\
         --label-path /maps/acz25/.../patches_reference_Paris.gpkg \\
         --label-column LCZ_class \\
         --split-mode city --train-frac 0.7 --val-frac 0.15 \\
-        --preset small --patch-size 64 --batch-size 8 --num-classes 17 \\
+        --preset base --patch-size 32 --batch-size 32 --num-classes 17 \\
         --year 2017
 """
 
@@ -38,13 +39,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import typer
 from loguru import logger
 from torch.utils.data import DataLoader
 from torchgeo.datasets.geo import GeoDataset
 from torchgeo.samplers import GridGeoSampler, RandomBatchGeoSampler, Units
-from torchmetrics import Accuracy, JaccardIndex
+from torchmetrics import Accuracy
+from torchmetrics.classification import MulticlassF1Score
 from typing import List
 
 from conf import WandbConfig
@@ -57,234 +58,76 @@ from utils.wandb import init_wandb_run
 app = typer.Typer(pretty_exceptions_enable=False)
 
 
-# ─── U-Net Architecture ───────────────────────────────────────────────────────
+# ─── ResNet Presets ───────────────────────────────────────────────────────────
 
-class DoubleConv(nn.Module):
-    """Two consecutive Conv2d(3×3) → BatchNorm → ReLU blocks.
-
-    Args:
-        in_ch: Number of input channels.
-        out_ch: Number of output channels.
-        dropout: Dropout2d probability applied after the second ReLU (0 = off).
-    """
-
-    def __init__(self, in_ch: int, out_ch: int, dropout: float = 0.0) -> None:
-        super().__init__()
-        layers: list[nn.Module] = [
-            nn.Conv2d(in_ch, out_ch, 3, padding=1, padding_mode="reflect", bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1, padding_mode="reflect", bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
-        ]
-        if dropout > 0.0:
-            layers.append(nn.Dropout2d(dropout))
-        self.block = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.block(x)
+RESNET_PRESETS: dict[str, str] = {
+    "nano":   "resnet18",
+    "small":  "resnet34",
+    "base":   "resnet50",
+    "medium": "resnet101",
+    "large":  "resnet152",
+}
 
 
-class UNet(nn.Module):
-    """U-Net with configurable depth and feature width.
-
-    Encoder: DoubleConv → MaxPool2d (×depth).
-    Bottleneck: DoubleConv (with dropout).
-    Decoder: ConvTranspose2d → skip-cat → DoubleConv (×depth).
-    Head: Conv2d(1×1) → num_classes logits.
-
-    Built-in presets (depth, base_features):
-        nano:   (2,  8)  — fast experiments, minimal params
-        small:  (3, 32)  — lightweight baseline
-        base:   (3, 48)  — wider baseline (mirrors tessera-cnn-example "base")
-        medium: (4, 32)  — deeper with moderate width
-        large:  (4, 48)  — deepest + widest recommended preset
+def build_resnet(
+    arch: str,
+    in_channels: int,
+    num_classes: int,
+    head_dropout: float = 0.0,
+) -> nn.Module:
+    """Build a timm ResNet model with the given architecture.
 
     Args:
+        arch: timm model name (e.g. "resnet50").
         in_channels: Number of embedding input channels.
-        num_classes: Number of segmentation output classes.
-        depth: Number of encoder/decoder stages.
-        base_features: Feature maps at the first encoder stage;
-            doubles at each subsequent stage.
-        bottleneck_dropout: Dropout2d probability at the bottleneck.
+        num_classes: Number of classification output classes.
+        head_dropout: Dropout probability before the final linear layer (0 = off).
+
+    Returns:
+        timm ResNet nn.Module.
     """
+    import timm
 
-    PRESETS: dict[str, tuple[int, int]] = {
-        "nano":   (2,  8),
-        "small":  (3, 32),
-        "base":   (3, 48),
-        "medium": (4, 32),
-        "large":  (4, 48),
-    }
-
-    def __init__(
-        self,
-        in_channels: int,
-        num_classes: int,
-        depth: int = 3,
-        base_features: int = 32,
-        bottleneck_dropout: float = 0.3,
-    ) -> None:
-        super().__init__()
-        self.depth = depth
-
-        # ── Encoder ──────────────────────────────────────────────────────────
-        self.encoders = nn.ModuleList()
-        self.pools = nn.ModuleList()
-        enc_channels: list[int] = []
-        ch = in_channels
-        for i in range(depth):
-            out_ch = base_features * (2 ** i)
-            self.encoders.append(DoubleConv(ch, out_ch))
-            self.pools.append(nn.MaxPool2d(2))
-            enc_channels.append(out_ch)
-            ch = out_ch
-
-        # ── Bottleneck ───────────────────────────────────────────────────────
-        bottleneck_ch = base_features * (2 ** depth)
-        self.bottleneck = DoubleConv(ch, bottleneck_ch, dropout=bottleneck_dropout)
-
-        # ── Decoder ──────────────────────────────────────────────────────────
-        self.upsamples = nn.ModuleList()
-        self.decoders = nn.ModuleList()
-        ch = bottleneck_ch
-        for i in reversed(range(depth)):
-            skip_ch = enc_channels[i]
-            self.upsamples.append(nn.ConvTranspose2d(ch, skip_ch, kernel_size=2, stride=2))
-            self.decoders.append(DoubleConv(skip_ch * 2, skip_ch))
-            ch = skip_ch
-
-        self.head = nn.Conv2d(ch, num_classes, kernel_size=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        skips: list[torch.Tensor] = []
-
-        for enc, pool in zip(self.encoders, self.pools):
-            x = enc(x)
-            skips.append(x)
-            x = pool(x)
-
-        x = self.bottleneck(x)
-
-        for up, dec, skip in zip(self.upsamples, self.decoders, reversed(skips)):
-            x = up(x)
-            # Correct for odd-sized inputs (bilinear resize if needed)
-            if x.shape[-2:] != skip.shape[-2:]:
-                x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
-            x = torch.cat([skip, x], dim=1)
-            x = dec(x)
-
-        return self.head(x)
+    model = timm.create_model(
+        arch,
+        in_chans=in_channels,
+        num_classes=num_classes,
+        pretrained=False,
+        drop_rate=head_dropout,
+    )
+    return model
 
 
-# ─── Loss Functions ───────────────────────────────────────────────────────────
+# ─── Augmentation ────────────────────────────────────────────────────────────
 
-class MulticlassDiceLoss(nn.Module):
-    """Soft multiclass Dice loss, macro-averaged over present classes.
-
-    For each class, computes the soft Dice coefficient over valid pixels
-    (those not equal to ``ignore_index``), then averages over classes that
-    have at least one positive target pixel. Returns 0 if no valid class exists.
-
-    Args:
-        num_classes: Number of segmentation classes.
-        ignore_index: Label value to exclude from loss computation.
-        smooth: Laplace smoothing term to avoid division by zero.
-    """
-
-    def __init__(
-        self, num_classes: int, ignore_index: int = -1, smooth: float = 1.0
-    ) -> None:
-        super().__init__()
-        self.num_classes = num_classes
-        self.ignore_index = ignore_index
-        self.smooth = smooth
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            logits:  (N, C, H, W) — unnormalized class logits.
-            targets: (N, H, W)    — integer class indices; ignore_index excluded.
-        """
-        probs = F.softmax(logits, dim=1)          # (N, C, H, W)
-        valid = targets != self.ignore_index       # (N, H, W) bool
-
-        dice_terms: list[torch.Tensor] = []
-        for c in range(self.num_classes):
-            target_c = ((targets == c) & valid).float()   # (N, H, W)
-            pred_c = probs[:, c]                          # (N, H, W)
-
-            p = pred_c[valid]
-            t = target_c[valid]
-
-            if t.numel() == 0 or t.sum() == 0:
-                continue  # absent class — skip so macro average is fair
-
-            intersection = (p * t).sum()
-            dice = (2.0 * intersection + self.smooth) / (
-                p.sum() + t.sum() + self.smooth
-            )
-            dice_terms.append(1.0 - dice)
-
-        if not dice_terms:
-            return logits.sum() * 0.0  # differentiable zero
-
-        return torch.stack(dice_terms).mean()
-
-
-# ─── Augmentation (notebook-style: exact pixel ops, no interpolation) ──────────
-
-def augment_batch(
-    images: torch.Tensor, masks: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply random flips and exact 90° rotations per sample (no interpolation).
-
-    All geometric transforms use exact pixel operations (flip, rot90) so mask
-    integer values (0-16 class indices, -1 nodata) are preserved exactly.
-    Kornia's RandomRotation uses bilinear interpolation which corrupts integer
-    masks and causes stitching artifacts at patch boundaries.
-
-    Augmentations applied per sample:
-    - Random horizontal flip (p=0.5)
-    - Random vertical flip (p=0.5)
-    - Random 90° rotation k ∈ {0,1,2,3} (uniform, exact pixel op)
-    - Gaussian noise σ=0.05 on image only (p=0.5)
+def augment_images(images: torch.Tensor) -> torch.Tensor:
+    """Apply random flips and exact 90° rotations to images only.
 
     Args:
         images: (N, C, H, W) float tensor on any device.
-        masks:  (N, H, W) long tensor, values 0–16 or -1 (nodata).
 
     Returns:
-        Augmented (images, masks) with the same shapes and dtypes.
+        Augmented images with the same shape.
     """
-    aug_images, aug_masks = [], []
-    for img, msk in zip(images, masks):
+    aug = []
+    for img in images:
         if torch.rand(1) < 0.5:
             img = img.flip(-1)
-            msk = msk.flip(-1)
         if torch.rand(1) < 0.5:
             img = img.flip(-2)
-            msk = msk.flip(-2)
         k = torch.randint(0, 4, (1,)).item()
         if k:
             img = torch.rot90(img, k, dims=(-2, -1))
-            msk = torch.rot90(msk, k, dims=(-2, -1))
         if torch.rand(1) < 0.5:
             img = img + torch.randn_like(img) * 0.05
-        aug_images.append(img)
-        aug_masks.append(msk)
-    return torch.stack(aug_images), torch.stack(aug_masks)
+        aug.append(img)
+    return torch.stack(aug)
 
 
-# ─── Spatial split helper ──────────────────────────────────────────────────────
+# ─── Spatial split helper ─────────────────────────────────────────────────────
 
 def _spatial_split(gdf, val_fraction: float = 0.15, test_fraction: float = 0.15):
     """Split GeoDataFrame spatially by centroid x-coordinate.
-
-    Follows the torchgeo notebook pattern: split at quantile thresholds along x
-    so the three ROIs are non-overlapping geographic regions. Eliminates spatial
-    data leakage that polygon-level random splits cannot avoid.
 
     Args:
         gdf: GeoDataFrame of label polygons in the target CRS.
@@ -310,22 +153,20 @@ def _spatial_split(gdf, val_fraction: float = 0.15, test_fraction: float = 0.15)
 
 # ─── DataModule ───────────────────────────────────────────────────────────────
 
-class UNetDataModule:
-    """DataModule following the torchgeo notebook pattern.
+class ResNetDataModule:
+    """DataModule for patch-level classification with ResNet.
 
-    Uses a single pre-rasterized unified label GeoTIFF with spatial ROI-based
-    train/val/test splits. This avoids per-patch rasterization inconsistencies
-    at polygon boundaries and the interpolation artifacts from Kornia's
-    RandomRotation (which bilinearly interpolates integer mask values).
+    Each patch gets a single class label via majority vote over valid mask pixels
+    (those with value != -1 after 1-indexed → 0-indexed shift).
 
     Label convention:
     - LCZLabelDataset returns values 1-17 (1-indexed), 0 = nodata.
-    - Collate shifts by -1: classes 0-16, nodata -1 (= ignore_index in losses).
+    - Collate shifts by -1: classes 0-16, nodata -1 (= ignore_index in CE loss).
+    - Majority vote over valid pixels → single (N,) label tensor.
 
     Args:
         embedding_ds: GeoDataset providing embedding tensors.
         label_ds: LCZLabelDataset (RasterDataset with is_image=False).
-            Returns masks with values 1-17 (1-indexed) and 0 for nodata.
         train_roi: Shapely geometry restricting training sampler.
         val_roi: Shapely geometry restricting validation sampler.
         test_roi: Shapely geometry restricting test sampler.
@@ -333,7 +174,7 @@ class UNetDataModule:
         batch_size: Batch size for all loaders.
         length: Training patches per epoch (RandomBatchGeoSampler).
         num_workers: DataLoader worker processes.
-        augment: Apply random flips + exact 90° rotation during training.
+        augment: Apply random flips + 90° rotation to images during training.
     """
 
     def __init__(
@@ -359,31 +200,45 @@ class UNetDataModule:
         self.length = length
         self.num_workers = num_workers
         self.augment = augment
-        self.dataset: "IntersectionDataset | None" = None
+        self.dataset = None
 
     def setup(self) -> None:
-        # Single combined dataset; ROI restriction is handled by the samplers.
         self.dataset = self.embedding_ds & self.label_ds
+
+    @staticmethod
+    def _mask_to_label(mask: torch.Tensor) -> torch.Tensor:
+        """Convert (N, H, W) integer masks to (N,) labels via majority vote.
+
+        Args:
+            mask: (N, H, W) long tensor, values 0-16 or -1 (nodata).
+
+        Returns:
+            (N,) long tensor; -1 for all-nodata patches.
+        """
+        B = mask.shape[0]
+        flat = mask.view(B, -1)  # (B, H*W)
+        labels = torch.full((B,), -1, dtype=torch.long)
+        for i in range(B):
+            valid_pixels = flat[i][flat[i] != -1]
+            if valid_pixels.numel() > 0:
+                labels[i] = valid_pixels.mode().values
+        return labels
 
     @staticmethod
     def _collate(batch: list[dict]) -> dict:
         from torchgeo.datasets.utils import stack_samples
         collated = stack_samples(batch)
         if "mask" in collated:
-            # LCZLabelDataset: 1-17 (1-indexed), nodata=0.
-            # Shift: 1-17 → 0-16, nodata 0 → -1 (= ignore_index in losses).
-            collated["mask"] = collated["mask"].squeeze(1).long() - 1
+            # 1-17 → 0-16, nodata 0 → -1
+            mask = collated["mask"].squeeze(1).long() - 1  # (N, H, W)
+            collated["label"] = ResNetDataModule._mask_to_label(mask)
+            del collated["mask"]
         return collated
 
     def _train_collate(self, batch: list[dict]) -> dict:
         collated = self._collate(batch)
-        if not self.augment:
-            return collated
-        images, masks = augment_batch(
-            collated["image"].float(), collated["mask"]
-        )
-        collated["image"] = images
-        collated["mask"] = masks
+        if self.augment:
+            collated["image"] = augment_images(collated["image"].float())
         return collated
 
     def train_dataloader(self) -> DataLoader:
@@ -437,30 +292,26 @@ class UNetDataModule:
 
 # ─── Module ───────────────────────────────────────────────────────────────────
 
-class LCZUNetModule(nn.Module):
-    """nn.Module wrapping UNet for multiclass LCZ segmentation.
+class LCZResNetModule(nn.Module):
+    """nn.Module wrapping a timm ResNet for multiclass LCZ patch classification.
 
-    Loss: ``(1 − dice_weight) × CrossEntropy + dice_weight × MulticlassDice``
-    Both losses use ``ignore_index=-1`` to skip unlabeled pixels.
-
-    Metrics: val_miou (macro mIoU), val_acc (per-pixel accuracy).
+    Loss: CrossEntropyLoss with ignore_index=-1 (skips all-nodata patches).
+    Metrics: val_acc (top-1 accuracy), val_f1 (macro F1Score).
 
     Args:
-        model: UNet instance.
-        num_classes: Number of segmentation classes.
+        model: timm ResNet instance.
+        num_classes: Number of classification classes.
         lr: Adam learning rate.
         weight_decay: Adam L2 regularization.
-        dice_weight: Weighting of Dice loss (0 = CE only, 1 = Dice only).
         max_epochs: Total training epochs (used for CosineAnnealingLR T_max).
     """
 
     def __init__(
         self,
-        model: UNet,
+        model: nn.Module,
         num_classes: int,
         lr: float = 1e-3,
         weight_decay: float = 1e-4,
-        dice_weight: float = 0.5,
         max_epochs: int = 50,
     ) -> None:
         super().__init__()
@@ -468,49 +319,39 @@ class LCZUNetModule(nn.Module):
         self.num_classes = num_classes
         self.lr = lr
         self.weight_decay = weight_decay
-        self.dice_weight = dice_weight
         self.max_epochs = max_epochs
 
-        self.dice_loss = MulticlassDiceLoss(num_classes, ignore_index=-1)
         self.ce_loss = nn.CrossEntropyLoss(ignore_index=-1)
 
         metric_kw = dict(task="multiclass", num_classes=num_classes, ignore_index=-1)
-        self.val_miou = JaccardIndex(**metric_kw, average="macro")
-        self.val_acc = Accuracy(**metric_kw)
-        self.test_miou = JaccardIndex(**metric_kw, average="macro")
+        self.val_acc  = Accuracy(**metric_kw)
+        self.val_f1   = MulticlassF1Score(num_classes=num_classes, average="macro", ignore_index=-1)
         self.test_acc = Accuracy(**metric_kw)
+        self.test_f1  = MulticlassF1Score(num_classes=num_classes, average="macro", ignore_index=-1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x.float())
 
-    def _loss(
-        self, logits: torch.Tensor, masks: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        ce = self.ce_loss(logits, masks)
-        dice = self.dice_loss(logits, masks)
-        combined = (1.0 - self.dice_weight) * ce + self.dice_weight * dice
-        return combined, ce, dice
-
 
 # ─── Training Loop ────────────────────────────────────────────────────────────
 
-def _run_unet_training_loop(
-    task_module: LCZUNetModule,
-    datamodule: UNetDataModule,
+def _run_resnet_training_loop(
+    task_module: LCZResNetModule,
+    datamodule: ResNetDataModule,
     device: torch.device,
     max_epochs: int,
     early_stopping_patience: int,
     run_dir: Path,
     model_name: str,
-) -> tuple[LCZUNetModule, Path | None]:
-    """Run the pure-PyTorch training loop for a LCZUNetModule.
+) -> tuple[LCZResNetModule, Path | None]:
+    """Run the pure-PyTorch training loop for a LCZResNetModule.
 
     Args:
-        task_module: The LCZUNetModule to train (moved to device inside).
-        datamodule: UNetDataModule (setup() called inside).
+        task_module: The LCZResNetModule to train (moved to device inside).
+        datamodule: ResNetDataModule (setup() called inside).
         device: Device to train on.
         max_epochs: Maximum number of epochs.
-        early_stopping_patience: Stop after this many epochs without val_miou improvement.
+        early_stopping_patience: Stop after this many epochs without val_f1 improvement.
         run_dir: Directory to save checkpoints.
         model_name: Stem for checkpoint filename.
 
@@ -520,90 +361,91 @@ def _run_unet_training_loop(
     import wandb
 
     task_module = task_module.to(device)
-    opt = torch.optim.Adam(task_module.parameters(), lr=task_module.lr, weight_decay=task_module.weight_decay)
+    opt = torch.optim.Adam(
+        task_module.parameters(), lr=task_module.lr, weight_decay=task_module.weight_decay
+    )
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max_epochs)
 
     datamodule.setup()
     train_loader = datamodule.train_dataloader()
     val_loader = datamodule.val_dataloader()
 
-    best_miou = -1.0
+    best_f1 = -1.0
     patience_counter = 0
     best_ckpt_path: Path | None = None
 
     for epoch in range(max_epochs):
         # ── Train ─────────────────────────────────────────────────────────
         task_module.train()
-        train_total_loss = train_ce = train_dice = 0.0
+        train_loss = 0.0
         n_valid = 0
         for batch in train_loader:
             images = batch["image"].to(device).float()
-            masks = batch["mask"].to(device)
-            # Skip all-nodata batches (CE returns NaN when every pixel is ignored)
-            if (masks != -1).sum() == 0:
+            labels = batch["label"].to(device)
+            # Skip all-nodata batches
+            if (labels != -1).sum() == 0:
                 continue
             opt.zero_grad()
             logits = task_module.model(images)
-            loss, ce, dice = task_module._loss(logits, masks)
+            loss = task_module.ce_loss(logits, labels)
             if torch.isnan(loss):
                 continue
             loss.backward()
             opt.step()
-            train_total_loss += loss.item()
-            train_ce += ce.item() if not torch.isnan(ce) else 0.0
-            train_dice += dice.item()
+            train_loss += loss.item()
             n_valid += 1
-        n = max(1, n_valid)
-        train_total_loss /= n
-        train_ce /= n
-        train_dice /= n
+        train_loss /= max(1, n_valid)
 
         # ── Validate ───────────────────────────────────────────────────────
         task_module.eval()
-        task_module.val_miou.reset()
         task_module.val_acc.reset()
+        task_module.val_f1.reset()
         val_loss = 0.0
         n_val = 0
         with torch.no_grad():
             for batch in val_loader:
                 images = batch["image"].to(device).float()
-                masks = batch["mask"].to(device)
+                labels = batch["label"].to(device)
+                if (labels != -1).sum() == 0:
+                    continue
                 logits = task_module.model(images)
-                loss, _, _ = task_module._loss(logits, masks)
+                loss = task_module.ce_loss(logits, labels)
                 preds = logits.argmax(dim=1)
-                task_module.val_miou(preds, masks)
-                task_module.val_acc(preds, masks)
+                task_module.val_acc(preds, labels)
+                task_module.val_f1(preds, labels)
                 val_loss += loss.item()
                 n_val += 1
         val_loss /= max(1, n_val)
-        val_miou = task_module.val_miou.compute().item()
         val_acc = task_module.val_acc.compute().item()
+        val_f1  = task_module.val_f1.compute().item()
         sched.step()
 
         if wandb.run:
             wandb.log({
-                "train_loss": train_total_loss,
-                "train_ce": train_ce,
-                "train_dice": train_dice,
-                "val_loss": val_loss,
-                "val_miou": val_miou,
-                "val_acc": val_acc,
-                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "val_loss":   val_loss,
+                "val_acc":    val_acc,
+                "val_f1":     val_f1,
+                "epoch":      epoch + 1,
             })
         logger.info(
             f"Epoch {epoch+1}/{max_epochs}  "
-            f"loss={train_total_loss:.4f}  val_miou={val_miou:.4f}  val_acc={val_acc:.4f}"
+            f"loss={train_loss:.4f}  val_f1={val_f1:.4f}  val_acc={val_acc:.4f}"
         )
 
-        if val_miou > best_miou:
-            best_miou = val_miou
+        if val_f1 > best_f1:
+            best_f1 = val_f1
             patience_counter = 0
             best_ckpt_path = run_dir / f"{model_name}-best.pt"
             torch.save(
-                {"model_state_dict": task_module.model.state_dict(), "epoch": epoch + 1, "val_miou": val_miou},
+                {
+                    "model_state_dict": task_module.model.state_dict(),
+                    "epoch": epoch + 1,
+                    "val_f1": val_f1,
+                },
                 best_ckpt_path,
             )
-            logger.info(f"  → New best (val_miou={val_miou:.4f}), checkpoint saved")
+            logger.info(f"  → New best (val_f1={val_f1:.4f}), checkpoint saved")
         else:
             patience_counter += 1
             if patience_counter >= early_stopping_patience:
@@ -613,33 +455,30 @@ def _run_unet_training_loop(
     if best_ckpt_path and best_ckpt_path.exists():
         ckpt = torch.load(best_ckpt_path, map_location=device)
         task_module.model.load_state_dict(ckpt["model_state_dict"])
-        logger.info(f"Loaded best model (val_miou={ckpt['val_miou']:.4f}) from {best_ckpt_path}")
+        logger.info(f"Loaded best model (val_f1={ckpt['val_f1']:.4f}) from {best_ckpt_path}")
 
     return task_module, best_ckpt_path
 
 
 # ─── ROI Prediction ──────────────────────────────────────────────────────────
 
-def predict_unet_roi(
-    task_module: "LCZUNetModule",
+def predict_resnet_roi(
+    task_module: LCZResNetModule,
     embedding_ds: GeoDataset,
     patch_size: int,
     batch_size: int,
     num_workers: int,
     roi=None,
     stride: int | None = None,
-    output_path: str | Path = "unet_prediction.tif",
-    tile_border_trim: int | tuple[int, int, int, int] = 0,
+    output_path: str | Path = "resnet_prediction.tif",
 ) -> Path:
-    """Run U-Net over the full embedding ROI and write a GeoTIFF.
+    """Run ResNet over the full embedding ROI and write a GeoTIFF.
 
-    Mirrors the torchgeo notebook inference pattern exactly:
-    - GridGeoSampler over embedding_ds (not intersection dataset)
-    - Direct argmax placement (no softmax, no probability averaging)
-    - embedding_ds.res[0] as the single canonical resolution
+    Each patch receives a single predicted class. All pixels in the patch's
+    bounding box are filled with that class value.
 
     Args:
-        task_module: Trained LCZUNetModule (eval mode set internally).
+        task_module: Trained LCZResNetModule (eval mode set internally).
         embedding_ds: GeoDataset providing embedding tensors.
         patch_size: Square patch size in pixels (must match training).
         batch_size: Inference batch size.
@@ -677,14 +516,9 @@ def predict_unet_roi(
     device = next(task_module.parameters()).device
     task_module.eval()
 
-    # Use dataset resolution directly — avoids floating-point drift from
-    # deriving res from individual patch bounds across tile boundaries.
     res = embedding_ds.res[0]
 
-    # Single-pass inference following the torchgeo notebook pattern exactly.
-    # batch["bounds"] from stack_samples is a (N, 9) tensor:
-    #   [minx, maxx, xstep, miny, maxy, ystep, mint, maxt, tstep]
-    # Tuple stored as: (pred_hw, minx, miny, maxx, maxy)
+    # (pred_class, minx, miny, maxx, maxy)
     patch_results: list[tuple] = []
 
     total = len(sampler) // batch_size + int(len(sampler) % batch_size > 0)
@@ -693,14 +527,14 @@ def predict_unet_roi(
     with torch.no_grad():
         for i, batch in enumerate(loader):
             imgs = batch["image"].to(device).float()
-            preds = task_module.model(imgs).argmax(dim=1).cpu().numpy()  # (N, H, W)
+            preds = task_module.model(imgs).argmax(dim=1).cpu().numpy()  # (N,)
             bounds = batch["bounds"]  # (N, 9) tensor
             for j in range(preds.shape[0]):
                 minx = float(bounds[j, 0])
                 maxx = float(bounds[j, 1])
                 miny = float(bounds[j, 3])
                 maxy = float(bounds[j, 4])
-                patch_results.append((preds[j], minx, miny, maxx, maxy))
+                patch_results.append((int(preds[j]), minx, miny, maxx, maxy))
             if (i + 1) % 200 == 0:
                 logger.info(f"  {i + 1}/{total} batches done")
 
@@ -716,26 +550,15 @@ def predict_unet_roi(
     out_h = int(round((all_maxy - all_miny) / res))
     raster = np.full((out_h, out_w), fill_value=-1, dtype=np.int16)
 
-    for pred, minx, miny, maxx, maxy in patch_results:
-        col = int(round((minx - all_minx) / res))
-        row = int(round((all_maxy - maxy) / res))
-        ph, pw = pred.shape
-        raster[row:row + ph, col:col + pw] = pred
-
-    # Apply tile-border fill if requested — replaces contaminated tile-edge
-    # predictions with nearest interior prediction via distance transform.
-    # Same fix as _fill_tile_borders() in sklearn_pixel.py.
-    if tile_border_trim:
-        from models.sklearn_pixel import _fill_tile_borders
-        trim_px = tile_border_trim if isinstance(tile_border_trim, tuple) else (tile_border_trim,) * 4
-        # raster is int16 with -1=nodata; convert to uint8 temporarily for the fill
-        # (values are 0-indexed class ids 0..num_classes-1)
-        fill_raster = np.where(raster >= 0, raster, 0).astype(np.uint8)
-        fill_raster = _fill_tile_borders(
-            fill_raster, embedding_ds.index.geometry,
-            all_minx, all_maxy, out_h, out_w, res, res, trim_px,
-        )
-        raster = np.where(raster >= 0, fill_raster.astype(np.int16), raster)
+    for cls, minx, miny, maxx, maxy in patch_results:
+        col     = int(round((minx - all_minx) / res))
+        row     = int(round((all_maxy - maxy) / res))
+        ph      = int(round((maxy - miny) / res))
+        pw      = int(round((maxx - minx) / res))
+        # Clamp to raster bounds
+        row_end = min(row + ph, out_h)
+        col_end = min(col + pw, out_w)
+        raster[row:row_end, col:col_end] = cls
 
     # Export 1-indexed classes (0 = nodata)
     export_raster = np.where(raster >= 0, raster + 1, 0).astype(np.uint8)
@@ -769,17 +592,14 @@ def train(
     train_frac: float = typer.Option(0.70, help="Fraction of cities for training (city mode only)"),
     val_frac: float = typer.Option(0.15, help="Fraction of cities for validation (city mode only)"),
     # Model
-    preset: str = typer.Option("small", help="U-Net size preset: nano, small, base, medium, large"),
-    depth: int | None = typer.Option(None, help="Override preset encoder depth"),
-    base_features: int | None = typer.Option(None, help="Override preset base feature count"),
-    bottleneck_dropout: float = typer.Option(0.3, help="Dropout2d rate at the bottleneck block"),
-    num_classes: int = typer.Option(17, help="Number of LCZ segmentation classes"),
-    # Loss
-    dice_weight: float = typer.Option(0.5, help="Dice loss weight (0=CE only, 1=Dice only)"),
+    preset: str = typer.Option("base", help="ResNet size preset: nano (resnet18), small (resnet34), base (resnet50), medium (resnet101), large (resnet152)"),
+    arch: str | None = typer.Option(None, help="Override preset: any timm model name (e.g. resnet50, resnext50_32x4d)"),
+    head_dropout: float = typer.Option(0.0, help="Dropout probability before the final linear layer"),
+    num_classes: int = typer.Option(17, help="Number of LCZ classification classes"),
     # Training
-    patch_size: int = typer.Option(64, help="Square patch size in pixels"),
-    batch_size: int = typer.Option(8, help="Training and evaluation batch size"),
-    length: int = typer.Option(500, help="Training patches per epoch (RandomBatchGeoSampler)"),
+    patch_size: int = typer.Option(32, help="Square patch size in pixels"),
+    batch_size: int = typer.Option(32, help="Training and evaluation batch size"),
+    length: int = typer.Option(1000, help="Training patches per epoch (RandomBatchGeoSampler)"),
     num_workers: int = typer.Option(4, help="DataLoader worker processes"),
     augment: bool = typer.Option(True, help="Random flips + 90° rotation during training"),
     lr: float = typer.Option(1e-3, help="Adam learning rate"),
@@ -790,14 +610,14 @@ def train(
     test_size: float = typer.Option(0.15, help="Fraction of x range for test (spatial mode)"),
     seed: int = typer.Option(411, help="Random seed for city-mode shuffling"),
     # Callbacks
-    early_stopping_patience: int = typer.Option(10, help="EarlyStopping patience (monitors val_miou)"),
+    early_stopping_patience: int = typer.Option(10, help="EarlyStopping patience (monitors val_f1)"),
     accelerator: str = typer.Option("auto", help="Device: auto, gpu, cpu"),
     output_dir: str | None = typer.Option(None, help="Directory for checkpoint files"),
     # Logging
     wandb_project: str = typer.Option("lcz-classification-dl", help="WandB project name"),
     no_wandb: bool = typer.Option(False, "--no-wandb", help="Disable WandB logging"),
 ) -> None:
-    """Train a U-Net segmentation model for LCZ classification."""
+    """Train a ResNet classification model for LCZ patch classification."""
     import datetime
     import random
 
@@ -824,7 +644,7 @@ def train(
     embedding_res = float(raw_res[0]) if hasattr(raw_res, "__len__") else float(raw_res)
     logger.info(f"Embedding: {in_channels} channels, res={embedding_res:.8f} CRS units/px")
 
-    # ── Labels: rasterize vector file(s) into a unified GeoTIFF ─────────────
+    # ── Labels ────────────────────────────────────────────────────────────────
     import tempfile
 
     if not label_path:
@@ -833,7 +653,7 @@ def train(
     for lp in label_path:
         if Path(lp).suffix.lower() not in (".gpkg", ".geojson", ".shp", ".json"):
             raise typer.BadParameter(
-                f"train_unet.py only supports vector labels (.gpkg / .geojson / .shp). "
+                f"train_resnet.py only supports vector labels (.gpkg / .geojson / .shp). "
                 f"Got: {lp}"
             )
 
@@ -846,7 +666,6 @@ def train(
         train_paths, val_paths, test_paths = assign_cities_by_fraction(
             label_path, train_frac=train_frac, val_frac=val_frac, seed=seed
         )
-        # Load each split's GDFs separately and rasterize together for the label dataset.
         train_gdf = concat_label_gdfs(train_paths, label_column, embedding_ds.crs)
         val_gdf   = concat_label_gdfs(val_paths,   label_column, embedding_ds.crs) if val_paths else None
         test_gdf  = concat_label_gdfs(test_paths,  label_column, embedding_ds.crs) if test_paths else None
@@ -860,7 +679,6 @@ def train(
             f"{len(test_gdf) if test_gdf is not None else 0} test polygons"
         )
 
-        # Rasterize each city into its own TIF — avoids one giant raster spanning multiple UTM zones.
         label_tmp_dir = Path(tempfile.mkdtemp(prefix="eo_fm_labels_"))
         all_paths = list(train_paths) + list(val_paths or []) + list(test_paths or [])
         gdf = rasterize_city_paths(
@@ -895,7 +713,7 @@ def train(
         paths=label_tmp_dir, crs=embedding_ds.crs, res=embedding_ds.res
     )
 
-    datamodule = UNetDataModule(
+    datamodule = ResNetDataModule(
         embedding_ds=embedding_ds,
         label_ds=label_ds,
         train_roi=train_roi,
@@ -908,30 +726,23 @@ def train(
         augment=augment,
     )
 
-    # ── U-Net model ───────────────────────────────────────────────────────────
-    d, bf = UNet.PRESETS.get(preset, (3, 32))
-    if depth is not None:
-        d = depth
-    if base_features is not None:
-        bf = base_features
-
-    logger.info(f"Building U-Net: preset={preset}, depth={d}, base_features={bf}")
-    model = UNet(
+    # ── ResNet model ──────────────────────────────────────────────────────────
+    arch_name = arch if arch else RESNET_PRESETS.get(preset, "resnet50")
+    logger.info(f"Building ResNet: preset={preset}, arch={arch_name}, head_dropout={head_dropout}")
+    model = build_resnet(
+        arch=arch_name,
         in_channels=in_channels,
         num_classes=num_classes,
-        depth=d,
-        base_features=bf,
-        bottleneck_dropout=bottleneck_dropout,
+        head_dropout=head_dropout,
     )
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"U-Net trainable parameters: {n_params:,}")
+    logger.info(f"ResNet trainable parameters: {n_params:,}")
 
-    task_module = LCZUNetModule(
+    task_module = LCZResNetModule(
         model=model,
         num_classes=num_classes,
         lr=lr,
         weight_decay=weight_decay,
-        dice_weight=dice_weight,
         max_epochs=max_epochs,
     )
 
@@ -939,13 +750,12 @@ def train(
     run_config = {
         "embedding": embedding,
         "preset": preset,
-        "depth": d,
-        "base_features": bf,
+        "arch": arch_name,
+        "head_dropout": head_dropout,
         "num_classes": num_classes,
         "patch_size": patch_size,
         "lr": lr,
         "weight_decay": weight_decay,
-        "dice_weight": dice_weight,
         "max_epochs": max_epochs,
         "n_params": n_params,
     }
@@ -962,7 +772,7 @@ def train(
         f"W{bbox_tuple[0]:.1f}_S{bbox_tuple[1]:.1f}_E{bbox_tuple[2]:.1f}_N{bbox_tuple[3]:.1f}"
         if bbox_tuple else "global"
     )
-    base_out = Path(output_dir) if output_dir else Path("/tmp/unet_runs")
+    base_out = Path(output_dir) if output_dir else Path("/tmp/resnet_runs")
     run_dir = base_out / f"{embedding}_{year_str}_{bbox_str}_{run_name}"
     run_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Run directory: {run_dir}")
@@ -975,53 +785,53 @@ def train(
 
     # ── Training loop ─────────────────────────────────────────────────────────
     logger.info("Starting training …")
-    task_module, best_ckpt_path = _run_unet_training_loop(
+    task_module, best_ckpt_path = _run_resnet_training_loop(
         task_module=task_module,
         datamodule=datamodule,
         device=device,
         max_epochs=max_epochs,
         early_stopping_patience=early_stopping_patience,
         run_dir=run_dir,
-        model_name=f"unet-{preset}",
+        model_name=f"resnet-{preset}",
     )
 
     # ── Test evaluation ────────────────────────────────────────────────────────
     logger.info("Running test evaluation …")
-    # Ensure test_dataset is set up (setup() was called inside training loop)
     task_module.eval()
-    task_module.test_miou.reset()
     task_module.test_acc.reset()
+    task_module.test_f1.reset()
     test_preds: list[torch.Tensor] = []
-    test_labels: list[torch.Tensor] = []
+    test_labels_list: list[torch.Tensor] = []
     test_loss_total = 0.0
-    n_test = 0
+    n_test_batches = 0
 
     with torch.no_grad():
         for batch in datamodule.test_dataloader():
             images = batch["image"].to(device).float()
-            masks = batch["mask"].to(device)
+            labels = batch["label"].to(device)
+            if (labels != -1).sum() == 0:
+                continue
             logits = task_module.model(images)
-            loss, _, _ = task_module._loss(logits, masks)
+            loss = task_module.ce_loss(logits, labels)
             preds = logits.argmax(dim=1)
-            task_module.test_miou(preds, masks)
-            task_module.test_acc(preds, masks)
+            task_module.test_acc(preds, labels)
+            task_module.test_f1(preds, labels)
             test_loss_total += loss.item()
-            n_test += 1
+            n_test_batches += 1
             test_preds.append(preds.cpu())
-            test_labels.append(masks.cpu())
+            test_labels_list.append(labels.cpu())
 
-    test_loss = test_loss_total / max(1, n_test)
-    test_miou = task_module.test_miou.compute().item()
-    test_acc = task_module.test_acc.compute().item()
-    logger.info(f"Test results: loss={test_loss:.4f}  miou={test_miou:.4f}  acc={test_acc:.4f}")
+    test_loss = test_loss_total / max(1, n_test_batches)
+    test_acc  = task_module.test_acc.compute().item()
+    test_f1   = task_module.test_f1.compute().item()
+    logger.info(f"Test results: loss={test_loss:.4f}  f1={test_f1:.4f}  acc={test_acc:.4f}")
 
     if wandb.run:
-        wandb.log({"test_loss": test_loss, "test_miou": test_miou, "test_acc": test_acc})
+        wandb.log({"test_loss": test_loss, "test_acc": test_acc, "test_f1": test_f1})
 
-    # Log confusion matrix from test predictions
     if wandb.run and test_preds:
         y_pred_all = torch.cat(test_preds).numpy().ravel()
-        y_true_all = torch.cat(test_labels).numpy().ravel()
+        y_true_all = torch.cat(test_labels_list).numpy().ravel()
         valid = y_true_all != -1
         if valid.sum() > 0:
             from utils.wandb import log_confusion_matrix
@@ -1034,18 +844,18 @@ def train(
     # ── WandB artifact ────────────────────────────────────────────────────────
     if not no_wandb and best_ckpt_path:
         artifact = wandb.Artifact(
-            name=f"unet-{run_name}",
+            name=f"resnet-{run_name}",
             type="model",
             metadata=run_config,
         )
         artifact.add_file(str(best_ckpt_path))
         wandb.log_artifact(artifact)
-        logger.info(f"Logged model artifact: unet-{run_name}")
+        logger.info(f"Logged model artifact: resnet-{run_name}")
 
     # ── ROI prediction ────────────────────────────────────────────────────────
-    pred_output = run_dir / f"{run_dir.name}_unet-{preset}-segmentation-prediction.tif"
+    pred_output = run_dir / f"{run_dir.name}_resnet-{preset}-classification-prediction.tif"
     logger.info(f"Running ROI prediction → {pred_output}")
-    predict_unet_roi(
+    predict_resnet_roi(
         task_module=task_module,
         embedding_ds=embedding_ds,
         patch_size=patch_size,
@@ -1066,27 +876,24 @@ def predict(
     checkpoint_path: str = typer.Option(..., help="Path to .pt checkpoint file"),
     embedding: str = typer.Option(..., help="Embedding name: tessera, alpha_earth, seamless"),
     embedding_path: str = typer.Option(..., help="Path to embedding data directory"),
-    preset: str = typer.Option("small", help="U-Net preset used at training time"),
-    depth: int | None = typer.Option(None, help="Override preset depth (must match training)"),
-    base_features: int | None = typer.Option(None, help="Override preset base features (must match training)"),
-    bottleneck_dropout: float = typer.Option(0.3, help="Bottleneck dropout (must match training)"),
+    preset: str = typer.Option("base", help="ResNet preset used at training time"),
+    arch: str | None = typer.Option(None, help="Override preset: timm model name (must match training)"),
+    head_dropout: float = typer.Option(0.0, help="Head dropout (must match training)"),
     num_classes: int = typer.Option(17, help="Number of classes (must match training)"),
     bbox: str | None = typer.Option(None, help="ROI 'west,south,east,north' (EPSG:4326)"),
     year: int | None = typer.Option(None, help="Year for temporal filtering"),
-    patch_size: int = typer.Option(64, help="Patch size in pixels (must match training)"),
+    patch_size: int = typer.Option(32, help="Patch size in pixels (must match training)"),
     stride: int | None = typer.Option(None, help="Grid stride in pixels; defaults to patch_size"),
-    batch_size: int = typer.Option(8, help="Inference batch size"),
+    batch_size: int = typer.Option(32, help="Inference batch size"),
     num_workers: int = typer.Option(4, help="DataLoader workers"),
-    output_path: str | None = typer.Option(None, help="Output GeoTIFF path. Defaults to <checkpoint_dir>/<checkpoint_dir.name>_unet-<preset>-segmentation-prediction.tif"),
+    output_path: str | None = typer.Option(None, help="Output GeoTIFF path. Defaults to <checkpoint_dir>/<checkpoint_dir.name>_resnet-<preset>-classification-prediction.tif"),
     accelerator: str = typer.Option("auto", help="Device: auto, gpu, cpu"),
     wandb_project: str = typer.Option("lcz-classification-dl", help="WandB project name"),
-    tile_border_trim: str = typer.Option("0", help="Pixels to trim near tessera tile edges before nearest-interior fill. Single int N or 'N,S,E,W'."),
     no_wandb: bool = typer.Option(False, "--no-wandb", help="Disable WandB logging"),
 ) -> None:
-    """Load a U-Net checkpoint and predict over the full ROI."""
+    """Load a ResNet checkpoint and predict over the full ROI."""
     import wandb
 
-    # ── Embedding dataset ────────────────────────────────────────────────────
     bbox_tuple: tuple[float, float, float, float] | None = None
     if bbox:
         parts = [float(v) for v in bbox.split(",")]
@@ -1096,31 +903,23 @@ def predict(
 
     logger.info(f"Loading {embedding} embeddings from {embedding_path}")
     embedding_ds = create_embedding_dataset(embedding, embedding_path, bbox=bbox_tuple)
-
-    # ── Reconstruct model (same architecture as training) ────────────────────
     in_channels = get_in_channels(embedding)
-    d, bf = UNet.PRESETS.get(preset, (3, 32))
-    if depth is not None:
-        d = depth
-    if base_features is not None:
-        bf = base_features
 
-    model = UNet(
+    # ── Reconstruct model ────────────────────────────────────────────────────
+    arch_name = arch if arch else RESNET_PRESETS.get(preset, "resnet50")
+    model = build_resnet(
+        arch=arch_name,
         in_channels=in_channels,
         num_classes=num_classes,
-        depth=d,
-        base_features=bf,
-        bottleneck_dropout=bottleneck_dropout,
+        head_dropout=head_dropout,
     )
-    task_module = LCZUNetModule(model=model, num_classes=num_classes)
+    task_module = LCZResNetModule(model=model, num_classes=num_classes)
 
-    # Load checkpoint — support both new (.pt) and legacy Lightning (.ckpt) formats
     ckpt = torch.load(checkpoint_path, map_location="cpu")
     state_dict = ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
     task_module.model.load_state_dict(state_dict)
     logger.info(f"Loaded checkpoint: {checkpoint_path}")
 
-    # Move to device
     device = torch.device(
         "cuda" if torch.cuda.is_available() and accelerator != "cpu" else "cpu"
     )
@@ -1144,23 +943,22 @@ def predict(
     if not no_wandb:
         wandb.init(
             project=wandb_project,
-            config={"checkpoint": checkpoint_path, "embedding": embedding,
-                    "preset": preset, "depth": d, "base_features": bf, "bbox": bbox},
+            config={
+                "checkpoint": checkpoint_path,
+                "embedding": embedding,
+                "preset": preset,
+                "arch": arch_name,
+                "bbox": bbox,
+            },
         )
 
     # ── Resolve output path ───────────────────────────────────────────────────
     ckpt_dir = Path(checkpoint_path).parent
-    pred_name = f"{ckpt_dir.name}_unet-{preset}-segmentation-prediction.tif"
+    pred_name = f"{ckpt_dir.name}_resnet-{preset}-classification-prediction.tif"
     resolved_output = Path(output_path) if output_path else ckpt_dir / pred_name
 
-    # Parse tile_border_trim
-    _trim_parts = [int(v) for v in tile_border_trim.split(",")]
-    trim: int | tuple[int, int, int, int] = (
-        tuple(_trim_parts) if len(_trim_parts) == 4 else _trim_parts[0]  # type: ignore[assignment]
-    )
-
     # ── Predict ──────────────────────────────────────────────────────────────
-    pred_path = predict_unet_roi(
+    pred_path = predict_resnet_roi(
         task_module=task_module,
         embedding_ds=embedding_ds,
         patch_size=patch_size,
@@ -1169,7 +967,6 @@ def predict(
         roi=roi,
         stride=stride,
         output_path=resolved_output,
-        tile_border_trim=trim,
     )
 
     if not no_wandb:

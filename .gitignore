@@ -11,3 +11,4 @@ lightning_logs/
 .env
 CLAUDE.md
 wandb/
+/cache

@@ -151,7 +151,13 @@ def download_alpha_earth(
                 date_end=f"{year}-12-31",
                 bbox=tile_bbox,
             )
-            ds = get_ic_as_xr(ic, bbox=tile_bbox, utm_crs=str(utm_crs), scale=10)
+            try:
+                ds = get_ic_as_xr(ic, bbox=tile_bbox, utm_crs=str(utm_crs), scale=10)
+            except TypeError:
+                # GEE returned an empty ImageCollection for this tile (no data / ocean)
+                logger.debug(f"No GEE data for tile {stem}, skipping")
+                skipped += 1
+                continue
 
             # Stack all bands into a single DataArray
             band_names = list(ds.data_vars)
