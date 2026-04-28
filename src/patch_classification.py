@@ -152,10 +152,12 @@ class PatchDataset(Dataset):
         patch_size: int,
         sub_patch_size: int | None = None,
         sub_patch_stride: int | None = None,
+        dequantize: bool = False,
     ) -> None:
         self.patch_size = patch_size
         self.sub_patch_size = sub_patch_size
         self.sub_patch_stride = sub_patch_stride or sub_patch_size
+        self.dequantize = dequantize
 
         if sub_patch_size is None:
             self.expanded = [(path, label, None, None) for path, label, _ in items]
@@ -176,6 +178,8 @@ class PatchDataset(Dataset):
 
         arr = np.load(path).astype(np.float32)   # (C, H, W)
         arr = np.nan_to_num(arr, nan=0.0)
+        if self.dequantize:
+            arr = np.sign(arr) * (np.abs(arr) / 127.5) ** 2
 
         if r is None:
             image = torch.from_numpy(arr)
@@ -210,6 +214,7 @@ class PatchDataModule:
         num_workers: int,
         sub_patch_size: int | None = None,
         sub_patch_stride: int | None = None,
+        dequantize: bool = False,
     ) -> None:
         self.all_items = all_items
         self.patch_size = patch_size
@@ -217,12 +222,14 @@ class PatchDataModule:
         self.num_workers = num_workers
         self.sub_patch_size = sub_patch_size
         self.sub_patch_stride = sub_patch_stride
+        self.dequantize = dequantize
 
     def setup(self) -> None:
         def _for_split(s: str) -> list:
             return [it for it in self.all_items if it[2] == s]
 
-        kw = dict(sub_patch_size=self.sub_patch_size, sub_patch_stride=self.sub_patch_stride)
+        kw = dict(sub_patch_size=self.sub_patch_size, sub_patch_stride=self.sub_patch_stride,
+                  dequantize=self.dequantize)
         self._train_ds = PatchDataset(_for_split("train"), self.patch_size, **kw)
         self._val_ds   = PatchDataset(_for_split("val"),   self.patch_size, **kw)
         self._test_ds  = PatchDataset(_for_split("test"),  self.patch_size, **kw)
@@ -309,6 +316,7 @@ def _infer_city_resnet(
     batch_size: int = 64,
     sub_patch_size: int | None = None,
     sub_patch_stride: int | None = None,
+    dequantize: bool = False,
 ) -> tuple[np.ndarray, str, object]:
     """Run ResNet inference over all grid tiles for one city (sliding window).
 
@@ -355,6 +363,8 @@ def _infer_city_resnet(
     with torch.no_grad():
         for npy_path, gid in all_tiles:
             arr = np.load(npy_path).astype(np.float32)  # (C, H, W)
+            if dequantize:
+                arr = np.sign(arr) * (np.abs(arr) / 127.5) ** 2
             C, H, W = arr.shape
             pred_tile = np.zeros((H, W), dtype=np.uint8)
 
@@ -463,6 +473,10 @@ def main() -> None:
                    help="Disable WandB logging.")
     g.add_argument("--run-name", default=None,
                    help="Optional WandB run name override.")
+    g.add_argument("--dequantize", action="store_true",
+                   help="Apply AlphaEarth dequantisation (sign(v)×(|v|/127.5)²) when loading npy patches.")
+    g.add_argument("--checkpoint", type=Path, default=None,
+                   help="Load model weights from this .pt file and skip training (inference only).")
 
     args = parser.parse_args()
 
@@ -537,6 +551,7 @@ def main() -> None:
         all_items, args.patch_size, args.batch_size, args.num_workers,
         sub_patch_size=args.sub_patch_size,
         sub_patch_stride=args.sub_patch_stride,
+        dequantize=args.dequantize,
     )
 
     # ── WandB ─────────────────────────────────────────────────────────────────
@@ -580,16 +595,23 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     model_name = f"resnet_{args.preset}_{args.output_name}_{'_'.join(city_names[:3])}"
 
-    # ── Train ─────────────────────────────────────────────────────────────────
-    task, ckpt_path = _run_resnet_training_loop(
-        task_module=task,
-        datamodule=datamodule,
-        device=device,
-        max_epochs=args.max_epochs,
-        early_stopping_patience=args.early_stopping_patience,
-        run_dir=run_dir,
-        model_name=model_name,
-    )
+    # ── Train (or load checkpoint) ────────────────────────────────────────────
+    if args.checkpoint is not None:
+        logger.info(f"Loading checkpoint: {args.checkpoint}")
+        ckpt = torch.load(args.checkpoint, map_location=device)
+        task.model.load_state_dict(ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt)
+        task = task.to(device)
+        ckpt_path = args.checkpoint
+    else:
+        task, ckpt_path = _run_resnet_training_loop(
+            task_module=task,
+            datamodule=datamodule,
+            device=device,
+            max_epochs=args.max_epochs,
+            early_stopping_patience=args.early_stopping_patience,
+            run_dir=run_dir,
+            model_name=model_name,
+        )
     logger.info(f"Best checkpoint: {ckpt_path}")
 
     # ── Test evaluation ────────────────────────────────────────────────────────
@@ -664,6 +686,7 @@ def main() -> None:
             args.patch_size, device, args.batch_size,
             sub_patch_size=args.sub_patch_size,
             sub_patch_stride=args.sub_patch_stride,
+            dequantize=args.dequantize,
         )
         if raster is None:
             continue

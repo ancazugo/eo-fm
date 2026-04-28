@@ -43,6 +43,7 @@ from tqdm import tqdm
 def _build_tile_index(
     embedding_dir: Path,
     embedding_name: str,
+    year: str | None = None,
 ) -> tuple[list[Path], STRtree]:
     """Glob the embedding directory once and build an STRtree over tile bboxes.
 
@@ -53,6 +54,43 @@ def _build_tile_index(
     # Import here so sys.path adjustments made before the call take effect.
     from datasets.registry import EMBEDDING_REGISTRY
 
+    # ── coop: spatial index from aef_index.gpkg ──────────────────────────────
+    if embedding_name == "alpha_earth_coop":
+        import geopandas as gpd
+
+        index_path = embedding_dir / "aef_index.gpkg"
+        if not index_path.exists():
+            raise FileNotFoundError(
+                f"aef_index.gpkg not found at {index_path}. "
+                "Pass the coop root directory (containing aef_index.gpkg) as --embedding-dir."
+            )
+        read_kwargs: dict = {}
+        if year is not None:
+            read_kwargs["where"] = f"year = {int(year)}"
+        gdf = gpd.read_file(index_path, **read_kwargs)
+
+        _s3_prefix = "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/"
+        paths: list[Path] = []
+        geoms = []
+        for _, row in gdf.iterrows():
+            local = embedding_dir / row["path"].removeprefix(_s3_prefix)
+            if not local.exists():
+                continue
+            geoms.append(box(
+                row["wgs84_west"], row["wgs84_south"],
+                row["wgs84_east"], row["wgs84_north"],
+            ))
+            paths.append(local)
+
+        if not paths:
+            raise FileNotFoundError(
+                f"No local coop tiles found under {embedding_dir} for year={year}. "
+                "Run 'python src/cli.py download-coop' first."
+            )
+        logger.info(f"Tile index (coop): {len(paths)} local tiles from {index_path}")
+        return paths, STRtree(geoms)
+
+    # ── zarr / tif: spatial index from filename patterns ─────────────────────
     meta = EMBEDDING_REGISTRY.get(embedding_name, {})
     pattern = meta.get("zarr_filename_pattern")
     tile_size = meta.get("zarr_tile_size")
@@ -66,7 +104,7 @@ def _build_tile_index(
 
     regex = re.compile(pattern)
     half = tile_size / 2
-    paths: list[Path] = []
+    paths = []
     geoms = []
 
     all_files = sorted(embedding_dir.glob("*.zarr")) + sorted(embedding_dir.glob("*.tif"))
@@ -108,7 +146,7 @@ def _open_tile(path: Path) -> xr.DataArray:
             if crs_wkt:
                 da = da.rio.write_crs(crs_wkt)
     else:
-        da = rxr.open_rasterio(path, chunks=False)
+        da = rxr.open_rasterio(path)
 
     return da
 
@@ -251,7 +289,7 @@ def main() -> None:
     parser.add_argument(
         "--embedding-name",
         required=True,
-        choices=["tessera", "alpha_earth"],
+        choices=["tessera", "alpha_earth", "alpha_earth_coop"],
         help="Embedding type key (used to parse tile filenames).",
     )
     parser.add_argument(
@@ -300,7 +338,7 @@ def main() -> None:
     logger.info(f"  {len(all_patches)} patches total (crs: {all_patches.crs})")
 
     # --- Build tile spatial index (once for all splits) ---
-    tile_paths, tree = _build_tile_index(args.embedding_dir, args.embedding_name)
+    tile_paths, tree = _build_tile_index(args.embedding_dir, args.embedding_name, year=args.year)
     patch_crs = str(all_patches.crs)  # EPSG:4326
 
     # --- Process each split ---

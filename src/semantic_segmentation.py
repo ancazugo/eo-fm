@@ -197,6 +197,11 @@ def _build_city_items(
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 
+def _dequantize(arr: np.ndarray) -> np.ndarray:
+    """AlphaEarth coop dequantisation: sign(v) × (|v| / 127.5)²."""
+    return np.sign(arr) * (np.abs(arr) / 127.5) ** 2
+
+
 class GridSegDataset(Dataset):
     """Grid tile dataset for U-Net segmentation.
 
@@ -208,9 +213,11 @@ class GridSegDataset(Dataset):
         self,
         items: list,          # (npy_path, tile_geom, tile_crs, polys, tif_path_or_None)
         label_source: str,    # "gpkg" or "tif"
+        dequantize: bool = False,
     ) -> None:
         self.items = items
         self.label_source = label_source
+        self.dequantize = dequantize
 
     def __len__(self) -> int:
         return len(self.items)
@@ -219,6 +226,8 @@ class GridSegDataset(Dataset):
         npy_path, tile_geom, tile_crs, polys, tif_ref = self.items[idx]
 
         arr = np.load(npy_path).astype(np.float32)   # (C, H, W)
+        if self.dequantize:
+            arr = _dequantize(arr)
         _, H, W = arr.shape
         image = torch.from_numpy(arr)
 
@@ -245,20 +254,22 @@ class GridSegDataModule:
         label_source: str,
         batch_size: int,
         num_workers: int,
+        dequantize: bool = False,
     ) -> None:
         self.all_items = all_items
         self.split_map = split_map
         self.label_source = label_source
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.dequantize = dequantize
 
     def setup(self) -> None:
         def _for_split(s):
             return [it for it in self.all_items if self.split_map.get(it[0]) == s]
 
-        self._train_ds = GridSegDataset(_for_split("train"), self.label_source)
-        self._val_ds   = GridSegDataset(_for_split("val"),   self.label_source)
-        self._test_ds  = GridSegDataset(_for_split("test"),  self.label_source)
+        self._train_ds = GridSegDataset(_for_split("train"), self.label_source, self.dequantize)
+        self._val_ds   = GridSegDataset(_for_split("val"),   self.label_source, self.dequantize)
+        self._test_ds  = GridSegDataset(_for_split("test"),  self.label_source, self.dequantize)
         logger.info(
             f"Dataset sizes — train: {len(self._train_ds)}, "
             f"val: {len(self._val_ds)}, test: {len(self._test_ds)}"
@@ -359,6 +370,7 @@ def _infer_city_unet(
     year: str,
     device,
     batch_size: int = 8,
+    dequantize: bool = False,
 ) -> tuple[np.ndarray, str, object]:
     """Run U-Net inference over all grid tiles for one city.
 
@@ -404,6 +416,8 @@ def _infer_city_unet(
             imgs, geoms = [], []
             for p, gid in batch_tiles:
                 arr = np.load(p).astype(np.float32)
+                if dequantize:
+                    arr = _dequantize(arr)
                 imgs.append(torch.from_numpy(arr))
                 geoms.append(id2geom[gid])
 
@@ -493,6 +507,10 @@ def main() -> None:
                    help="Disable WandB logging.")
     g.add_argument("--run-name", default=None,
                    help="Optional WandB run name override.")
+    g.add_argument("--dequantize", action="store_true",
+                   help="Apply AlphaEarth dequantisation (sign(v)×(|v|/127.5)²) when loading npy tiles.")
+    g.add_argument("--checkpoint", type=Path, default=None,
+                   help="Load model weights from this .pt file and skip training (inference only).")
 
     args = parser.parse_args()
 
@@ -555,6 +573,7 @@ def main() -> None:
     datamodule = GridSegDataModule(
         all_items, split_map, args.label_source,
         args.batch_size, args.num_workers,
+        dequantize=args.dequantize,
     )
 
     # ── WandB ─────────────────────────────────────────────────────────────────
@@ -594,16 +613,23 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     model_name = f"unet_{args.preset}_{args.output_name}_{'_'.join(city_names[:3])}"
 
-    # ── Train ─────────────────────────────────────────────────────────────────
-    task, ckpt_path = _run_unet_training_loop(
-        task_module=task,
-        datamodule=datamodule,
-        device=device,
-        max_epochs=args.max_epochs,
-        early_stopping_patience=args.early_stopping_patience,
-        run_dir=run_dir,
-        model_name=model_name,
-    )
+    # ── Train (or load checkpoint) ────────────────────────────────────────────
+    if args.checkpoint is not None:
+        logger.info(f"Loading checkpoint: {args.checkpoint}")
+        ckpt = torch.load(args.checkpoint, map_location=device)
+        task.model.load_state_dict(ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt)
+        task = task.to(device)
+        ckpt_path = args.checkpoint
+    else:
+        task, ckpt_path = _run_unet_training_loop(
+            task_module=task,
+            datamodule=datamodule,
+            device=device,
+            max_epochs=args.max_epochs,
+            early_stopping_patience=args.early_stopping_patience,
+            run_dir=run_dir,
+            model_name=model_name,
+        )
     logger.info(f"Best checkpoint: {ckpt_path}")
 
     # ── Test evaluation ────────────────────────────────────────────────────────
@@ -648,7 +674,8 @@ def main() -> None:
     for city_dir in city_dirs:
         city = city_dir.name
         raster, crs, transform = _infer_city_unet(
-            task.model, city_dir, args.output_name, args.year, device, args.batch_size
+            task.model, city_dir, args.output_name, args.year, device, args.batch_size,
+            dequantize=args.dequantize,
         )
         if raster is None:
             continue

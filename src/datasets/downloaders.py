@@ -2,12 +2,131 @@
 
 import math
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
 import rioxarray
 import xarray as xr
 from loguru import logger
+
+_COOP_S3_PREFIX = "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/"
+
+
+def download_alpha_earth_coop(
+    index_path: str | Path,
+    output_dir: str | Path,
+    bbox: tuple[float, float, float, float],
+    year: int,
+    workers: int = 4,
+    overwrite: bool = False,
+) -> Path:
+    """Download AlphaEarth coop tiles (.tiff + .vrt) from source.coop for a bbox and year.
+
+    Reads the ``aef_index.gpkg`` registry to find tiles overlapping *bbox*,
+    then downloads each tile's ``.tiff`` and ``.vrt`` files in parallel from
+    the public HTTPS endpoint.  Already-present files are skipped unless
+    *overwrite* is set.
+
+    Local files are saved at ``output_dir/{year}/{utm_zone}/{filename}`` to
+    mirror the S3 directory layout and avoid filename collisions across UTM
+    zones.
+
+    Args:
+        index_path: Path to ``aef_index.gpkg`` (the tile registry GeoPackage).
+        output_dir: Local root for downloaded tiles (typically the coop dir
+            that also contains ``aef_index.gpkg``).
+        bbox: ``(west, south, east, north)`` in EPSG:4326.
+        year: Year of embeddings to download (2017–2025).
+        workers: Number of parallel download threads.
+        overwrite: Re-download tiles that already exist locally.
+
+    Returns:
+        Path to *output_dir*.
+    """
+    import requests
+    import geopandas as gpd
+
+    output_dir = Path(output_dir)
+    index_path = Path(index_path)
+
+    gdf = gpd.read_file(index_path, bbox=bbox, where=f"year = {year}")
+    if len(gdf) == 0:
+        logger.warning(f"No coop tiles found for year={year}, bbox={bbox}")
+        return output_dir
+
+    logger.info(f"AlphaEarth coop: {len(gdf)} tiles for year={year}, bbox={bbox}")
+
+    def s3_to_local(s3_path: str) -> Path:
+        return output_dir / s3_path.removeprefix(_COOP_S3_PREFIX)
+
+    def stream_download(url: str, dest: Path) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        try:
+            resp = requests.get(url, stream=True, timeout=120)
+            resp.raise_for_status()
+            with open(tmp, "wb") as fh:
+                for chunk in resp.iter_content(chunk_size=1 << 20):
+                    fh.write(chunk)
+            tmp.rename(dest)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+
+    def download_tile(s3_path: str) -> tuple[int, int]:
+        """Return (n_downloaded, n_skipped) for one tile's .tiff + .vrt pair."""
+        https_url = s3_path.replace(
+            "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/",
+            "https://data.source.coop/tge-labs/aef/v1/annual/",
+        )
+        stem = https_url.rsplit(".", 1)[0]
+        pairs = [
+            (https_url, s3_to_local(s3_path)),
+            (stem + ".vrt", s3_to_local(s3_path).with_suffix(".vrt")),
+        ]
+        downloaded = skipped = 0
+        for url, dest in pairs:
+            if dest.exists() and not overwrite:
+                skipped += 1
+                continue
+            try:
+                stream_download(url, dest)
+                downloaded += 1
+                logger.debug(f"Downloaded {dest.name}")
+            except requests.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 404:
+                    logger.debug(f"Not found (skipping): {url}")
+                else:
+                    raise
+        return downloaded, skipped
+
+    total_dl = total_skip = 0
+    errors: list[str] = []
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(download_tile, row["path"]): row["path"]
+            for _, row in gdf.iterrows()
+        }
+        for future in as_completed(futures):
+            try:
+                dl, sk = future.result()
+                total_dl += dl
+                total_skip += sk
+            except Exception as exc:
+                path = futures[future]
+                errors.append(f"{path}: {exc}")
+                logger.error(f"Failed to download {path}: {exc}")
+
+    logger.info(
+        f"Coop download complete: {total_dl} downloaded, "
+        f"{total_skip} cached, {len(errors)} errors"
+    )
+    if errors:
+        logger.warning(f"Download errors (first 5): {errors[:5]}")
+
+    return output_dir
 
 
 def download_tessera(

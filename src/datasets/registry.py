@@ -54,6 +54,11 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "resolution": 30,
         "description": "Embedded Seamless Data 128-band quantized embeddings",
     },
+    "alpha_earth_coop": {
+        "in_channels": 64,
+        "resolution": 10,
+        "description": "AlphaEarth coop GeoTIFF tiles (source.coop), 64-band Int8 quantized",
+    },
 }
 
 
@@ -75,10 +80,12 @@ def create_embedding_dataset(
     name: str,
     path: str | Path,
     bbox: tuple[float, float, float, float] | None = None,
+    year: int | None = None,
 ) -> GeoDataset:
     """Create an embedding dataset, auto-detecting Zarr vs GeoTIFF format.
 
     If the path contains .zarr stores, returns a ZarrGeoDataset.
+    For ``"alpha_earth_coop"``, returns a :class:`CoopEmbeddingDataset`.
     Otherwise falls back to the torchgeo built-in class (GeoTIFF).
 
     Args:
@@ -87,11 +94,20 @@ def create_embedding_dataset(
         bbox: Optional ``(west, south, east, north)`` bounding box in EPSG:4326.
             Passed to ZarrGeoDataset so CRS detection uses a tile from the
             correct region (important when the directory spans multiple UTM zones).
+        year: Year filter, required for ``"alpha_earth_coop"``.
 
     Returns:
         A GeoDataset instance for the embeddings.
     """
     path = Path(path)
+
+    if name == "alpha_earth_coop":
+        from datasets.coop_dataset import CoopEmbeddingDataset
+
+        if year is None:
+            raise ValueError("--year is required for the alpha_earth_coop embedding.")
+        return CoopEmbeddingDataset(root=path, year=year, bbox=bbox)
+
     zarr_stores = list(path.glob("*.zarr"))
 
     if zarr_stores:

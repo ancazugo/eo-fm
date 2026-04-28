@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "earthengine-api>=1.7.12",
-    "geotessera==0.7.5",
+    "geotessera==0.8.0",
     "gdal==3.10.0",
     "geopandas>=1.1.2",
     "ipykernel>=7.1.0",
@@ -22,4 +22,9 @@ dependencies = [
     "zarr>=3.1.5",
     "lightgbm>=4.6.0",
     "xgboost>=3.2.0",
+    "faiss-cpu>=1.7",
+    "osm-rasterizer>=0.1.1",
+    "seaborn>=0.13.2",
+    "geojson>=3.2.0",
+    "nbformat>=5.10.4",
 ]
