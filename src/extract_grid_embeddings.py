@@ -148,7 +148,7 @@ def main() -> None:
     parser.add_argument(
         "--embedding-name",
         required=True,
-        choices=["tessera", "alpha_earth"],
+        choices=["tessera", "alpha_earth", "alpha_earth_coop"],
         help="Embedding type key used to parse tile filenames.",
     )
     parser.add_argument(
@@ -203,7 +203,7 @@ def main() -> None:
             sys.exit(1)
 
     # Build tile spatial index once for all cities
-    tile_paths, strtree = _build_tile_index(args.embedding_dir, args.embedding_name)
+    tile_paths, strtree = _build_tile_index(args.embedding_dir, args.embedding_name, year=args.year)
 
     # Gather all tasks across cities
     logger.info(f"Building task list for {len(city_dirs)} cities …")

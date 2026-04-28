@@ -400,9 +400,19 @@ def _infer_city_resnet(
             row_off = int(round((roi_maxy - ty1) / res))
             r0 = max(0, row_off)
             c0 = max(0, col_off)
-            r1 = min(out_H, r0 + H)
-            c1 = min(out_W, c0 + W)
-            raster[r0:r1, c0:c1] = pred_tile[: r1 - r0, : c1 - c0]
+            # Use grid geometry for slot size: tiles clipped from a different
+            # UTM zone have inflated bounding boxes, yielding fewer pixels than
+            # the slot expects. Nearest-neighbour resize fills the slot cleanly.
+            slot_h = max(1, int(round((ty1 - ty0) / res)))
+            slot_w = max(1, int(round((tx1 - tx0) / res)))
+            r1 = min(out_H, r0 + slot_h)
+            c1 = min(out_W, c0 + slot_w)
+            target_h, target_w = r1 - r0, c1 - c0
+            if H != target_h or W != target_w:
+                row_idx = np.round(np.linspace(0, H - 1, target_h)).astype(int)
+                col_idx = np.round(np.linspace(0, W - 1, target_w)).astype(int)
+                pred_tile = pred_tile[row_idx[:, None], col_idx[None, :]]
+            raster[r0:r1, c0:c1] = pred_tile[:target_h, :target_w]
 
     return raster, crs, transform
 
