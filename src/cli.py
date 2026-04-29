@@ -74,6 +74,71 @@ def _resolve_roi_edge_trim(value: str, embedding: str) -> int | tuple[int, int, 
     return trim
 
 
+_VECTOR_SUFFIXES = {".gpkg", ".geojson", ".shp"}
+
+
+def _detect_label_type(paths: list[str]) -> str:
+    """Return 'vector' or 'raster' based on the first path's file suffix."""
+    return "vector" if Path(paths[0]).suffix.lower() in _VECTOR_SUFFIXES else "raster"
+
+
+def _concat_vector_gdfs(paths: list[str], label_col: str, crs) -> "gpd.GeoDataFrame":
+    """Load and concatenate multiple vector label files into one GeoDataFrame.
+
+    Each path is loaded as a VectorPatchLabelDataset and its .index GeoDataFrame
+    (with 'label' column and pd.IntervalIndex) is concatenated. The resulting
+    GeoDataFrame is compatible with split_label_gdf() and from_gdf().
+    """
+    import pandas as pd
+
+    from datasets.labels import VectorPatchLabelDataset
+
+    gdfs = []
+    for p in paths:
+        ds = VectorPatchLabelDataset(path=p, label_col=label_col, crs=crs)
+        gdfs.append(ds.index)
+    merged = pd.concat(gdfs)
+    logger.info(f"Loaded {len(paths)} vector label file(s): {len(merged)} polygons total")
+    return merged
+
+
+def _assign_cities_by_fraction(
+    paths: list[str],
+    train_frac: float,
+    val_frac: float,
+    seed: int,
+) -> tuple[list[str], list[str], list[str]]:
+    """Randomly assign city paths to train/val/test splits by fraction.
+
+    Guarantees at least 1 city in train. Val and test may be empty if there
+    are too few cities for the requested fractions.
+
+    Returns:
+        (train_paths, val_paths, test_paths)
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    shuffled = [paths[i] for i in rng.permutation(len(paths))]
+    n = len(shuffled)
+    n_train = max(1, round(n * train_frac))
+    n_val = round(n * val_frac)
+    train_paths = shuffled[:n_train]
+    val_paths = shuffled[n_train : n_train + n_val]
+    test_paths = shuffled[n_train + n_val :]
+    logger.info(
+        f"City-level split — "
+        f"train={[Path(p).stem for p in train_paths]}, "
+        f"val={[Path(p).stem for p in val_paths]}, "
+        f"test={[Path(p).stem for p in test_paths]}"
+    )
+    if not val_paths:
+        logger.warning("No cities assigned to val — val will use train ROI/data")
+    if not test_paths:
+        logger.warning("No cities assigned to test — test evaluation will be empty")
+    return train_paths, val_paths, test_paths
+
+
 def _compute_class_weights(train_gdf, num_classes: int):
     """Compute inverse-frequency class weights from a training GeoDataFrame.
 
@@ -204,11 +269,16 @@ def train_sklearn(
     embedding: str = typer.Option(..., help="Embedding name: tessera, alpha_earth, seamless"),
     embedding_path: str = typer.Option(..., help="Path to embedding data directory"),
     label: str = typer.Option("demuzere_lcz", help="Label dataset name"),
-    label_path: str = typer.Option(..., help="Path to label data directory or GeoPackage"),
+    label_path: List[str] = typer.Option([], help="Path(s) to label file(s) or directory (GeoPackage or GeoTIFF). Repeat to add cities: --label-path city1.gpkg --label-path city2.gpkg"),
     label_column: Optional[str] = typer.Option(None, help="Column name for class labels (required when --label-path points to a GeoPackage)."),
+    split_mode: str = typer.Option("geographic", help="Split strategy: 'geographic' (polygon-level stratified for vector; checkerboard per city for raster) or 'city' (whole cities randomly assigned to splits)."),
+    train_frac: float = typer.Option(0.70, help="Fraction of cities assigned to training (city split mode only)."),
+    val_frac: float = typer.Option(0.15, help="Fraction of cities assigned to validation (city split mode only; unused in sklearn)."),
+    checkerboard_tile_size: Optional[float] = typer.Option(None, help="Tile size in CRS units for checkerboard geographic split (raster labels only). Required when split_mode=geographic and using raster labels."),
+    min_valid_frac: float = typer.Option(0.10, help="Min fraction of non-nodata pixels for a checkerboard tile to be included (raster labels only)."),
     classifier: str = typer.Option("mlp", help="Classifier type: mlp, random_forest, extra_trees, lgbm, xgboost, logistic_regression"),
     n_samples: int = typer.Option(2000, help="Max samples per class"),
-    test_size: float = typer.Option(0.3, help="Test split ratio"),
+    test_size: float = typer.Option(0.3, help="Test split ratio (geographic mode) or test fraction of cities (city mode)."),
     hidden_layer_sizes: str = typer.Option("100,50", help="MLP hidden layer sizes (comma-separated)"),
     alpha: float = typer.Option(0.0001, help="MLP regularization"),
     learning_rate_init: float = typer.Option(0.001, help="MLP learning rate"),
@@ -234,14 +304,22 @@ def train_sklearn(
     bbox: List[str] = typer.Option([], help="Spatial filter: west,south,east,north (EPSG:4326). Repeat to add multiple areas."),
     year: Optional[int] = typer.Option(None, help="Filter embeddings to this year"),
     seed: int = typer.Option(411, help="Random seed"),
+    label_propagation: Optional[str] = typer.Option(None, help="Semi-supervised label propagation method: 'sklearn' (LabelSpreading, fast, subsampled) or 'iscen' (graph diffusion, scalable). Only supported with vector labels. Omit to disable."),
+    lp_alpha: float = typer.Option(0.5, help="Label propagation alpha: diffusion clamping factor (iscen) or LabelSpreading alpha (sklearn)."),
+    lp_k_neighbors: int = typer.Option(15, help="Label propagation k-NN graph connectivity."),
+    lp_confidence_threshold: float = typer.Option(0.8, help="Minimum propagation confidence to accept a pseudo-label."),
+    lp_max_pixels: int = typer.Option(2_000_000, help="Maximum pixels to extract from the full ROI for label propagation."),
+    lp_max_iter: int = typer.Option(30, help="Maximum iterations for label propagation (power iterations for iscen, max_iter for sklearn)."),
 ) -> None:
     """Train a sklearn pixel classifier on embedding + label datasets."""
     import wandb
 
-    from conf import SklearnConfig, WandbConfig
+    from conf import LabelPropagationConfig, SklearnConfig, WandbConfig
     from datasets.labels import LCZLabelDataset, VectorPatchLabelDataset
     from datasets.registry import create_embedding_dataset
     from models.sklearn_pixel import (
+        extract_all_pixels_from_dataset,
+        extract_pixels_from_gdf,
         extract_pixels_from_vector_labels,
         predict_sklearn_roi,
         train_sklearn_classifier,
@@ -255,29 +333,34 @@ def train_sklearn(
         run_sklearn_sweep,
     )
 
+    if not label_path:
+        raise typer.BadParameter("At least one --label-path is required.")
+
     parsed_hidden = tuple(int(x) for x in hidden_layer_sizes.split(","))
 
     raw_bbox = tuple(float(v) for v in bbox[0].split(",")) if bbox else None
-    embedding_ds = create_embedding_dataset(embedding, embedding_path, bbox=raw_bbox)
+    embedding_ds = create_embedding_dataset(embedding, embedding_path, bbox=raw_bbox, year=year)
 
-    if Path(label_path).suffix.lower() in (".gpkg", ".geojson", ".shp"):
+    label_type = _detect_label_type(label_path)
+    is_vector_labels = label_type == "vector"
+
+    if is_vector_labels:
         if label_column is None:
-            raise typer.BadParameter("--label-column is required when --label-path is a vector file.")
-        label_ds = VectorPatchLabelDataset(path=label_path, label_col=label_column, crs=embedding_ds.crs)
+            raise typer.BadParameter("--label-column is required when --label-path points to a GeoPackage.")
+        label_ds = None  # built per-split below
     else:
-        label_ds = LCZLabelDataset(paths=label_path, crs=embedding_ds.crs)
+        label_ds = LCZLabelDataset(paths=[Path(p) for p in label_path], crs=embedding_ds.crs)
 
     roi = _parse_bboxes(bbox, target_crs=embedding_ds.crs)
     toi = _parse_toi(year)
     if roi is not None or toi is not None:
         logger.info(f"Filtering to ROI: bboxes={bbox}, year={year}")
 
-    # Only create the intersection dataset when needed (raster labels or sweep)
-    is_vector_labels = isinstance(label_ds, VectorPatchLabelDataset)
+    # Raster labels need an IntersectionDataset (for sweep and non-pre-split paths)
     dataset = None if is_vector_labels else embedding_ds & label_ds
 
     logger.info(f"Embedding: {embedding} ({embedding_path})")
-    logger.info(f"Labels: {label} ({label_path}), reprojected to {embedding_ds.crs}")
+    logger.info(f"Labels ({label_type}, {len(label_path)} file(s)), reprojected to {embedding_ds.crs}")
 
     sklearn_config = SklearnConfig(
         classifier=classifier,
@@ -301,19 +384,142 @@ def train_sklearn(
     resolved_output_dir = Path(output_dir) if output_dir else OUTPUT_DIR / "models"
     wandb_config = WandbConfig(project=wandb_project, enabled=not no_wandb, sweep_count=sweep_count)
 
-    # Pre-extract pixels when using vector labels (direct polygon iteration, much faster).
-    # Polygon-level split per class prevents pixels from the same polygon leaking
-    # across train/test.
+    # Pre-extract pixels. Vector labels iterate polygons directly (much faster
+    # than GridGeoSampler). Raster labels use checkerboard geographic split when
+    # split_mode=geographic (separate ROIs for train/test extraction).
     pre_X_train = pre_y_train = pre_X_test = pre_y_test = None
+    lp_train_gdf = None  # Training polygon GeoDataFrame for label propagation (vector only)
     if is_vector_labels:
-        logger.info("Vector labels detected — extracting pixels directly from labeled polygons")
-        pre_X_train, pre_y_train, pre_X_test, pre_y_test = extract_pixels_from_vector_labels(
-            embedding_ds, label_ds.index,
-            test_size=sklearn_config.test_size,
+        logger.info(f"Vector labels — split_mode={split_mode}")
+        if split_mode == "city" and len(label_path) > 1:
+            test_frac = 1.0 - train_frac - val_frac
+            train_paths, _val_paths, test_paths = _assign_cities_by_fraction(
+                label_path, train_frac, val_frac, seed
+            )
+            train_gdf = _concat_vector_gdfs(train_paths, label_column, embedding_ds.crs)
+            lp_train_gdf = train_gdf
+            test_gdf = _concat_vector_gdfs(test_paths if test_paths else train_paths, label_column, embedding_ds.crs)
+            logger.info("Extracting pixels from city-assigned train/test GDFs")
+            pre_X_train, pre_y_train = extract_pixels_from_gdf(
+                embedding_ds, train_gdf,
+                n_samples_per_class=sklearn_config.n_samples_per_class,
+                seed=sklearn_config.random_state,
+                toi=toi,
+            )
+            pre_X_test, pre_y_test = extract_pixels_from_gdf(
+                embedding_ds, test_gdf,
+                n_samples_per_class=sklearn_config.n_samples_per_class,
+                seed=sklearn_config.random_state,
+                toi=toi,
+            )
+        else:
+            # Geographic mode (or single city): concat all GDFs, polygon-level split
+            merged_gdf = _concat_vector_gdfs(label_path, label_column, embedding_ds.crs)
+            logger.info("Extracting pixels with polygon-level train/test split")
+            pre_X_train, pre_y_train, pre_X_test, pre_y_test = extract_pixels_from_vector_labels(
+                embedding_ds, merged_gdf,
+                test_size=sklearn_config.test_size,
+                n_samples_per_class=sklearn_config.n_samples_per_class,
+                seed=sklearn_config.random_state,
+                toi=toi,
+            )
+            # Expose training GDF for label propagation (same split as inside extract_pixels_from_vector_labels)
+            if label_propagation:
+                from models.sklearn_pixel import split_label_gdf
+                lp_train_gdf, _ = split_label_gdf(
+                    merged_gdf, test_size=sklearn_config.test_size, seed=sklearn_config.random_state
+                )
+    elif split_mode == "geographic" and checkerboard_tile_size is not None and len(label_path) > 1:
+        # Multi-city raster with checkerboard: run per city, union ROIs, extract separately
+        from shapely.ops import unary_union as _union
+        from utils.geographic_split import checkerboard_roi_split, get_raster_roi
+        train_rois, test_rois = [], []
+        for lp in label_path:
+            city_roi = _parse_bbox(bbox[label_path.index(lp)], target_crs=embedding_ds.crs) \
+                if bbox and len(bbox) == len(label_path) \
+                else get_raster_roi(lp, target_crs=embedding_ds.crs)
+            tr, _vl, te = checkerboard_roi_split(
+                city_roi, checkerboard_tile_size, lp,
+                train_frac=train_frac, val_frac=0.0, test_frac=1.0 - train_frac,
+                min_valid_frac=min_valid_frac, seed=seed,
+                roi_crs=embedding_ds.crs,
+            )
+            if tr:
+                train_rois.append(tr)
+            if te:
+                test_rois.append(te)
+        train_roi_merged = _union(train_rois) if train_rois else roi
+        test_roi_merged = _union(test_rois) if test_rois else roi
+        logger.info("Extracting pixels from checkerboard train/test ROIs")
+        pre_X_train, pre_y_train = extract_all_pixels_from_dataset(
+            dataset, patch_size=patch_size, stride=stride,
             n_samples_per_class=sklearn_config.n_samples_per_class,
-            seed=sklearn_config.random_state,
-            toi=toi,
+            seed=sklearn_config.random_state, roi=train_roi_merged, toi=toi,
         )
+        pre_X_test, pre_y_test = extract_all_pixels_from_dataset(
+            dataset, patch_size=patch_size, stride=stride,
+            n_samples_per_class=sklearn_config.n_samples_per_class,
+            seed=sklearn_config.random_state, roi=test_roi_merged, toi=toi,
+        )
+    elif split_mode == "city" and len(label_path) > 1:
+        # Multi-city raster city mode: assign whole-city label files to splits
+        from shapely.ops import unary_union as _union
+        from utils.geographic_split import get_raster_roi
+        test_frac = 1.0 - train_frac - val_frac
+        train_paths, _val_paths, test_paths = _assign_cities_by_fraction(
+            label_path, train_frac, val_frac, seed
+        )
+        train_lbl = LCZLabelDataset(paths=[Path(p) for p in train_paths], crs=embedding_ds.crs)
+        test_lbl = LCZLabelDataset(paths=[Path(p) for p in (test_paths or train_paths)], crs=embedding_ds.crs)
+        train_ds = embedding_ds & train_lbl
+        test_ds = embedding_ds & test_lbl
+        train_roi_merged = _union([get_raster_roi(p, target_crs=embedding_ds.crs) for p in train_paths])
+        test_roi_merged = _union([get_raster_roi(p, target_crs=embedding_ds.crs) for p in test_paths]) if test_paths else None
+        logger.info("Extracting pixels from city-assigned raster train/test datasets")
+        pre_X_train, pre_y_train = extract_all_pixels_from_dataset(
+            train_ds, patch_size=patch_size, stride=stride,
+            n_samples_per_class=sklearn_config.n_samples_per_class,
+            seed=sklearn_config.random_state, roi=train_roi_merged, toi=toi,
+        )
+        pre_X_test, pre_y_test = extract_all_pixels_from_dataset(
+            test_ds, patch_size=patch_size, stride=stride,
+            n_samples_per_class=sklearn_config.n_samples_per_class,
+            seed=sklearn_config.random_state, roi=test_roi_merged, toi=toi,
+        )
+
+    # Optional label propagation: augment training set with pseudo-labeled pixels
+    if label_propagation:
+        if not is_vector_labels:
+            logger.warning("--label-propagation is only supported with vector labels; skipping.")
+        elif lp_train_gdf is None:
+            logger.warning("Training GDF not available for label propagation; skipping.")
+        else:
+            from models.label_propagation import apply_label_propagation
+            lp_config = LabelPropagationConfig(
+                method=label_propagation,
+                alpha=lp_alpha,
+                k_neighbors=lp_k_neighbors,
+                confidence_threshold=lp_confidence_threshold,
+                max_pixels=lp_max_pixels,
+                max_iter=lp_max_iter,
+            )
+            logger.info(
+                f"Label propagation: method={label_propagation}, alpha={lp_alpha}, "
+                f"k={lp_k_neighbors}, confidence_threshold={lp_confidence_threshold}, "
+                f"max_pixels={lp_max_pixels}"
+            )
+            pre_X_train, pre_y_train = apply_label_propagation(
+                embedding_ds, lp_train_gdf,
+                method=label_propagation,
+                config=lp_config,
+                X_train_orig=pre_X_train,
+                y_train_orig=pre_y_train,
+                roi=roi, toi=toi,
+                patch_size=patch_size,
+                n_classes=17,
+                n_samples_per_class=sklearn_config.n_samples_per_class,
+                seed=seed,
+            )
 
     if sweep and not no_wandb:
         if classifier == "lgbm":
@@ -360,6 +566,34 @@ def train_sklearn(
                         n_estimators=wandb.config.n_estimators,
                         xgb_learning_rate=wandb.config.xgb_learning_rate,
                         xgb_max_depth=wandb.config.xgb_max_depth,
+                    )
+                    result = train_sklearn_classifier(
+                        dataset, cfg,
+                        patch_size=patch_size, stride=stride,
+                        X_train=pre_X_train, y_train=pre_y_train,
+                        X_test=pre_X_test, y_test=pre_y_test,
+                    )
+                    log_sklearn_metrics(result["metrics"])
+
+        elif classifier == "random_forest":
+            sweep_parameters = {
+                "n_estimators": {"values": [100, 300, 500]},
+                "rf_max_features": {"values": ["sqrt", "log2", 0.3, 0.5]},
+                "rf_max_depth": {"values": [None, 10, 20, 30]},
+                "rf_min_samples_leaf": {"distribution": "int_uniform", "min": 1, "max": 10},
+            }
+
+            def run_trial():
+                with wandb.init(dir=str(resolved_output_dir)) as run:
+                    cfg = SklearnConfig(
+                        classifier="random_forest",
+                        n_samples_per_class=n_samples,
+                        test_size=test_size,
+                        random_state=seed,
+                        n_estimators=wandb.config.n_estimators,
+                        rf_max_features=wandb.config.rf_max_features,
+                        rf_max_depth=wandb.config.rf_max_depth,
+                        rf_min_samples_leaf=wandb.config.rf_min_samples_leaf,
                     )
                     result = train_sklearn_classifier(
                         dataset, cfg,
@@ -465,7 +699,8 @@ def train_lightning(
     embedding: str = typer.Option(..., help="Embedding name: tessera, alpha_earth, seamless"),
     embedding_path: str = typer.Option(..., help="Path to embedding data directory"),
     label: str = typer.Option("demuzere_lcz", help="Label dataset name"),
-    label_path: str = typer.Option(..., help="Path to label data directory"),
+    label_path: List[str] = typer.Option([], help="Path(s) to label file(s) or directory (GeoPackage or GeoTIFF). Repeat to add cities: --label-path city1.gpkg --label-path city2.gpkg"),
+    split_mode: str = typer.Option("geographic", help="Split strategy: 'geographic' (polygon-level stratified for vector; checkerboard per city for raster) or 'city' (whole cities randomly assigned to train/val/test)."),
     task: str = typer.Option("classification", help="Task type: classification, segmentation"),
     model: str = typer.Option("resnet18", help=(
         "Classification: any timm model name (resnet18/34/50/101/152, vit_tiny_patch16_224, "
@@ -503,7 +738,19 @@ def train_lightning(
         "to see available models."
     )),
     no_augment: bool = typer.Option(False, help="Disable training augmentations (random flip + rotation)."),
-    seed: int = typer.Option(411, help="Random seed for polygon-level train/val/test split (vector labels only)."),
+    seed: int = typer.Option(411, help="Random seed for polygon-level train/val/test split (vector labels) or checkerboard tile shuffling (raster labels)."),
+    checkerboard_tile_size: Optional[float] = typer.Option(None, help=(
+        "Tile size in CRS units (metres for UTM, degrees for WGS84) for checkerboard "
+        "geographic train/val/test split. Only applies to raster labels. "
+        "If omitted, all splits share the same ROI (no geographic separation)."
+    )),
+    train_frac: float = typer.Option(0.70, help="Fraction assigned to training. Checkerboard tiles (raster, geographic mode) or cities (city mode)."),
+    val_frac: float = typer.Option(0.15, help="Fraction assigned to validation. Checkerboard tiles (raster, geographic mode) or cities (city mode)."),
+    test_frac: float = typer.Option(0.15, help="Fraction assigned to test. Checkerboard tiles (raster, geographic mode) or cities (city mode)."),
+    min_valid_frac: float = typer.Option(0.10, help=(
+        "Minimum fraction of non-nodata pixels required to include a checkerboard tile. "
+        "Tiles below this threshold are excluded from all splits (raster labels only)."
+    )),
     pred_resolution: str = typer.Option("patch", help=(
         "Output resolution for classification prediction GeoTIFF. "
         "'patch' — one pixel per patch at label resolution (e.g. 320 m); matches label granularity. "
@@ -520,6 +767,12 @@ def train_lightning(
         "Prevents rare classes with extreme inverse-frequency weights from dominating the loss. "
         "Only applies when --class-weights auto. No cap by default."
     )),
+    label_propagation: Optional[str] = typer.Option(None, help="Semi-supervised label propagation: 'sklearn' (LabelSpreading, fast, subsampled) or 'iscen' (graph diffusion, scalable). For vector labels, train polygons are rasterised first and training switches to LCZLabelDataset. Val/test labels are never augmented."),
+    lp_alpha: float = typer.Option(0.5, help="LP diffusion clamping factor (iscen) or LabelSpreading alpha (sklearn)."),
+    lp_k_neighbors: int = typer.Option(15, help="LP k-NN graph connectivity."),
+    lp_confidence_threshold: float = typer.Option(0.8, help="Minimum LP confidence to accept a pseudo-label."),
+    lp_max_pixels: int = typer.Option(2_000_000, help="Maximum pixels extracted from the ROI for LP."),
+    lp_max_iter: int = typer.Option(30, help="LP max iterations (power iter for iscen, max_iter for sklearn)."),
 ) -> None:
     """Train a pure-PyTorch model (classification or segmentation) on embedding + label datasets."""
     import random
@@ -540,22 +793,28 @@ def train_lightning(
     from utils.paths import OUTPUT_DIR
     from utils.wandb import init_wandb_run, log_confusion_matrix, log_prediction_raster
 
-    raw_bbox = tuple(float(v) for v in bbox[0].split(",")) if bbox else None
-    embedding_ds = create_embedding_dataset(embedding, embedding_path, bbox=raw_bbox)
+    if not label_path:
+        raise typer.BadParameter("At least one --label-path is required.")
 
-    if Path(label_path).suffix.lower() in (".gpkg", ".geojson", ".shp"):
+    raw_bbox = tuple(float(v) for v in bbox[0].split(",")) if bbox else None
+    embedding_ds = create_embedding_dataset(embedding, embedding_path, bbox=raw_bbox, year=year)
+
+    label_type = _detect_label_type(label_path)
+    is_vector_labels = label_type == "vector"
+
+    if is_vector_labels:
         if label_column is None:
-            raise typer.BadParameter("--label-column is required when --label-path is a vector file.")
-        label_ds = VectorPatchLabelDataset(path=label_path, label_col=label_column, crs=embedding_ds.crs)
+            raise typer.BadParameter("--label-column is required when --label-path points to a GeoPackage.")
+        label_ds = None  # built per-split below
     else:
-        label_ds = LCZLabelDataset(paths=label_path, crs=embedding_ds.crs)
+        label_ds = LCZLabelDataset(paths=[Path(p) for p in label_path], crs=embedding_ds.crs)
 
     roi = _parse_bboxes(bbox, target_crs=embedding_ds.crs)
     toi = _parse_toi(year)
     if roi is not None or toi is not None:
         logger.info(f"Filtering to ROI: bboxes={bbox}, year={year}")
 
-    logger.info(f"Labels reprojected to embedding CRS: {embedding_ds.crs}")
+    logger.info(f"Labels ({label_type}, {len(label_path)} file(s)) reprojected to embedding CRS: {embedding_ds.crs}")
 
     import datetime
 
@@ -569,8 +828,6 @@ def train_lightning(
     sampler_config = SamplerConfig(patch_size=patch_size, batch_size=batch_size, stride=stride, length=length)
     wandb_config = WandbConfig(project=wandb_project, enabled=not no_wandb)
 
-    is_vector_labels = isinstance(label_ds, VectorPatchLabelDataset)
-
     # Resolve class weights before building the task
     cw_tensor = None
     if class_weights.lower() == "none":
@@ -578,25 +835,63 @@ def train_lightning(
     elif class_weights.lower() == "auto":
         if not is_vector_labels:
             logger.warning("--class-weights auto requires vector labels; falling back to uniform weighting")
-        # weights computed below after the train/test split
+        # weights computed below after the train/val/test split
     else:
         cw_tensor = _parse_class_weights(class_weights, num_classes)
 
     if is_vector_labels:
         from models.sklearn_pixel import split_label_gdf
-        # 3-way polygon-level split: 70% train, 15% val, 15% test
-        train_gdf, val_gdf, test_gdf = split_label_gdf(
-            label_ds.index, val_size=0.15, test_size=0.15, seed=seed,
-        )
+
+        logger.info(f"Vector labels — split_mode={split_mode}, {len(label_path)} file(s)")
+        if split_mode == "city" and len(label_path) > 1:
+            train_paths, val_paths, test_paths = _assign_cities_by_fraction(
+                label_path, train_frac, val_frac, seed
+            )
+            train_gdf = _concat_vector_gdfs(train_paths, label_column, embedding_ds.crs)
+            val_gdf = _concat_vector_gdfs(val_paths, label_column, embedding_ds.crs) if val_paths else train_gdf
+            test_gdf = _concat_vector_gdfs(test_paths, label_column, embedding_ds.crs) if test_paths else val_gdf
+        else:
+            # Geographic mode (or single city): concat all, polygon-level 3-way split
+            merged_gdf = _concat_vector_gdfs(label_path, label_column, embedding_ds.crs)
+            train_gdf, val_gdf, test_gdf = split_label_gdf(
+                merged_gdf, val_size=val_frac, test_size=test_frac, seed=seed,
+            )
+
         if class_weights.lower() == "auto":
             cw_tensor = _compute_class_weights(train_gdf, num_classes)
             if class_weights_cap is not None:
                 import torch
                 cw_tensor = torch.clamp(cw_tensor, max=class_weights_cap)
                 logger.info(f"Class weights after cap ({class_weights_cap}): {cw_tensor.tolist()}")
-        train_label_ds = VectorPatchLabelDataset.from_gdf(train_gdf, label_col=label_column)
+
         val_label_ds = VectorPatchLabelDataset.from_gdf(val_gdf, label_col=label_column)
         test_label_ds = VectorPatchLabelDataset.from_gdf(test_gdf, label_col=label_column)
+        if label_propagation is not None:
+            # Rasterise train polygons → LP augment → LCZLabelDataset for training.
+            # Val/test stay as VectorPatchLabelDataset (no pseudo-labels there).
+            import tempfile as _tempfile
+            from conf import LabelPropagationConfig
+            from datasets.labels import rasterize_gdf as _rasterize_gdf
+            from models.label_propagation import augment_label_raster
+            _raw_res = embedding_ds.res
+            _embedding_res = float(_raw_res[0]) if hasattr(_raw_res, "__len__") else float(_raw_res)
+            _lp_seed_dir = Path(_tempfile.mkdtemp(prefix="eo_fm_lp_seed_"))
+            _rasterize_gdf(train_gdf, label_column, _lp_seed_dir / "train_labels.tif", res=_embedding_res)
+            _lp_aug_dir = Path(_tempfile.mkdtemp(prefix="eo_fm_lp_aug_"))
+            _lp_cfg = LabelPropagationConfig(
+                method=label_propagation, alpha=lp_alpha, k_neighbors=lp_k_neighbors,
+                confidence_threshold=lp_confidence_threshold,
+                max_pixels=lp_max_pixels, max_iter=lp_max_iter,
+            )
+            augment_label_raster(
+                embedding_ds, _lp_seed_dir, label_propagation, _lp_cfg,
+                _lp_aug_dir, roi=roi, toi=toi,
+                patch_size=int(patch_size), n_classes=num_classes, seed=seed,
+            )
+            train_label_ds = LCZLabelDataset(paths=_lp_aug_dir, crs=embedding_ds.crs)
+            logger.info(f"LP ({label_propagation}): train_label_ds → LCZLabelDataset from {_lp_aug_dir}")
+        else:
+            train_label_ds = VectorPatchLabelDataset.from_gdf(train_gdf, label_col=label_column)
         datamodule = EmbeddingLabelDataModule(
             embedding_ds=embedding_ds,
             train_label_ds=train_label_ds,
@@ -608,13 +903,136 @@ def train_lightning(
             augment=not no_augment,
         )
     else:
-        datamodule = EmbeddingLabelDataModule(
-            embedding_ds=embedding_ds, label_ds=label_ds,
-            sampler_config=sampler_config, task=task, num_workers=num_workers,
-            train_roi=roi, val_roi=roi, test_roi=roi,
-            train_toi=toi, val_toi=toi, test_toi=toi,
-            augment=not no_augment,
-        )
+        # Raster labels
+        logger.info(f"Raster labels — split_mode={split_mode}, {len(label_path)} file(s)")
+        from shapely.geometry import box as shapely_box
+        from shapely.ops import unary_union as _union
+        from utils.geographic_split import checkerboard_roi_split, get_raster_roi
+
+        if split_mode == "city" and len(label_path) > 1:
+            # Assign whole cities to splits
+            train_paths, val_paths, test_paths = _assign_cities_by_fraction(
+                label_path, train_frac, val_frac, seed
+            )
+            train_roi = _union([get_raster_roi(p, target_crs=embedding_ds.crs) for p in train_paths])
+            val_roi = _union([get_raster_roi(p, target_crs=embedding_ds.crs) for p in val_paths]) if val_paths else train_roi
+            test_roi = _union([get_raster_roi(p, target_crs=embedding_ds.crs) for p in test_paths]) if test_paths else None
+            # Build per-split label datasets so IntersectionDataset only loads relevant files
+            _train_label_paths = [Path(p) for p in train_paths]
+            if label_propagation is not None:
+                import tempfile as _tempfile
+                from conf import LabelPropagationConfig
+                from models.label_propagation import augment_label_raster
+                _lp_cfg = LabelPropagationConfig(
+                    method=label_propagation, alpha=lp_alpha, k_neighbors=lp_k_neighbors,
+                    confidence_threshold=lp_confidence_threshold,
+                    max_pixels=lp_max_pixels, max_iter=lp_max_iter,
+                )
+                _lp_aug_dir = Path(_tempfile.mkdtemp(prefix="eo_fm_lp_aug_"))
+                augment_label_raster(
+                    embedding_ds, _train_label_paths, label_propagation, _lp_cfg,
+                    _lp_aug_dir, roi=train_roi, toi=toi,
+                    patch_size=int(patch_size), n_classes=num_classes, seed=seed,
+                )
+                train_label_ds = LCZLabelDataset(paths=_lp_aug_dir, crs=embedding_ds.crs)
+                logger.info(f"LP ({label_propagation}): train_label_ds (city raster) → {_lp_aug_dir}")
+            else:
+                train_label_ds = LCZLabelDataset(paths=_train_label_paths, crs=embedding_ds.crs)
+            val_label_ds = LCZLabelDataset(paths=[Path(p) for p in (val_paths or train_paths)], crs=embedding_ds.crs)
+            test_label_ds = LCZLabelDataset(paths=[Path(p) for p in (test_paths or val_paths or train_paths)], crs=embedding_ds.crs)
+            datamodule = EmbeddingLabelDataModule(
+                embedding_ds=embedding_ds,
+                train_label_ds=train_label_ds,
+                val_label_ds=val_label_ds,
+                test_label_ds=test_label_ds,
+                sampler_config=sampler_config, task=task, num_workers=num_workers,
+                train_roi=train_roi, val_roi=val_roi, test_roi=test_roi,
+                train_toi=toi, val_toi=toi, test_toi=toi,
+                augment=not no_augment,
+            )
+        elif checkerboard_tile_size is not None:
+            if len(label_path) > 1:
+                # Multi-city geographic: checkerboard per city, union ROIs
+                train_rois, val_rois, test_rois = [], [], []
+                for i, lp in enumerate(label_path):
+                    city_roi = (
+                        _parse_bbox(bbox[i], target_crs=embedding_ds.crs)
+                        if bbox and len(bbox) == len(label_path)
+                        else get_raster_roi(lp, target_crs=embedding_ds.crs)
+                    )
+                    tr, vl, te = checkerboard_roi_split(
+                        roi=city_roi, tile_size=checkerboard_tile_size, label_path=lp,
+                        train_frac=train_frac, val_frac=val_frac, test_frac=test_frac,
+                        min_valid_frac=min_valid_frac, seed=seed,
+                        roi_crs=embedding_ds.crs,
+                    )
+                    if tr: train_rois.append(tr)
+                    if vl: val_rois.append(vl)
+                    if te: test_rois.append(te)
+                train_roi = _union(train_rois) if train_rois else roi
+                val_roi = _union(val_rois) if val_rois else None
+                test_roi = _union(test_rois) if test_rois else None
+            else:
+                # Single city geographic checkerboard
+                effective_roi = roi if roi is not None else shapely_box(*embedding_ds.bounds[:4])
+                train_roi, val_roi, test_roi = checkerboard_roi_split(
+                    roi=effective_roi, tile_size=checkerboard_tile_size, label_path=label_path[0],
+                    train_frac=train_frac, val_frac=val_frac, test_frac=test_frac,
+                    min_valid_frac=min_valid_frac, seed=seed,
+                    roi_crs=embedding_ds.crs,
+                )
+            _checkerboard_label_ds = label_ds
+            if label_propagation is not None:
+                import tempfile as _tempfile
+                from conf import LabelPropagationConfig
+                from models.label_propagation import augment_label_raster
+                _lp_cfg = LabelPropagationConfig(
+                    method=label_propagation, alpha=lp_alpha, k_neighbors=lp_k_neighbors,
+                    confidence_threshold=lp_confidence_threshold,
+                    max_pixels=lp_max_pixels, max_iter=lp_max_iter,
+                )
+                _lp_aug_dir = Path(_tempfile.mkdtemp(prefix="eo_fm_lp_aug_"))
+                augment_label_raster(
+                    embedding_ds, label_path, label_propagation, _lp_cfg,
+                    _lp_aug_dir, roi=train_roi, toi=toi,
+                    patch_size=int(patch_size), n_classes=num_classes, seed=seed,
+                )
+                _checkerboard_label_ds = LCZLabelDataset(paths=_lp_aug_dir, crs=embedding_ds.crs)
+                logger.info(f"LP ({label_propagation}): label_ds (checkerboard) → {_lp_aug_dir}")
+            datamodule = EmbeddingLabelDataModule(
+                embedding_ds=embedding_ds, label_ds=_checkerboard_label_ds,
+                sampler_config=sampler_config, task=task, num_workers=num_workers,
+                train_roi=train_roi, val_roi=val_roi, test_roi=test_roi,
+                train_toi=toi, val_toi=toi, test_toi=toi,
+                augment=not no_augment,
+            )
+        else:
+            train_roi = val_roi = test_roi = roi
+            _nosplit_label_ds = label_ds
+            if label_propagation is not None:
+                import tempfile as _tempfile
+                from conf import LabelPropagationConfig
+                from models.label_propagation import augment_label_raster
+                _lp_cfg = LabelPropagationConfig(
+                    method=label_propagation, alpha=lp_alpha, k_neighbors=lp_k_neighbors,
+                    confidence_threshold=lp_confidence_threshold,
+                    max_pixels=lp_max_pixels, max_iter=lp_max_iter,
+                )
+                _lp_aug_dir = Path(_tempfile.mkdtemp(prefix="eo_fm_lp_aug_"))
+                augment_label_raster(
+                    embedding_ds, label_path, label_propagation, _lp_cfg,
+                    _lp_aug_dir, roi=roi, toi=toi,
+                    patch_size=int(patch_size), n_classes=num_classes, seed=seed,
+                )
+                _nosplit_label_ds = LCZLabelDataset(paths=_lp_aug_dir, crs=embedding_ds.crs)
+                logger.info(f"LP ({label_propagation}): label_ds (no-split) → {_lp_aug_dir}")
+            datamodule = EmbeddingLabelDataModule(
+                embedding_ds=embedding_ds, label_ds=_nosplit_label_ds,
+                sampler_config=sampler_config, task=task, num_workers=num_workers,
+                train_roi=train_roi, val_roi=val_roi, test_roi=test_roi,
+                train_toi=toi, val_toi=toi, test_toi=toi,
+                augment=not no_augment,
+            )
 
     # Determine device
     device = torch.device("cuda" if torch.cuda.is_available() and accelerator != "cpu" else "cpu")
@@ -751,7 +1169,7 @@ def predict_sklearn(
     logger.info(f"Loaded model from {model_path}")
 
     raw_bbox = tuple(float(v) for v in bbox[0].split(",")) if bbox else None
-    embedding_ds = create_embedding_dataset(embedding, embedding_path, bbox=raw_bbox)
+    embedding_ds = create_embedding_dataset(embedding, embedding_path, bbox=raw_bbox, year=year)
     if label_path is not None:
         label_ds = LCZLabelDataset(paths=label_path, crs=embedding_ds.crs)
         dataset = embedding_ds & label_ds
@@ -844,7 +1262,7 @@ def predict_dl(
     from utils.wandb import log_confusion_matrix, log_prediction_raster
 
     raw_bbox = tuple(float(v) for v in bbox[0].split(",")) if bbox else None
-    embedding_ds = create_embedding_dataset(embedding, embedding_path, bbox=raw_bbox)
+    embedding_ds = create_embedding_dataset(embedding, embedding_path, bbox=raw_bbox, year=year)
     label_ds = None
     if label_path:
         from datasets.labels import VectorPatchLabelDataset
@@ -955,6 +1373,48 @@ def download_embeddings(
         )
 
     logger.info(f"Embeddings downloaded to {output_dir}")
+
+
+@app.command()
+def download_coop(
+    bbox: str = typer.Option(..., help="Bounding box: west,south,east,north (EPSG:4326)"),
+    year: int = typer.Option(..., help="Year of embeddings to download (2017-2025)"),
+    output_dir: Optional[str] = typer.Option(None, help="Coop root directory (must contain aef_index.gpkg). Default: AlphaEarth coop dir from .env"),
+    workers: int = typer.Option(4, help="Number of parallel download threads"),
+    overwrite: bool = typer.Option(False, help="Re-download already-present files"),
+) -> None:
+    """Download AlphaEarth coop tiles (.tiff + .vrt) from source.coop.
+
+    The output directory must already contain ``aef_index.gpkg``.  Tiles are
+    saved at ``{output_dir}/{year}/{utm_zone}/{filename}`` to mirror the S3
+    layout.  Already-present files are skipped unless ``--overwrite`` is set.
+    """
+    from datasets.downloaders import download_alpha_earth_coop
+
+    parsed_bbox = tuple(float(x) for x in bbox.split(","))
+    if len(parsed_bbox) != 4:
+        raise typer.BadParameter("bbox must have 4 values: west,south,east,north")
+
+    if output_dir is None:
+        from utils.paths import ALPHA_EARTH_DIR
+        output_dir = str(ALPHA_EARTH_DIR / "coop")
+
+    index_path = Path(output_dir) / "aef_index.gpkg"
+    if not index_path.exists():
+        raise typer.BadParameter(
+            f"aef_index.gpkg not found at {index_path}. "
+            "Download it from source.coop and place it in the output directory."
+        )
+
+    download_alpha_earth_coop(
+        index_path=index_path,
+        output_dir=output_dir,
+        bbox=parsed_bbox,
+        year=year,
+        workers=workers,
+        overwrite=overwrite,
+    )
+    logger.info(f"Coop tiles downloaded to {output_dir}")
 
 
 @app.command()

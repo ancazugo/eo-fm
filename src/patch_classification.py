@@ -37,18 +37,15 @@ Example (multiple cities, GeoTessera):
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
-import rasterio
 import torch
 import torch.nn.functional as F
 import wandb
 from loguru import logger
-from rasterio.transform import from_origin as rio_from_origin
 from torch.utils.data import Dataset, DataLoader
 from torchmetrics import Accuracy
 from torchmetrics.classification import MulticlassF1Score
@@ -60,6 +57,7 @@ _src = Path(__file__).parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
+from infer_roi import infer_roi
 from train_resnet import (
     RESNET_PRESETS,
     LCZResNetModule,
@@ -68,7 +66,6 @@ from train_resnet import (
     _run_resnet_training_loop,
 )
 from utils.constants import lcz_dict
-from utils.plot_lcz import save_lcz_map
 
 
 # ── Patch index builder ───────────────────────────────────────────────────────
@@ -270,153 +267,6 @@ class PatchDataModule:
         )
 
 
-# ── Inference helpers ────────────────────────────────────────────────────────
-
-_TILE_RE = re.compile(r"^(.+)_(\d+)\.npy$")
-
-
-def _build_roi_meta(grid_gdf, sample_npy_path: Path):
-    """Compute full-ROI raster dimensions and transform from the grid GDF.
-
-    Returns (out_H, out_W, res, roi_minx, roi_maxy, transform, crs).
-    """
-    minx, miny, maxx, maxy = grid_gdf.total_bounds
-    row = grid_gdf.iloc[0]
-    b = row.geometry.bounds
-    arr = np.load(sample_npy_path, mmap_mode="r")
-    _, H, W = arr.shape
-    res_x = (b[2] - b[0]) / W
-    res_y = (b[3] - b[1]) / H
-    res = (res_x + res_y) / 2
-    out_W = int(round((maxx - minx) / res))
-    out_H = int(round((maxy - miny) / res))
-    transform = rio_from_origin(minx, maxy, res, res)
-    crs = str(grid_gdf.crs)
-    return out_H, out_W, res, minx, maxy, transform, crs
-
-
-def _save_geotiff(raster: np.ndarray, crs: str, transform, path: Path) -> None:
-    """Write a uint8 raster to a GeoTIFF with nodata=0."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with rasterio.open(
-        path, "w", driver="GTiff",
-        height=raster.shape[0], width=raster.shape[1],
-        count=1, dtype="uint8", crs=crs, transform=transform, nodata=0,
-    ) as dst:
-        dst.write(raster, 1)
-
-
-def _infer_city_resnet(
-    model,
-    city_dir: Path,
-    output_name: str,
-    year: str,
-    patch_size: int,
-    device,
-    batch_size: int = 64,
-    sub_patch_size: int | None = None,
-    sub_patch_stride: int | None = None,
-    dequantize: bool = False,
-) -> tuple[np.ndarray, str, object]:
-    """Run ResNet inference over all grid tiles for one city (sliding window).
-
-    Each window gets a single class prediction. Window size is sub_patch_size
-    when set, otherwise patch_size. Stride defaults to window size.
-    Returns (uint8 raster with values 1-17, CRS string, rasterio transform).
-    """
-    city = city_dir.name
-    grid_gpkg = city_dir / f"{city}_grid.gpkg"
-    if not grid_gpkg.exists():
-        logger.warning(f"  {city}: {grid_gpkg.name} not found — skipping inference")
-        return None, None, None
-
-    grid_gdf = gpd.read_file(grid_gpkg)
-    id2geom = {int(r["grid_id"]): r.geometry for _, r in grid_gdf.iterrows()}
-
-    emb_base = city_dir / output_name / year
-    all_tiles: list[tuple[Path, int]] = []
-    for split in ("train", "val", "test"):
-        split_dir = emb_base / split
-        if not split_dir.exists():
-            continue
-        for p in sorted(split_dir.glob(f"{city}_*.npy")):
-            m = _TILE_RE.match(p.name)
-            if m is None:
-                continue
-            gid = int(m.group(2))
-            if gid in id2geom:
-                all_tiles.append((p, gid))
-
-    if not all_tiles:
-        logger.warning(f"  {city}: no npy tiles found under {emb_base}")
-        return None, None, None
-
-    out_H, out_W, res, roi_minx, roi_maxy, transform, crs = _build_roi_meta(
-        grid_gdf, all_tiles[0][0]
-    )
-    raster = np.zeros((out_H, out_W), dtype=np.uint8)
-
-    win_size   = sub_patch_size if sub_patch_size is not None else patch_size
-    win_stride = sub_patch_stride if sub_patch_stride is not None else win_size
-
-    model.eval()
-    with torch.no_grad():
-        for npy_path, gid in all_tiles:
-            arr = np.load(npy_path).astype(np.float32)  # (C, H, W)
-            if dequantize:
-                arr = np.sign(arr) * (np.abs(arr) / 127.5) ** 2
-            C, H, W = arr.shape
-            pred_tile = np.zeros((H, W), dtype=np.uint8)
-
-            # Collect all windows; windows are always exactly win_size × win_size
-            windows = []
-            for r in range(0, H - win_size + 1, win_stride):
-                for c in range(0, W - win_size + 1, win_stride):
-                    windows.append((r, c))
-
-            for i in range(0, len(windows), batch_size):
-                batch_windows = windows[i : i + batch_size]
-                batch_imgs = []
-                for r, c in batch_windows:
-                    patch = arr[:, r : r + win_size, c : c + win_size]
-                    batch_imgs.append(torch.from_numpy(patch))
-
-                imgs_tensor = torch.stack(batch_imgs).to(device)
-                # Resize to patch_size if needed (matches training resize)
-                if imgs_tensor.shape[-1] != patch_size or imgs_tensor.shape[-2] != patch_size:
-                    imgs_tensor = torch.nn.functional.interpolate(
-                        imgs_tensor, size=(patch_size, patch_size), mode="bilinear",
-                        align_corners=False,
-                    )
-                logits = model(imgs_tensor)        # (B, num_classes)
-                preds = logits.argmax(dim=1).cpu().numpy()  # (B,) 0-indexed
-
-                for (r, c), cls in zip(batch_windows, preds):
-                    pred_tile[r : r + win_size, c : c + win_size] = int(cls) + 1  # 1-17
-
-            geom = id2geom[gid]
-            tx0, ty0, tx1, ty1 = geom.bounds
-            col_off = int(round((tx0 - roi_minx) / res))
-            row_off = int(round((roi_maxy - ty1) / res))
-            r0 = max(0, row_off)
-            c0 = max(0, col_off)
-            # Use grid geometry for slot size: tiles clipped from a different
-            # UTM zone have inflated bounding boxes, yielding fewer pixels than
-            # the slot expects. Nearest-neighbour resize fills the slot cleanly.
-            slot_h = max(1, int(round((ty1 - ty0) / res)))
-            slot_w = max(1, int(round((tx1 - tx0) / res)))
-            r1 = min(out_H, r0 + slot_h)
-            c1 = min(out_W, c0 + slot_w)
-            target_h, target_w = r1 - r0, c1 - c0
-            if H != target_h or W != target_w:
-                row_idx = np.round(np.linspace(0, H - 1, target_h)).astype(int)
-                col_idx = np.round(np.linspace(0, W - 1, target_w)).astype(int)
-                pred_tile = pred_tile[row_idx[:, None], col_idx[None, :]]
-            raster[r0:r1, c0:c1] = pred_tile[:target_h, :target_w]
-
-    return raster, crs, transform
-
-
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -488,7 +338,22 @@ def main() -> None:
     g.add_argument("--checkpoint", type=Path, default=None,
                    help="Load model weights from this .pt file and skip training (inference only).")
 
+    # ── Inference ─────────────────────────────────────────────────────────────
+    g = parser.add_argument_group("Inference")
+    g.add_argument("--embedding-name", required=True,
+                   choices=["tessera", "alpha_earth", "alpha_earth_coop"],
+                   help="Embedding registry key for infer_roi (tessera, alpha_earth, alpha_earth_coop).")
+    g.add_argument("--embedding-dir", required=True, type=Path,
+                   help="Directory containing raw source embedding tiles (.zarr or .tif).")
+    g.add_argument("--overlap", type=int, default=None,
+                   help="Overlap between adjacent patches in pixels for inference "
+                        "(default: patch_size // 2).")
+    g.add_argument("--margin-m", type=float, default=200.0,
+                   help="Extra metres clipped around city bbox per tile for edge context (default: 200).")
+
     args = parser.parse_args()
+    if args.overlap is None:
+        args.overlap = args.patch_size // 2
 
     torch.manual_seed(args.seed)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -691,22 +556,31 @@ def main() -> None:
     task.model.eval()
     for city_dir in city_dirs:
         city = city_dir.name
-        raster, crs, transform = _infer_city_resnet(
-            task.model, city_dir, args.output_name, args.year,
-            args.patch_size, device, args.batch_size,
-            sub_patch_size=args.sub_patch_size,
-            sub_patch_stride=args.sub_patch_stride,
-            dequantize=args.dequantize,
-        )
-        if raster is None:
+        grid_gpkg = city_dir / f"{city}_grid.gpkg"
+        if not grid_gpkg.exists():
+            logger.warning(f"  {city}: {grid_gpkg.name} not found — skipping inference")
             continue
+        grid_gdf = gpd.read_file(grid_gpkg)
+        west, south, east, north = grid_gdf.to_crs("EPSG:4326").total_bounds
+        bbox = (west, south, east, north)
+
         tif_path = run_dir / f"{run_dir.name}_resnet-{args.preset}-classification-prediction_{city}.tif"
-        png_path = run_dir / f"{run_dir.name}_resnet-{args.preset}-classification-prediction_{city}.png"
-        _save_geotiff(raster, crs, transform, tif_path)
-        save_lcz_map(
-            raster,
-            f"ResNet {args.preset} — {city} ({args.output_name} {args.year})",
-            png_path,
+        infer_roi(
+            model=task.model,
+            model_type="resnet",
+            embedding_name=args.embedding_name,
+            embedding_dir=args.embedding_dir,
+            bbox=bbox,
+            output_path=tif_path,
+            num_classes=args.num_classes,
+            patch_size=args.patch_size,
+            overlap=args.overlap,
+            batch_size=args.batch_size,
+            device=device,
+            dequantize=args.dequantize,
+            year=args.year,
+            city_name=city,
+            margin_m=args.margin_m,
         )
         logger.info(f"  {city}: saved {tif_path.name}")
 

@@ -537,8 +537,9 @@ def _parse_args() -> argparse.Namespace:
                    help="Output GeoTIFF path.")
     p.add_argument("--patch-size", type=int, default=64,
                    help="Sliding window patch size in pixels (default: 64).")
-    p.add_argument("--overlap", type=int, default=0,
-                   help="Overlap between adjacent patches in pixels (default: 0).")
+    p.add_argument("--overlap", type=int, default=None,
+                   help="Overlap between adjacent patches in pixels "
+                        "(default: patch_size // 2).")
     p.add_argument("--batch-size", type=int, default=8,
                    help="GPU batch size for inference (default: 8).")
     p.add_argument("--margin-m", type=float, default=200.0,
@@ -560,6 +561,8 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    if args.overlap is None:
+        args.overlap = args.patch_size // 2
 
     # ── Parse bbox ────────────────────────────────────────────────────────────
     parts = [float(v) for v in args.bbox.split(",")]

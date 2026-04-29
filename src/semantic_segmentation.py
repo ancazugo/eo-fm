@@ -49,9 +49,7 @@ import wandb
 from loguru import logger
 from rasterio.features import rasterize as rio_rasterize
 from rasterio.transform import from_bounds as rio_from_bounds
-from rasterio.transform import from_origin as rio_from_origin
 from pyproj import Transformer
-from shapely import from_wkt
 from shapely.ops import transform as shapely_transform
 from torch.utils.data import Dataset, DataLoader
 from torchmetrics import Accuracy, JaccardIndex
@@ -62,8 +60,9 @@ _src = Path(__file__).parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
+from infer_roi import infer_roi
 from train_unet import UNet, LCZUNetModule, _run_unet_training_loop, augment_batch
-from utils.plot_lcz import save_lcz_map
+
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -330,134 +329,6 @@ class GridSegDataModule:
         )
 
 
-# ── Inference helpers ────────────────────────────────────────────────────────
-
-def _build_roi_meta(grid_gdf, sample_npy_path: Path):
-    """Compute full-ROI raster dimensions and transform from the grid GDF.
-
-    Returns (out_H, out_W, res, roi_minx, roi_maxy, transform, crs).
-    """
-    minx, miny, maxx, maxy = grid_gdf.total_bounds
-    row = grid_gdf.iloc[0]
-    b = row.geometry.bounds   # (tile_minx, tile_miny, tile_maxx, tile_maxy)
-    arr = np.load(sample_npy_path, mmap_mode="r")
-    _, H, W = arr.shape
-    res_x = (b[2] - b[0]) / W
-    res_y = (b[3] - b[1]) / H
-    res = (res_x + res_y) / 2
-    out_W = int(round((maxx - minx) / res))
-    out_H = int(round((maxy - miny) / res))
-    transform = rio_from_origin(minx, maxy, res, res)
-    crs = str(grid_gdf.crs)
-    return out_H, out_W, res, minx, maxy, transform, crs
-
-
-def _save_geotiff(raster: np.ndarray, crs: str, transform, path: Path) -> None:
-    """Write a uint8 raster to a GeoTIFF with nodata=0."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with rasterio.open(
-        path, "w", driver="GTiff",
-        height=raster.shape[0], width=raster.shape[1],
-        count=1, dtype="uint8", crs=crs, transform=transform, nodata=0,
-    ) as dst:
-        dst.write(raster, 1)
-
-
-def _infer_city_unet(
-    model,
-    city_dir: Path,
-    output_name: str,
-    year: str,
-    device,
-    batch_size: int = 8,
-    dequantize: bool = False,
-) -> tuple[np.ndarray, str, object]:
-    """Run U-Net inference over all grid tiles for one city.
-
-    Returns (uint8 raster with values 1-17, CRS string, rasterio transform).
-    """
-    city = city_dir.name
-    grid_gpkg = city_dir / f"{city}_grid.gpkg"
-    if not grid_gpkg.exists():
-        logger.warning(f"  {city}: {grid_gpkg.name} not found — skipping inference")
-        return None, None, None
-
-    grid_gdf = gpd.read_file(grid_gpkg)
-    id2geom = {int(r["grid_id"]): r.geometry for _, r in grid_gdf.iterrows()}
-
-    # Collect all npy paths across all splits
-    emb_base = city_dir / output_name / year
-    all_tiles: list[tuple[Path, int]] = []
-    for split in ("train", "val", "test"):
-        split_dir = emb_base / split
-        if not split_dir.exists():
-            continue
-        for p in sorted(split_dir.glob(f"{city}_*.npy")):
-            m = _FILENAME_RE.match(p.name)
-            if m is None:
-                continue
-            gid = int(m.group(2))
-            if gid in id2geom:
-                all_tiles.append((p, gid))
-
-    if not all_tiles:
-        logger.warning(f"  {city}: no npy tiles found under {emb_base}")
-        return None, None, None
-
-    out_H, out_W, res, roi_minx, roi_maxy, transform, crs = _build_roi_meta(
-        grid_gdf, all_tiles[0][0]
-    )
-    raster = np.zeros((out_H, out_W), dtype=np.uint8)
-
-    model.eval()
-    with torch.no_grad():
-        for i in range(0, len(all_tiles), batch_size):
-            batch_tiles = all_tiles[i : i + batch_size]
-            imgs, geoms = [], []
-            for p, gid in batch_tiles:
-                arr = np.load(p).astype(np.float32)
-                if dequantize:
-                    arr = _dequantize(arr)
-                imgs.append(torch.from_numpy(arr))
-                geoms.append(id2geom[gid])
-
-            # Pad to uniform (H, W) within this mini-batch
-            max_h = max(t.shape[1] for t in imgs)
-            max_w = max(t.shape[2] for t in imgs)
-            padded = torch.zeros(len(imgs), imgs[0].shape[0], max_h, max_w)
-            for j, t in enumerate(imgs):
-                padded[j, :, : t.shape[1], : t.shape[2]] = t
-            padded = padded.to(device)
-
-            logits = model(padded)   # (B, num_classes, H, W)
-            preds = logits.argmax(dim=1).cpu().numpy()   # (B, H, W), 0-indexed
-
-            for j, (_, gid) in enumerate(batch_tiles):
-                geom = geoms[j]
-                tx0, ty0, tx1, ty1 = geom.bounds
-                ph, pw = imgs[j].shape[1], imgs[j].shape[2]
-                pred = (preds[j, :ph, :pw] + 1).astype(np.uint8)  # 0-idx → 1-17
-                col_off = int(round((tx0 - roi_minx) / res))
-                row_off = int(round((roi_maxy - ty1) / res))
-                r0 = max(0, row_off)
-                c0 = max(0, col_off)
-                # Use grid geometry for slot size: tiles clipped from a different
-                # UTM zone have inflated bounding boxes, yielding fewer pixels than
-                # the slot expects. Nearest-neighbour resize fills the slot cleanly.
-                slot_h = max(1, int(round((ty1 - ty0) / res)))
-                slot_w = max(1, int(round((tx1 - tx0) / res)))
-                r1 = min(out_H, r0 + slot_h)
-                c1 = min(out_W, c0 + slot_w)
-                target_h, target_w = r1 - r0, c1 - c0
-                if ph != target_h or pw != target_w:
-                    row_idx = np.round(np.linspace(0, ph - 1, target_h)).astype(int)
-                    col_idx = np.round(np.linspace(0, pw - 1, target_w)).astype(int)
-                    pred = pred[row_idx[:, None], col_idx[None, :]]
-                raster[r0:r1, c0:c1] = pred[:target_h, :target_w]
-
-    return raster, crs, transform
-
-
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -522,7 +393,24 @@ def main() -> None:
     g.add_argument("--checkpoint", type=Path, default=None,
                    help="Load model weights from this .pt file and skip training (inference only).")
 
+    # ── Inference ─────────────────────────────────────────────────────────────
+    g = parser.add_argument_group("Inference")
+    g.add_argument("--embedding-name", required=True,
+                   choices=["tessera", "alpha_earth", "alpha_earth_coop"],
+                   help="Embedding registry key for infer_roi (tessera, alpha_earth, alpha_earth_coop).")
+    g.add_argument("--embedding-dir", required=True, type=Path,
+                   help="Directory containing raw source embedding tiles (.zarr or .tif).")
+    g.add_argument("--patch-size", type=int, default=64,
+                   help="Sliding-window patch size in pixels for inference (default: 64).")
+    g.add_argument("--overlap", type=int, default=None,
+                   help="Overlap between adjacent patches in pixels for inference "
+                        "(default: patch_size // 2).")
+    g.add_argument("--margin-m", type=float, default=200.0,
+                   help="Extra metres clipped around city bbox per tile for edge context (default: 200).")
+
     args = parser.parse_args()
+    if args.overlap is None:
+        args.overlap = args.patch_size // 2
 
     torch.manual_seed(args.seed)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -683,19 +571,31 @@ def main() -> None:
     task.model.eval()
     for city_dir in city_dirs:
         city = city_dir.name
-        raster, crs, transform = _infer_city_unet(
-            task.model, city_dir, args.output_name, args.year, device, args.batch_size,
-            dequantize=args.dequantize,
-        )
-        if raster is None:
+        grid_gpkg = city_dir / f"{city}_grid.gpkg"
+        if not grid_gpkg.exists():
+            logger.warning(f"  {city}: {grid_gpkg.name} not found — skipping inference")
             continue
+        grid_gdf = gpd.read_file(grid_gpkg)
+        west, south, east, north = grid_gdf.to_crs("EPSG:4326").total_bounds
+        bbox = (west, south, east, north)
+
         tif_path = run_dir / f"{run_dir.name}_unet-{args.preset}-segmentation-prediction_{city}.tif"
-        png_path = run_dir / f"{run_dir.name}_unet-{args.preset}-segmentation-prediction_{city}.png"
-        _save_geotiff(raster, crs, transform, tif_path)
-        save_lcz_map(
-            raster,
-            f"U-Net {args.preset} — {city} ({args.output_name} {args.year})",
-            png_path,
+        infer_roi(
+            model=task.model,
+            model_type="unet",
+            embedding_name=args.embedding_name,
+            embedding_dir=args.embedding_dir,
+            bbox=bbox,
+            output_path=tif_path,
+            num_classes=args.num_classes,
+            patch_size=args.patch_size,
+            overlap=args.overlap,
+            batch_size=args.batch_size,
+            device=device,
+            dequantize=args.dequantize,
+            year=args.year,
+            city_name=city,
+            margin_m=args.margin_m,
         )
         logger.info(f"  {city}: saved {tif_path.name}")
 
