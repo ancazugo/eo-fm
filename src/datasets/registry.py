@@ -17,6 +17,25 @@ class GeoTiffEmbedding(RasterDataset):
     is_image = True
 
 
+class SeamlessEmbeddingDataset(EmbeddedSeamlessData):
+    """EmbeddedSeamlessData dequantized to (72, H, W) for the pipeline.
+
+    Bypasses torchgeo's internal ESDQuantizer and uses dequantize_esd() from
+    dequantize_embeddings.py, which decodes 12 temporal bands × 6 VQ levels
+    into (72, H, W) float32 in [-1, 1], skipping the 13th QA band.
+    """
+
+    def __getitem__(self, index):
+        import torch
+        from torchgeo.datasets.geo import RasterDataset
+        from dequantize_embeddings import dequantize_esd
+
+        sample = RasterDataset.__getitem__(self, index)
+        arr = sample["image"].numpy()  # (13, H, W) raw uint16-as-float32
+        sample["image"] = torch.from_numpy(dequantize_esd(arr))  # (72, H, W)
+        return sample
+
+
 EMBEDDING_REGISTRY: dict[str, dict] = {
     "tessera": {
         "class": TesseraEmbeddings,
@@ -49,15 +68,20 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "description": "Tessera 128-band GeoTIFF mosaic embedding",
     },
     "seamless": {
-        "class": EmbeddedSeamlessData,
-        "in_channels": 128,
+        "class": SeamlessEmbeddingDataset,
+        "in_channels": 72,  # 12 temporal months × 6 VQ levels (band 13 is QA, excluded)
         "resolution": 30,
-        "description": "Embedded Seamless Data 128-band quantized embeddings",
+        "description": "Embedded Seamless Data (ESD) 78-channel quantized embeddings",
     },
     "alpha_earth_coop": {
         "in_channels": 64,
         "resolution": 10,
         "description": "AlphaEarth coop GeoTIFF tiles (source.coop), 64-band Int8 quantized",
+    },
+    "tesserav1.1": {
+        "in_channels": 128,
+        "resolution": 10,
+        "description": "Tessera v1.1 int8+scales tiles, dequantized to 128-band float32",
     },
 }
 
@@ -74,6 +98,51 @@ def get_in_channels(name: str) -> int:
     if name not in EMBEDDING_REGISTRY:
         raise ValueError(f"Unknown embedding '{name}'. Choose from: {list(EMBEDDING_REGISTRY)}")
     return EMBEDDING_REGISTRY[name]["in_channels"]
+
+
+def _create_seamless_dataset(
+    cls,
+    path: Path,
+    bbox: tuple[float, float, float, float] | None,
+):
+    """Discover ESD tiles, filter to bbox, pick a consistent CRS, and return dataset.
+
+    Tiles live in per-MGRS-zone subdirectories (e.g. 37M/SDC30_EBD_V001_37MBU_2017.tiff).
+    Each tile carries its own UTM CRS. When all kept tiles share one CRS the native
+    projection is used; when the bbox spans multiple zones EPSG:4326 is used as the
+    common CRS so torchgeo can reproject them uniformly.
+    """
+    import rasterio
+    import rasterio.warp
+    from pyproj import CRS as ProjCRS
+
+    all_tiffs = sorted(path.rglob("SDC30_EBD_V001_*.tiff"))
+    all_tiffs += sorted(path.rglob("SDC30_EBD_V001_*.tif"))
+
+    if not all_tiffs:
+        return cls(paths=str(path), crs=ProjCRS.from_epsg(4326))
+
+    if bbox:
+        west, south, east, north = bbox
+        kept: list[Path] = []
+        crses: set = set()
+        for tiff in all_tiffs:
+            with rasterio.open(tiff) as ds:
+                l, b, r, t = rasterio.warp.transform_bounds(
+                    ds.crs, "EPSG:4326", *ds.bounds
+                )
+            if r > west and l < east and t > south and b < north:
+                kept.append(tiff)
+                crses.add(ds.crs)
+        if kept:
+            all_tiffs = kept
+            target_crs = crses.pop() if len(crses) == 1 else ProjCRS.from_epsg(4326)
+        else:
+            target_crs = ProjCRS.from_epsg(4326)
+    else:
+        target_crs = ProjCRS.from_epsg(4326)
+
+    return cls(paths=[str(t) for t in all_tiffs], crs=target_crs)
 
 
 def create_embedding_dataset(
@@ -124,6 +193,8 @@ def create_embedding_dataset(
         )
 
     embedding_cls = get_embedding_class(name)
+    if name == "seamless":
+        return _create_seamless_dataset(embedding_cls, path, bbox)
     return embedding_cls(paths=str(path))
 
 

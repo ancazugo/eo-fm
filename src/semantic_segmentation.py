@@ -196,11 +196,6 @@ def _build_city_items(
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 
-def _dequantize(arr: np.ndarray) -> np.ndarray:
-    """AlphaEarth coop dequantisation: sign(v) × (|v| / 127.5)²."""
-    return np.sign(arr) * (np.abs(arr) / 127.5) ** 2
-
-
 class GridSegDataset(Dataset):
     """Grid tile dataset for U-Net segmentation.
 
@@ -212,11 +207,11 @@ class GridSegDataset(Dataset):
         self,
         items: list,          # (npy_path, tile_geom, tile_crs, polys, tif_path_or_None)
         label_source: str,    # "gpkg" or "tif"
-        dequantize: bool = False,
+        dequantize_fn=None,
     ) -> None:
         self.items = items
         self.label_source = label_source
-        self.dequantize = dequantize
+        self.dequantize_fn = dequantize_fn
 
     def __len__(self) -> int:
         return len(self.items)
@@ -225,8 +220,8 @@ class GridSegDataset(Dataset):
         npy_path, tile_geom, tile_crs, polys, tif_ref = self.items[idx]
 
         arr = np.load(npy_path).astype(np.float32)   # (C, H, W)
-        if self.dequantize:
-            arr = _dequantize(arr)
+        if self.dequantize_fn is not None:
+            arr = self.dequantize_fn(arr)
         _, H, W = arr.shape
         image = torch.from_numpy(arr)
 
@@ -253,22 +248,22 @@ class GridSegDataModule:
         label_source: str,
         batch_size: int,
         num_workers: int,
-        dequantize: bool = False,
+        dequantize_fn=None,
     ) -> None:
         self.all_items = all_items
         self.split_map = split_map
         self.label_source = label_source
         self.batch_size = batch_size
         self.num_workers = num_workers
-        self.dequantize = dequantize
+        self.dequantize_fn = dequantize_fn
 
     def setup(self) -> None:
         def _for_split(s):
             return [it for it in self.all_items if self.split_map.get(it[0]) == s]
 
-        self._train_ds = GridSegDataset(_for_split("train"), self.label_source, self.dequantize)
-        self._val_ds   = GridSegDataset(_for_split("val"),   self.label_source, self.dequantize)
-        self._test_ds  = GridSegDataset(_for_split("test"),  self.label_source, self.dequantize)
+        self._train_ds = GridSegDataset(_for_split("train"), self.label_source, self.dequantize_fn)
+        self._val_ds   = GridSegDataset(_for_split("val"),   self.label_source, self.dequantize_fn)
+        self._test_ds  = GridSegDataset(_for_split("test"),  self.label_source, self.dequantize_fn)
         logger.info(
             f"Dataset sizes — train: {len(self._train_ds)}, "
             f"val: {len(self._val_ds)}, test: {len(self._test_ds)}"
@@ -389,15 +384,17 @@ def main() -> None:
     g.add_argument("--run-name", default=None,
                    help="Optional WandB run name override.")
     g.add_argument("--dequantize", action="store_true",
-                   help="Apply AlphaEarth dequantisation (sign(v)×(|v|/127.5)²) when loading npy tiles.")
+                   help="Dequantize embeddings when loading npy tiles. "
+                        "The function is selected from --embedding-name: "
+                        "seamless → ESD (72-ch), alpha_earth_coop → AlphaEarth int8.")
     g.add_argument("--checkpoint", type=Path, default=None,
                    help="Load model weights from this .pt file and skip training (inference only).")
 
     # ── Inference ─────────────────────────────────────────────────────────────
     g = parser.add_argument_group("Inference")
     g.add_argument("--embedding-name", required=True,
-                   choices=["tessera", "alpha_earth", "alpha_earth_coop"],
-                   help="Embedding registry key for infer_roi (tessera, alpha_earth, alpha_earth_coop).")
+                   choices=["tessera", "tesserav1.1", "alpha_earth", "alpha_earth_coop", "seamless"],
+                   help="Embedding registry key for infer_roi.")
     g.add_argument("--embedding-dir", required=True, type=Path,
                    help="Directory containing raw source embedding tiles (.zarr or .tif).")
     g.add_argument("--patch-size", type=int, default=64,
@@ -449,6 +446,10 @@ def main() -> None:
 
     # ── Detect in_channels from first npy ─────────────────────────────────────
     in_channels = int(np.load(all_items[0][0], mmap_mode="r").shape[0])
+    # dequantize_esd expands 13 raw ESD bands → 72 channels; override so the
+    # model is built with the post-dequantization channel count.
+    if args.dequantize and args.embedding_name == "seamless":
+        in_channels = 72
     logger.info(f"Detected in_channels = {in_channels}")
 
     # ── Model ─────────────────────────────────────────────────────────────────
@@ -467,11 +468,21 @@ def main() -> None:
     logger.info(f"UNet '{args.preset}': depth={depth}, base_features={base_features}, "
                 f"params={n_params:,}")
 
+    # ── Dequantize function (selected by embedding type) ──────────────────────
+    dequantize_fn = None
+    if args.dequantize:
+        if args.embedding_name == "seamless":
+            from dequantize_embeddings import dequantize_esd
+            dequantize_fn = dequantize_esd
+        else:
+            from dequantize_embeddings import dequantize_alphaearth_embeddings
+            dequantize_fn = dequantize_alphaearth_embeddings
+
     # ── DataModule ────────────────────────────────────────────────────────────
     datamodule = GridSegDataModule(
         all_items, split_map, args.label_source,
         args.batch_size, args.num_workers,
-        dequantize=args.dequantize,
+        dequantize_fn=dequantize_fn,
     )
 
     # ── WandB ─────────────────────────────────────────────────────────────────
@@ -592,7 +603,7 @@ def main() -> None:
             overlap=args.overlap,
             batch_size=args.batch_size,
             device=device,
-            dequantize=args.dequantize,
+            dequantize_fn=dequantize_fn,
             year=args.year,
             city_name=city,
             margin_m=args.margin_m,

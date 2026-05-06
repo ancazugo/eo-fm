@@ -21,6 +21,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import functools
 import re
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -90,6 +91,51 @@ def _build_tile_index(
         logger.info(f"Tile index (coop): {len(paths)} local tiles from {index_path}")
         return paths, STRtree(geoms)
 
+    # ── tessera v1.1: spatial index from geoinfo tiffs ───────────────────────
+    if embedding_name == "tesserav1.1":
+        import rasterio
+        import rasterio.warp
+
+        geoinfo_dir = embedding_dir / "geoinfo"
+        if not geoinfo_dir.exists():
+            raise FileNotFoundError(
+                f"geoinfo/ subdirectory not found under {embedding_dir}. "
+                "Pass the year directory (e.g. .../GeoTessera/v1.1/2017) as --embedding-dir."
+            )
+        tiff_files = sorted(geoinfo_dir.glob("*.tiff")) + sorted(geoinfo_dir.glob("*.tif"))
+        if not tiff_files:
+            raise FileNotFoundError(f"No geoinfo tiff files found in {geoinfo_dir}")
+        paths, geoms = [], []
+        for p in tiff_files:
+            with rasterio.open(p) as ds:
+                l, b, r, t = rasterio.warp.transform_bounds(ds.crs, "EPSG:4326", *ds.bounds)
+            geoms.append(box(l, b, r, t))
+            paths.append(p)
+        logger.info(f"Tile index (tesserav1.1): {len(paths)} tiles from {geoinfo_dir}")
+        return paths, STRtree(geoms)
+
+    # ── seamless (ESD): spatial index from rasterio bounds ───────────────────
+    if embedding_name == "seamless":
+        import rasterio
+        import rasterio.warp
+
+        all_tiffs = sorted(embedding_dir.rglob("SDC30_EBD_V001_*.tiff"))
+        all_tiffs += sorted(embedding_dir.rglob("SDC30_EBD_V001_*.tif"))
+        if not all_tiffs:
+            raise FileNotFoundError(
+                f"No ESD tiles (SDC30_EBD_V001_*.tiff) found under {embedding_dir}"
+            )
+        paths, geoms = [], []
+        for p in all_tiffs:
+            with rasterio.open(p) as ds:
+                l, b, r, t = rasterio.warp.transform_bounds(
+                    ds.crs, "EPSG:4326", *ds.bounds
+                )
+            geoms.append(box(l, b, r, t))
+            paths.append(p)
+        logger.info(f"Tile index (seamless): {len(paths)} tiles from {embedding_dir}")
+        return paths, STRtree(geoms)
+
     # ── zarr / tif: spatial index from filename patterns ─────────────────────
     meta = EMBEDDING_REGISTRY.get(embedding_name, {})
     pattern = meta.get("zarr_filename_pattern")
@@ -99,7 +145,7 @@ def _build_tile_index(
     if pattern is None or tile_size is None or is_center is None:
         raise ValueError(
             f"Embedding '{embedding_name}' has no filename-pattern metadata. "
-            "Only 'tessera' and 'alpha_earth' are supported."
+            "Only 'tessera', 'alpha_earth', and 'seamless' are supported."
         )
 
     regex = re.compile(pattern)
@@ -132,9 +178,60 @@ def _build_tile_index(
 # Per-patch crop
 # ---------------------------------------------------------------------------
 
+@functools.lru_cache(maxsize=8)
+def _open_tile_tessera11(path: Path) -> xr.DataArray:
+    """Open a tessera v1.1 tile from a geoinfo tiff path.
+
+    Finds the paired int8+scales npy files in the sibling infer_output/ directory,
+    dequantizes via load_and_dequantize_tessera_representation(), and returns a
+    (band, y, x) DataArray with the geoinfo tiff's CRS and pixel coordinates.
+    """
+    import re
+    import rasterio
+    import rioxarray  # noqa: F401
+
+    m = re.match(r"grid_([-\d.]+)_([-\d.]+)\.tiff?", path.name)
+    if m is None:
+        raise ValueError(f"Cannot parse lon/lat from geoinfo filename: {path.name}")
+    lon, lat = m.group(1), m.group(2)
+
+    infer_dir = path.parent.parent / "infer_output"
+    int8_files = sorted(infer_dir.glob(f"*_grid_{lon}_{lat}_all_data_emb128_int8.npy"))
+    scales_files = sorted(infer_dir.glob(f"*_grid_{lon}_{lat}_all_data_emb128_scales.npy"))
+    if not int8_files or not scales_files:
+        raise FileNotFoundError(
+            f"No int8/scales npy pair found for tile ({lon}, {lat}) in {infer_dir}"
+        )
+
+    from dequantize_embeddings import load_and_dequantize_tessera_representation
+    arr_hwc = load_and_dequantize_tessera_representation(int8_files[0], scales_files[0])
+    arr_chw = arr_hwc.transpose(2, 0, 1)  # (128, H, W)
+
+    with rasterio.open(path) as ds:
+        crs = ds.crs
+        transform = ds.transform
+        H, W = ds.height, ds.width
+
+    x_coords = [transform.c + (i + 0.5) * transform.a for i in range(W)]
+    y_coords = [transform.f + (i + 0.5) * transform.e for i in range(H)]
+
+    da = xr.DataArray(
+        arr_chw,
+        dims=("band", "y", "x"),
+        coords={"band": np.arange(arr_chw.shape[0]), "y": y_coords, "x": x_coords},
+    )
+    return da.rio.write_crs(crs)
+
+
 def _open_tile(path: Path) -> xr.DataArray:
     """Open a .zarr or .tif tile as a (band, y, x) DataArray with CRS set."""
     import rioxarray as rxr
+
+    # Tessera v1.1: geoinfo tiff with a sibling infer_output/ directory
+    if path.suffix in (".tiff", ".tif") and path.parent.name == "geoinfo":
+        infer_dir = path.parent.parent / "infer_output"
+        if infer_dir.exists():
+            return _open_tile_tessera11(path)
 
     if path.suffix == ".zarr":
         ds = xr.open_zarr(str(path), chunks=False)
@@ -289,7 +386,7 @@ def main() -> None:
     parser.add_argument(
         "--embedding-name",
         required=True,
-        choices=["tessera", "alpha_earth", "alpha_earth_coop"],
+        choices=["tessera", "tesserav1.1", "alpha_earth", "alpha_earth_coop", "seamless"],
         help="Embedding type key (used to parse tile filenames).",
     )
     parser.add_argument(
@@ -356,6 +453,16 @@ def main() -> None:
 
         n_saved = 0
         n_skipped = 0
+
+        # Sort patches by centroid so tiles in the OS page cache are shared
+        # across workers processing adjacent patches (critical for tesserav1.1
+        # where each tile is ~110 MB and loaded fresh from npy each call).
+        if args.embedding_name == "tesserav1.1":
+            cx = split_patches.geometry.centroid.x
+            cy = split_patches.geometry.centroid.y
+            split_patches = split_patches.iloc[
+                (cx + cy * 1000).argsort().values
+            ].reset_index(drop=True)
 
         if args.workers > 1:
             # Build task list: only patches that intersect at least one tile

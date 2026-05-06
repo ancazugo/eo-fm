@@ -60,11 +60,6 @@ from extract_so2sat_embeddings import _build_tile_index, _open_tile
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _dequantize(arr: np.ndarray) -> np.ndarray:
-    """AlphaEarth coop dequantization: sign(v) × (|v|/127.5)²."""
-    return np.sign(arr) * (np.abs(arr) / 127.5) ** 2
-
-
 def _hanning_2d(h: int, w: int) -> np.ndarray:
     """2D Hanning taper window of shape (h, w), float32."""
     win_h = np.hanning(h).astype(np.float32)
@@ -76,7 +71,7 @@ def _open_and_clip(
     path: Path,
     roi_4326: tuple[float, float, float, float],
     margin_m: float = 0.0,
-    dequantize: bool = False,
+    dequantize_fn=None,
     valid_bbox_4326: tuple[float, float, float, float] | None = None,
 ) -> tuple[np.ndarray, str, Any] | None:
     """Open a source tile, clip to roi_4326 + margin, return (arr, crs, transform).
@@ -134,8 +129,8 @@ def _open_and_clip(
         clipped = clipped.isel(y=slice(None, None, -1))
 
     arr = clipped.values.astype(np.float32)
-    if dequantize:
-        arr = _dequantize(arr)
+    if dequantize_fn is not None:
+        arr = dequantize_fn(arr)
 
     # Compute Affine manually from coordinate arrays.
     # clipped.rio.transform() uses step = y[1]-y[0] and returns e = -step,
@@ -317,7 +312,7 @@ def infer_roi(
     overlap: int = 0,
     batch_size: int = 8,
     device: torch.device | None = None,
-    dequantize: bool = False,
+    dequantize_fn=None,
     out_crs: str | None = None,
     out_res: float | None = None,
     year: str | None = None,
@@ -400,7 +395,7 @@ def infer_roi(
     # ── Auto-detect output CRS / resolution from first valid tile ─────────────
     first_result = None
     for p in matched_paths:
-        r = _open_and_clip(p, bbox, margin_m=0.0, dequantize=False,
+        r = _open_and_clip(p, bbox, margin_m=0.0, dequantize_fn=None,
                            valid_bbox_4326=path_to_valid_bbox.get(p))
         if r is not None:
             first_result = r
@@ -433,7 +428,7 @@ def infer_roi(
     for i, tile_path in enumerate(matched_paths):
         logger.info(f"Tile {i + 1}/{len(matched_paths)}: {tile_path.name}")
 
-        result = _open_and_clip(tile_path, bbox, margin_m=margin_m, dequantize=dequantize,
+        result = _open_and_clip(tile_path, bbox, margin_m=margin_m, dequantize_fn=dequantize_fn,
                                valid_bbox_4326=path_to_valid_bbox.get(tile_path))
         if result is None:
             logger.warning("  Skipped — no valid data after clip")
@@ -525,7 +520,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--num-classes", type=int, default=17,
                    help="Number of LCZ classes (must match training).")
     p.add_argument("--embedding-name", required=True,
-                   choices=["tessera", "alpha_earth", "alpha_earth_coop"],
+                   choices=["tessera", "tesserav1.1", "alpha_earth", "alpha_earth_coop", "seamless"],
                    help="Embedding type key.")
     p.add_argument("--embedding-dir", required=True, type=Path,
                    help="Directory containing source tile files (.zarr or .tif).")
@@ -546,7 +541,9 @@ def _parse_args() -> argparse.Namespace:
                    help="Extra metres clipped around the bbox per tile for edge context "
                         "(default: 200).")
     p.add_argument("--dequantize", action="store_true",
-                   help="Apply AlphaEarth coop Int8 dequantization.")
+                   help="Dequantize embeddings on-the-fly. "
+                        "Function is selected from --embedding-name: "
+                        "seamless → ESD (72-ch), alpha_earth_coop → AlphaEarth int8.")
     p.add_argument("--out-crs", default=None,
                    help="Output CRS (e.g. 'EPSG:4326'). Auto-detected from tiles if omitted.")
     p.add_argument("--out-res", type=float, default=None,
@@ -625,6 +622,16 @@ def main() -> None:
     model.eval()
     logger.info(f"Loaded checkpoint: {args.checkpoint}")
 
+    # ── Dequantize function ───────────────────────────────────────────────────
+    dequantize_fn = None
+    if args.dequantize:
+        if args.embedding_name == "seamless":
+            from dequantize_embeddings import dequantize_esd
+            dequantize_fn = dequantize_esd
+        else:
+            from dequantize_embeddings import dequantize_alphaearth_embeddings
+            dequantize_fn = dequantize_alphaearth_embeddings
+
     # ── Inference ─────────────────────────────────────────────────────────────
     infer_roi(
         model=model,
@@ -638,7 +645,7 @@ def main() -> None:
         overlap=args.overlap,
         batch_size=args.batch_size,
         device=device,
-        dequantize=args.dequantize,
+        dequantize_fn=dequantize_fn,
         out_crs=args.out_crs,
         out_res=args.out_res,
         year=args.year,

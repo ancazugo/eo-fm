@@ -149,12 +149,12 @@ class PatchDataset(Dataset):
         patch_size: int,
         sub_patch_size: int | None = None,
         sub_patch_stride: int | None = None,
-        dequantize: bool = False,
+        dequantize_fn=None,
     ) -> None:
         self.patch_size = patch_size
         self.sub_patch_size = sub_patch_size
         self.sub_patch_stride = sub_patch_stride or sub_patch_size
-        self.dequantize = dequantize
+        self.dequantize_fn = dequantize_fn
 
         if sub_patch_size is None:
             self.expanded = [(path, label, None, None) for path, label, _ in items]
@@ -175,8 +175,8 @@ class PatchDataset(Dataset):
 
         arr = np.load(path).astype(np.float32)   # (C, H, W)
         arr = np.nan_to_num(arr, nan=0.0)
-        if self.dequantize:
-            arr = np.sign(arr) * (np.abs(arr) / 127.5) ** 2
+        if self.dequantize_fn is not None:
+            arr = self.dequantize_fn(arr)
 
         if r is None:
             image = torch.from_numpy(arr)
@@ -211,7 +211,7 @@ class PatchDataModule:
         num_workers: int,
         sub_patch_size: int | None = None,
         sub_patch_stride: int | None = None,
-        dequantize: bool = False,
+        dequantize_fn=None,
     ) -> None:
         self.all_items = all_items
         self.patch_size = patch_size
@@ -219,14 +219,14 @@ class PatchDataModule:
         self.num_workers = num_workers
         self.sub_patch_size = sub_patch_size
         self.sub_patch_stride = sub_patch_stride
-        self.dequantize = dequantize
+        self.dequantize_fn = dequantize_fn
 
     def setup(self) -> None:
         def _for_split(s: str) -> list:
             return [it for it in self.all_items if it[2] == s]
 
         kw = dict(sub_patch_size=self.sub_patch_size, sub_patch_stride=self.sub_patch_stride,
-                  dequantize=self.dequantize)
+                  dequantize_fn=self.dequantize_fn)
         self._train_ds = PatchDataset(_for_split("train"), self.patch_size, **kw)
         self._val_ds   = PatchDataset(_for_split("val"),   self.patch_size, **kw)
         self._test_ds  = PatchDataset(_for_split("test"),  self.patch_size, **kw)
@@ -334,15 +334,17 @@ def main() -> None:
     g.add_argument("--run-name", default=None,
                    help="Optional WandB run name override.")
     g.add_argument("--dequantize", action="store_true",
-                   help="Apply AlphaEarth dequantisation (sign(v)×(|v|/127.5)²) when loading npy patches.")
+                   help="Dequantize embeddings when loading npy patches. "
+                        "The function is selected from --embedding-name: "
+                        "seamless → ESD (72-ch), alpha_earth_coop → AlphaEarth int8.")
     g.add_argument("--checkpoint", type=Path, default=None,
                    help="Load model weights from this .pt file and skip training (inference only).")
 
     # ── Inference ─────────────────────────────────────────────────────────────
     g = parser.add_argument_group("Inference")
     g.add_argument("--embedding-name", required=True,
-                   choices=["tessera", "alpha_earth", "alpha_earth_coop"],
-                   help="Embedding registry key for infer_roi (tessera, alpha_earth, alpha_earth_coop).")
+                   choices=["tessera", "tesserav1.1", "alpha_earth", "alpha_earth_coop", "seamless"],
+                   help="Embedding registry key for infer_roi.")
     g.add_argument("--embedding-dir", required=True, type=Path,
                    help="Directory containing raw source embedding tiles (.zarr or .tif).")
     g.add_argument("--overlap", type=int, default=None,
@@ -401,6 +403,10 @@ def main() -> None:
 
     # ── Detect in_channels from first npy ────────────────────────────────────
     in_channels = int(np.load(all_items[0][0], mmap_mode="r").shape[0])
+    # dequantize_esd expands 13 raw bands → 72 channels; override so the model
+    # is built with the post-dequantization channel count.
+    if args.dequantize and args.embedding_name == "seamless":
+        in_channels = 72
     logger.info(f"Detected in_channels = {in_channels}")
 
     # ── Model ─────────────────────────────────────────────────────────────────
@@ -421,12 +427,22 @@ def main() -> None:
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"ResNet '{args.preset}' ({arch}): params={n_params:,}")
 
+    # ── Dequantize function (selected by embedding type) ──────────────────────
+    dequantize_fn = None
+    if args.dequantize:
+        if args.embedding_name == "seamless":
+            from dequantize_embeddings import dequantize_esd
+            dequantize_fn = dequantize_esd
+        else:
+            from dequantize_embeddings import dequantize_alphaearth_embeddings
+            dequantize_fn = dequantize_alphaearth_embeddings
+
     # ── DataModule ────────────────────────────────────────────────────────────
     datamodule = PatchDataModule(
         all_items, args.patch_size, args.batch_size, args.num_workers,
         sub_patch_size=args.sub_patch_size,
         sub_patch_stride=args.sub_patch_stride,
-        dequantize=args.dequantize,
+        dequantize_fn=dequantize_fn,
     )
 
     # ── WandB ─────────────────────────────────────────────────────────────────
@@ -577,7 +593,7 @@ def main() -> None:
             overlap=args.overlap,
             batch_size=args.batch_size,
             device=device,
-            dequantize=args.dequantize,
+            dequantize_fn=dequantize_fn,
             year=args.year,
             city_name=city,
             margin_m=args.margin_m,
