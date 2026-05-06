@@ -226,8 +226,8 @@ class CoopEmbeddingDataset(GeoDataset):
             output[:, row_off:r_end, col:c_end] = data[:, : r_end - row_off, : c_end - col]
 
         if self._dequantize:
-            # AlphaEarth dequantisation: sign(v) × (|v| / 127.5)²
-            output = np.sign(output) * (np.abs(output) / 127.5) ** 2
+            from dequantize_embeddings import dequantize_alphaearth_embeddings
+            output = dequantize_alphaearth_embeddings(output)
 
         transform = rasterio.transform.from_origin(x.start, y.stop, res, res)
 
