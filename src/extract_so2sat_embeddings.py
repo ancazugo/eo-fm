@@ -378,6 +378,15 @@ def main() -> None:
              "(must contain patches_reference_rxr.gpkg).",
     )
     parser.add_argument(
+        "--patches-file",
+        type=Path,
+        default=None,
+        help="Optional GeoPackage with patches to process. "
+             "Defaults to patches_reference_rxr.gpkg in --so2sat-dir. "
+             "Use to restrict extraction to a single city, e.g. "
+             "cities/London/patches_reference_London.gpkg.",
+    )
+    parser.add_argument(
         "--embedding-dir",
         required=True,
         type=Path,
@@ -425,9 +434,9 @@ def main() -> None:
         sys.path.insert(0, str(src_dir))
 
     # --- Load all patches once ---
-    patches_path = args.so2sat_dir / "patches_reference_rxr.gpkg"
+    patches_path = args.patches_file if args.patches_file is not None else args.so2sat_dir / "patches_reference_rxr.gpkg"
     if not patches_path.exists():
-        logger.error(f"patches_reference_rxr.gpkg not found at {patches_path}")
+        logger.error(f"Patches file not found at {patches_path}")
         sys.exit(1)
 
     logger.info(f"Loading patches from {patches_path} …")
