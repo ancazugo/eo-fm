@@ -1,14 +1,13 @@
-"""Patch-level classification (ResNet) on So2Sat patches with grid-based split.
+"""Patch-level classification (ResNet) on So2Sat patches.
 
-For each city the script:
-  1. Builds a patch index by scanning the So2Sat embedding folders:
-       {so2sat_dir}/{training,validation,testing}/{output_name}/{year}/patch_{id}.npy
-  2. Loads patches_reference_{city}_split.gpkg (produced by create_city_grids.py)
-     which has: patch_id, LCZ_class (1-17), grid_id, split (train/val/test)
-  3. For each patch in the GDF, looks up its npy file in the index.
-     The grid-based 'split' column (not the original So2Sat split) determines
-     train / val / test assignment.
-  4. Trains a ResNet patch classifier and logs to WandB.
+Two split modes:
+
+  Per-city (default): specify --cities-dir and --cities.
+    Uses patches_reference_{city}_split.gpkg (grid-based split column: train/val/test).
+
+  Global (--global-split): uses patches_reference_rxr.gpkg directly.
+    The 'dataset' column (training/validation/testing) defines the split — no
+    city selection needed, all 400 k+ patches across 51 cities are included.
 
 Label convention (matching train_resnet.py):
   LCZ_class 1-17 → 0-16 (class index)
@@ -23,14 +22,15 @@ Example (single city, AlphaEarth):
         --batch-size 64 --num-workers 4 --max-epochs 50 \\
         --output-dir /maps/acz25/phd-thesis-data/output/lcz-classification/dl
 
-Example (multiple cities, GeoTessera):
+Example (global split, AlphaEarthCoop):
     python src/patch_classification.py \\
         --so2sat-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4 \\
-        --cities-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4/cities \\
-        --cities Nairobi Paris Berlin \\
-        --output-name GeoTessera --year 2017 \\
-        --preset base --patch-size 32 \\
-        --batch-size 64 --num-workers 4 --max-epochs 50 \\
+        --global-split \\
+        --output-name AlphaEarthCoop --year 2017 \\
+        --preset large --patch-size 32 \\
+        --batch-size 256 --num-workers 8 --max-epochs 50 \\
+        --embedding-name alpha_earth_coop \\
+        --embedding-dir /maps/acz25/phd-thesis-data/input/Google/AlphaEarth/coop \\
         --output-dir /maps/acz25/phd-thesis-data/output/lcz-classification/dl
 """
 
@@ -90,6 +90,40 @@ def _build_patch_index(
             index[pid] = p
     logger.info(f"Patch index: {len(index)} npy files found under {so2sat_dir}")
     return index
+
+
+# ── Global item builder ───────────────────────────────────────────────────────
+
+def _build_global_items(
+    patches_gpkg: Path,
+    patch_index: dict[str, Path],
+    label_col: str = "LCZ_class",
+) -> list[tuple]:
+    """Build (npy_path, label_int, split) tuples from the global So2Sat GPKG.
+
+    Uses the 'dataset' column ('training'/'validation'/'testing') and maps it
+    to the 'train'/'val'/'test' strings expected by PatchDataModule.
+    """
+    _SPLIT_MAP = {"training": "train", "validation": "val", "testing": "test"}
+    gdf = gpd.read_file(patches_gpkg)
+    items: list[tuple] = []
+    n_missing = 0
+    for _, row in gdf.iterrows():
+        pid = str(row["patch_id"])
+        path = patch_index.get(pid)
+        if path is None:
+            n_missing += 1
+            continue
+        split = _SPLIT_MAP.get(str(row["dataset"]))
+        if split is None:
+            continue
+        label = int(row[label_col]) - 1   # 1-17 → 0-16
+        items.append((path, label, split))
+    logger.info(
+        f"Global split: {len(items)} patches matched "
+        f"({n_missing} patch_ids had no npy)"
+    )
+    return items
 
 
 # ── Per-city item builder ─────────────────────────────────────────────────────
@@ -280,11 +314,20 @@ def main() -> None:
     g.add_argument("--so2sat-dir", required=True, type=Path,
                    help="Root So2Sat directory that contains the "
                         "training/validation/testing subfolders with patch npy files.")
-    g.add_argument("--cities-dir", required=True, type=Path,
+    g.add_argument("--global-split", action="store_true",
+                   help="Use the global patches_reference_rxr.gpkg with its original "
+                        "training/validation/testing split instead of per-city split GeoPackages.")
+    g.add_argument("--global-gpkg", type=Path, default=None,
+                   help="Path to global patches GPKG "
+                        "(default: {so2sat_dir}/patches_reference_rxr.gpkg). "
+                        "Only used with --global-split.")
+    g.add_argument("--cities-dir", required=False, default=None, type=Path,
                    help="Directory containing one subfolder per city "
-                        "(each must have patches_reference_{city}_split.gpkg).")
+                        "(each must have patches_reference_{city}_split.gpkg). "
+                        "Required unless --global-split is set.")
     g.add_argument("--cities", nargs="+", default=None,
-                   help="City names to include (default: all with split GDF).")
+                   help="City names to include. In per-city mode: selects cities for training. "
+                        "In global-split mode: selects cities for post-training inference only.")
     g.add_argument("--output-name", required=True,
                    help="Embedding name used as subfolder in the So2Sat patch dirs "
                         "(e.g. AlphaEarth or GeoTessera).")
@@ -376,25 +419,40 @@ def main() -> None:
         )
         raise SystemExit(1)
 
-    # ── Collect cities ────────────────────────────────────────────────────────
-    cities_dir = args.cities_dir
-    city_dirs = sorted(d for d in cities_dir.iterdir() if d.is_dir())
-    if args.cities:
-        city_dirs = [d for d in city_dirs if d.name in args.cities]
-        if not city_dirs:
-            logger.error(f"None of {args.cities} found in {cities_dir}")
-            raise SystemExit(1)
-
     # ── Build item lists ──────────────────────────────────────────────────────
-    all_items: list = []
-    for city_dir in city_dirs:
-        items = _build_city_items(
-            cities_dir, city_dir.name, patch_index, args.label_col,
-        )
-        all_items.extend(items)
+    if args.global_split:
+        gpkg = args.global_gpkg or (args.so2sat_dir / "patches_reference_rxr.gpkg")
+        if not gpkg.exists():
+            logger.error(f"Global GPKG not found: {gpkg}")
+            raise SystemExit(1)
+        all_items = _build_global_items(gpkg, patch_index, args.label_col)
+        city_dirs = []
+        # --cities in global mode selects cities for post-training inference only
+        if args.cities and args.cities_dir:
+            city_dirs = [
+                args.cities_dir / c
+                for c in args.cities
+                if (args.cities_dir / c).is_dir()
+            ]
+    else:
+        if args.cities_dir is None:
+            logger.error("--cities-dir is required when not using --global-split")
+            raise SystemExit(1)
+        cities_dir = args.cities_dir
+        city_dirs = sorted(d for d in cities_dir.iterdir() if d.is_dir())
+        if args.cities:
+            city_dirs = [d for d in city_dirs if d.name in args.cities]
+            if not city_dirs:
+                logger.error(f"None of {args.cities} found in {cities_dir}")
+                raise SystemExit(1)
+        all_items = []
+        for city_dir in city_dirs:
+            all_items.extend(
+                _build_city_items(cities_dir, city_dir.name, patch_index, args.label_col)
+            )
 
     if not all_items:
-        logger.error("No items found. Check --so2sat-dir, --cities-dir, --output-name, --year.")
+        logger.error("No items found. Check --so2sat-dir, --output-name, --year.")
         raise SystemExit(1)
 
     split_counts = {s: sum(1 for _, _, sp in all_items if sp == s)
@@ -450,7 +508,7 @@ def main() -> None:
     run_cfg = dict(
         task="patch_classification",
         embedding=args.output_name,
-        cities=city_names,
+        cities="all_so2sat" if args.global_split else city_names,
         year=args.year,
         preset=args.preset,
         arch=arch,
@@ -466,10 +524,11 @@ def main() -> None:
         early_stopping_patience=args.early_stopping_patience,
         n_params=n_params,
         data_source="so2sat_patches",
-        split_source="grid",
+        split_source="global_so2sat" if args.global_split else "grid",
         **{f"{s}_patches": split_counts[s] for s in ("train", "val", "test")},
     )
 
+    _run_label = "global" if args.global_split else "_".join(city_names[:3])
     if not args.no_wandb:
         wandb.init(
             project=args.wandb_project,
@@ -480,11 +539,11 @@ def main() -> None:
         )
         run_dir = args.output_dir / wandb.run.name
     else:
-        run_name = args.run_name or f"resnet_{args.preset}_{'_'.join(city_names[:3])}"
+        run_name = args.run_name or f"resnet_{args.preset}_{_run_label}"
         run_dir = args.output_dir / run_name
 
     run_dir.mkdir(parents=True, exist_ok=True)
-    model_name = f"resnet_{args.preset}_{args.output_name}_{'_'.join(city_names[:3])}"
+    model_name = f"resnet_{args.preset}_{args.output_name}_{_run_label}"
 
     # ── Train (or load checkpoint) ────────────────────────────────────────────
     if args.checkpoint is not None:
@@ -581,7 +640,7 @@ def main() -> None:
             ConfusionMatrixDisplay(cm, display_labels=display_labels).plot(
                 ax=ax, colorbar=True, xticks_rotation=45
             )
-            ax.set_title(f"Test Confusion Matrix — {', '.join(city_names[:3])}")
+            ax.set_title(f"Test Confusion Matrix — {_run_label}")
             plt.tight_layout()
             cm_path = run_dir / "test_confusion_matrix.png"
             fig.savefig(cm_path, dpi=120, bbox_inches="tight")

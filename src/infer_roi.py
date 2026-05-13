@@ -220,35 +220,54 @@ def _sliding_window_cls(
     device: torch.device,
     num_classes: int,
     batch_size: int,
+    extract_size: int | None = None,
+    model_input_size: int | None = None,
 ) -> np.ndarray:
     """Run classification model with majority-vote sliding window.
 
     Args:
         model: ResNet (takes (B, C, H, W) → (B, num_classes)).
         arr: (C, H, W) float32 embedding.
+        extract_size: Embedding pixels to extract per patch (default: patch_size).
+            Set to round(patch_physical_res_m / embedding_res_m) so each patch
+            covers the same physical area as the training patches.
+        model_input_size: Model's expected square input side (default: patch_size).
+            Extracted patches are bilinearly resized to this size when it differs
+            from extract_size.
 
     Returns:
         (H, W) uint8 with 0-indexed class predictions.
     """
+    import torch.nn.functional as F
+
+    extract_size = extract_size or patch_size
+    model_input_size = model_input_size or patch_size
+
     C, H, W = arr.shape
-    pad_h = max(0, patch_size - H)
-    pad_w = max(0, patch_size - W)
+    pad_h = max(0, extract_size - H)
+    pad_w = max(0, extract_size - W)
     if pad_h or pad_w:
         arr = np.pad(arr, ((0, 0), (0, pad_h), (0, pad_w)), mode="reflect")
     _, H_pad, W_pad = arr.shape
 
     vote_sum = np.zeros((num_classes, H_pad, W_pad), dtype=np.int32)
 
-    positions = _patch_positions(H_pad, W_pad, patch_size, stride)
+    positions = _patch_positions(H_pad, W_pad, extract_size, stride)
     model.eval()
 
     with torch.no_grad():
         for i in range(0, len(positions), batch_size):
             batch_pos = positions[i:i + batch_size]
-            batch = np.stack([arr[:, r:r + patch_size, c:c + patch_size] for r, c in batch_pos])
-            preds = model(torch.from_numpy(batch).to(device)).argmax(dim=1).cpu().numpy()
+            patches = [arr[:, r:r + extract_size, c:c + extract_size] for r, c in batch_pos]
+            batch = torch.from_numpy(np.stack(patches)).to(device)
+            if extract_size != model_input_size:
+                batch = F.interpolate(
+                    batch, size=(model_input_size, model_input_size),
+                    mode="bilinear", align_corners=False,
+                )
+            preds = model(batch).argmax(dim=1).cpu().numpy()
             for (r, c), cls in zip(batch_pos, preds):
-                vote_sum[int(cls), r:r + patch_size, c:c + patch_size] += 1
+                vote_sum[int(cls), r:r + extract_size, c:c + extract_size] += 1
 
     return vote_sum.argmax(axis=0).astype(np.uint8)[:H, :W]
 
@@ -318,6 +337,7 @@ def infer_roi(
     year: str | None = None,
     city_name: str = "ROI",
     margin_m: float = 200.0,
+    patch_physical_res_m: float = 320.0,
 ) -> Path:
     """Run model inference over a bbox directly from raw source embedding tiles.
 
@@ -344,6 +364,10 @@ def infer_roi(
         year: Year string, required for ``"alpha_earth_coop"``.
         city_name: Title string for the PNG.
         margin_m: Extra metres clipped around the bbox per tile for edge context.
+        patch_physical_res_m: Physical side length of one patch in metres (resnet only).
+            Determines how many embedding pixels to extract per patch and the output
+            resolution. Default 320 m = 32 px × 10 m/px (So2Sat patch size). Ignored
+            for unet (segmentation always outputs at embedding resolution).
 
     Returns:
         Path to the saved GeoTIFF.
@@ -406,15 +430,33 @@ def infer_roi(
     _, first_crs, first_transform = first_result
     resolved_crs = out_crs or first_crs
 
-    if out_res is not None:
-        resolved_res = out_res
-    elif resolved_crs == first_crs:
-        resolved_res = abs(first_transform.a)
+    embedding_res_m = abs(first_transform.a)
+    lat_c = (bbox[1] + bbox[3]) / 2
+    lon_c = (bbox[0] + bbox[2]) / 2
+
+    if model_type != "unet":
+        # Classification: each output pixel = one physical patch (patch_physical_res_m).
+        # Compute how many embedding pixels span that physical distance, then derive
+        # output resolution so reproject downsamples to exactly one pixel per patch.
+        extract_px = max(1, round(patch_physical_res_m / embedding_res_m))
+        cls_stride = extract_px  # non-overlapping: one patch per output pixel
+        if out_res is not None:
+            resolved_res = out_res
+        elif resolved_crs == first_crs:
+            resolved_res = extract_px * embedding_res_m
+        else:
+            resolved_res = _meters_to_out_res(
+                extract_px * embedding_res_m, first_crs, resolved_crs, lon_c, lat_c
+            )
     else:
-        tile_res_m = abs(first_transform.a)
-        lat_c = (bbox[1] + bbox[3]) / 2
-        lon_c = (bbox[0] + bbox[2]) / 2
-        resolved_res = _meters_to_out_res(tile_res_m, first_crs, resolved_crs, lon_c, lat_c)
+        extract_px = patch_size
+        cls_stride = stride  # unused for unet
+        if out_res is not None:
+            resolved_res = out_res
+        elif resolved_crs == first_crs:
+            resolved_res = embedding_res_m
+        else:
+            resolved_res = _meters_to_out_res(embedding_res_m, first_crs, resolved_crs, lon_c, lat_c)
 
     logger.info(f"Output CRS: {resolved_crs}, resolution: {resolved_res:.8g} units/px")
 
@@ -450,7 +492,8 @@ def infer_roi(
             )
         else:
             pred = _sliding_window_cls(
-                model, arr, patch_size, stride, device, num_classes, batch_size
+                model, arr, patch_size, cls_stride, device, num_classes, batch_size,
+                extract_size=extract_px, model_input_size=patch_size,
             )
 
         # Convert 0-indexed → 1-indexed (1-17, 0=nodata)
@@ -532,6 +575,10 @@ def _parse_args() -> argparse.Namespace:
                    help="Output GeoTIFF path.")
     p.add_argument("--patch-size", type=int, default=64,
                    help="Sliding window patch size in pixels (default: 64).")
+    p.add_argument("--patch-physical-res", type=float, default=320.0,
+                   help="Physical side length of one patch in metres, resnet only "
+                        "(default: 320 = 32 px × 10 m/px, So2Sat standard). "
+                        "Controls extraction window size and output resolution.")
     p.add_argument("--overlap", type=int, default=None,
                    help="Overlap between adjacent patches in pixels "
                         "(default: patch_size // 2).")
@@ -651,6 +698,7 @@ def main() -> None:
         year=args.year,
         city_name=args.city_name,
         margin_m=args.margin_m,
+        patch_physical_res_m=args.patch_physical_res,
     )
 
 

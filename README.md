@@ -81,6 +81,16 @@ python src/download_embeddings.py \
 
 Output paths are read from `utils/paths.py` (`TESSERA_DIR`, `ALPHA_EARTH_DIR`).
 
+### `download_missing_coop_tiles.py`
+
+After running `extract_so2sat_embeddings.py`, some COOP patches may be unextracted because their source tiles are listed in `aef_index.gpkg` but were not downloaded locally (typically patches at city-bbox edges). This script finds those tiles and downloads only the missing ones.
+
+```bash
+python src/download_missing_coop_tiles.py --workers 8 --year 2017
+```
+
+It compares the existing `.npy` files in `training/AlphaEarthCoop/{year}/` against `patches_reference_rxr.gpkg`, queries `aef_index.gpkg` for the covering tiles, and downloads any that are absent. Re-run `extract_so2sat_embeddings.py` with `--skip-existing` afterwards to extract the newly available patches.
+
 ---
 
 ## Step 2a — Extract So2Sat Patch Embeddings
@@ -198,12 +208,23 @@ Use `--only-valid` to skip tiles flagged as invalid (recommended). Use `--skip-e
 
 ### `patch_classification.py`
 
-Trains a ResNet patch classifier on pre-extracted So2Sat patch `.npy` files. Uses the grid-based train/val/test split from `patches_reference_{city}_split.gpkg`. After training, automatically runs full-ROI inference via `infer_roi.py`.
+Trains a ResNet patch classifier on pre-extracted So2Sat patch `.npy` files. After training, automatically runs full-ROI inference via `infer_roi.py`.
 
 **ResNet presets:** `nano` · `tiny` · `small` · `base` · `large` (resnet10t → resnet152)
 
+#### Split modes
+
+| Mode | Flag | Split source | When to use |
+|---|---|---|---|
+| Per-city | *(default)* | `patches_reference_{city}_split.gpkg` — grid-based `split` column | Training/evaluating on specific cities |
+| Global | `--global-split` | `patches_reference_rxr.gpkg` — original So2Sat `dataset` column | Full 400 k-patch cross-city training |
+
+**Per-city mode** requires `--cities-dir` and `--cities`. The train/val/test split comes from the grid-based assignment in each city's split GeoPackage (created by `create_city_grids.py`).
+
+**Global mode** (`--global-split`) uses the original So2Sat split encoded in `patches_reference_rxr.gpkg` (`dataset` column: `training` / `validation` / `testing`), giving 352 k / 24 k / 24 k patches across all 51 cities. No city selection is needed; `--cities-dir` and `--cities` are ignored for data loading (they can still be passed to run post-training inference on specific cities).
+
 ```bash
-# AlphaEarth COOP — London, small preset
+# Per-city — AlphaEarth COOP, London
 python src/patch_classification.py \
     --so2sat-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4 \
     --cities-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4/cities \
@@ -221,7 +242,24 @@ python src/patch_classification.py \
     --wandb-project lcz-classification-dl \
     --dequantize
 
-# GeoTessera v1.1 — London (no --dequantize; already float32 after extraction)
+# Global split — AlphaEarth COOP, all cities
+python src/patch_classification.py \
+    --so2sat-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4 \
+    --global-split \
+    --output-name AlphaEarthCoop \
+    --year 2017 \
+    --preset large \
+    --patch-size 32 \
+    --batch-size 256 \
+    --num-workers 8 \
+    --max-epochs 50 \
+    --embedding-name alpha_earth_coop \
+    --embedding-dir /maps/acz25/phd-thesis-data/input/Google/AlphaEarth/coop \
+    --output-dir /maps/acz25/phd-thesis-data/output/lcz-classification/dl \
+    --wandb-project lcz-classification-dl \
+    --dequantize
+
+# Per-city — GeoTessera v1.1, London (no --dequantize; already float32 after extraction)
 python src/patch_classification.py \
     --so2sat-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4 \
     --cities-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4/cities \
@@ -238,7 +276,7 @@ python src/patch_classification.py \
     --output-dir /maps/acz25/phd-thesis-data/output/lcz-classification/dl \
     --wandb-project lcz-classification-dl
 
-# Embedded Seamless Data — London
+# Per-city — Embedded Seamless Data, London
 python src/patch_classification.py \
     --so2sat-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4 \
     --cities-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4/cities \
@@ -258,6 +296,8 @@ python src/patch_classification.py \
 ```
 
 **Key flags:**
+- `--global-split` — use all So2Sat patches with the original dataset split (no city selection)
+- `--global-gpkg` — override the default `{so2sat_dir}/patches_reference_rxr.gpkg` path (only with `--global-split`)
 - `--preset` — ResNet size (`nano`/`tiny`/`small`/`base`/`large`)
 - `--patch-size` — resize input patches to this square (pixels); use 32 for 10 m embeddings
 - `--dequantize` — apply embedding-specific dequantization at load time
@@ -265,7 +305,8 @@ python src/patch_classification.py \
 
 **Output per run** (under `--output-dir/{wandb-run-name}/`):
 ```
-resnet_{preset}_{output_name}_{city}-best.pt   ← best checkpoint
+resnet_{preset}_{output_name}_{city}-best.pt   ← best checkpoint (per-city mode)
+resnet_{preset}_{output_name}_global-best.pt   ← best checkpoint (global mode)
 {run_name}_resnet-{preset}-classification-prediction_{city}.tif
 {run_name}_resnet-{preset}-classification-prediction_{city}.png
 ```
