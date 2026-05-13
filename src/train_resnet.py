@@ -45,7 +45,7 @@ from torch.utils.data import DataLoader
 from torchgeo.datasets.geo import GeoDataset
 from torchgeo.samplers import GridGeoSampler, RandomBatchGeoSampler, Units
 from torchmetrics import Accuracy
-from torchmetrics.classification import MulticlassF1Score
+from torchmetrics.classification import MulticlassCohenKappa, MulticlassF1Score
 from typing import List
 
 from conf import WandbConfig
@@ -324,10 +324,27 @@ class LCZResNetModule(nn.Module):
         self.ce_loss = nn.CrossEntropyLoss(ignore_index=-1)
 
         metric_kw = dict(task="multiclass", num_classes=num_classes, ignore_index=-1)
-        self.val_acc  = Accuracy(**metric_kw)
-        self.val_f1   = MulticlassF1Score(num_classes=num_classes, average="macro", ignore_index=-1)
-        self.test_acc = Accuracy(**metric_kw)
-        self.test_f1  = MulticlassF1Score(num_classes=num_classes, average="macro", ignore_index=-1)
+        f1_kw = dict(num_classes=num_classes, ignore_index=-1)
+
+        self.train_acc        = Accuracy(**metric_kw)
+        self.train_acc_macro  = Accuracy(**metric_kw, average="macro")
+        self.train_f1_macro   = MulticlassF1Score(**f1_kw, average="macro")
+        self.train_f1_micro   = MulticlassF1Score(**f1_kw, average="micro")
+        self.train_kappa      = MulticlassCohenKappa(num_classes=num_classes, ignore_index=-1)
+
+        self.val_acc          = Accuracy(**metric_kw)
+        self.val_acc_macro    = Accuracy(**metric_kw, average="macro")
+        self.val_f1           = MulticlassF1Score(**f1_kw, average="macro")
+        self.val_f1_micro     = MulticlassF1Score(**f1_kw, average="micro")
+        self.val_kappa        = MulticlassCohenKappa(num_classes=num_classes, ignore_index=-1)
+
+        self.test_acc           = Accuracy(**metric_kw)
+        self.test_acc_macro     = Accuracy(**metric_kw, average="macro")
+        self.test_acc_per_class = Accuracy(**metric_kw, average="none")
+        self.test_f1            = MulticlassF1Score(**f1_kw, average="macro")
+        self.test_f1_micro      = MulticlassF1Score(**f1_kw, average="micro")
+        self.test_f1_per_class  = MulticlassF1Score(**f1_kw, average="none")
+        self.test_kappa         = MulticlassCohenKappa(num_classes=num_classes, ignore_index=-1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x.float())
@@ -377,6 +394,11 @@ def _run_resnet_training_loop(
     for epoch in range(max_epochs):
         # ── Train ─────────────────────────────────────────────────────────
         task_module.train()
+        task_module.train_acc.reset()
+        task_module.train_acc_macro.reset()
+        task_module.train_f1_macro.reset()
+        task_module.train_f1_micro.reset()
+        task_module.train_kappa.reset()
         train_loss = 0.0
         n_valid = 0
         for batch in train_loader:
@@ -394,12 +416,27 @@ def _run_resnet_training_loop(
             opt.step()
             train_loss += loss.item()
             n_valid += 1
+            with torch.no_grad():
+                preds = logits.argmax(dim=1)
+                task_module.train_acc(preds, labels)
+                task_module.train_acc_macro(preds, labels)
+                task_module.train_f1_macro(preds, labels)
+                task_module.train_f1_micro(preds, labels)
+                task_module.train_kappa(preds, labels)
         train_loss /= max(1, n_valid)
+        train_oa        = task_module.train_acc.compute().item()
+        train_acc_macro = task_module.train_acc_macro.compute().item()
+        train_f1_macro  = task_module.train_f1_macro.compute().item()
+        train_f1_micro  = task_module.train_f1_micro.compute().item()
+        train_kappa     = task_module.train_kappa.compute().item()
 
         # ── Validate ───────────────────────────────────────────────────────
         task_module.eval()
         task_module.val_acc.reset()
+        task_module.val_acc_macro.reset()
         task_module.val_f1.reset()
+        task_module.val_f1_micro.reset()
+        task_module.val_kappa.reset()
         val_loss = 0.0
         n_val = 0
         with torch.no_grad():
@@ -412,21 +449,35 @@ def _run_resnet_training_loop(
                 loss = task_module.ce_loss(logits, labels)
                 preds = logits.argmax(dim=1)
                 task_module.val_acc(preds, labels)
+                task_module.val_acc_macro(preds, labels)
                 task_module.val_f1(preds, labels)
+                task_module.val_f1_micro(preds, labels)
+                task_module.val_kappa(preds, labels)
                 val_loss += loss.item()
                 n_val += 1
         val_loss /= max(1, n_val)
-        val_acc = task_module.val_acc.compute().item()
-        val_f1  = task_module.val_f1.compute().item()
+        val_acc       = task_module.val_acc.compute().item()
+        val_acc_macro = task_module.val_acc_macro.compute().item()
+        val_f1        = task_module.val_f1.compute().item()
+        val_f1_micro  = task_module.val_f1_micro.compute().item()
+        val_kappa     = task_module.val_kappa.compute().item()
         sched.step()
 
         if wandb.run:
             wandb.log({
-                "train_loss": train_loss,
-                "val_loss":   val_loss,
-                "val_acc":    val_acc,
-                "val_f1":     val_f1,
-                "epoch":      epoch + 1,
+                "train_loss":      train_loss,
+                "train_oa":        train_oa,
+                "train_acc_macro": train_acc_macro,
+                "train_f1_macro":  train_f1_macro,
+                "train_f1_micro":  train_f1_micro,
+                "train_kappa":     train_kappa,
+                "val_loss":        val_loss,
+                "val_acc":         val_acc,
+                "val_acc_macro":   val_acc_macro,
+                "val_f1":          val_f1,
+                "val_f1_micro":    val_f1_micro,
+                "val_kappa":       val_kappa,
+                "epoch":           epoch + 1,
             })
         logger.info(
             f"Epoch {epoch+1}/{max_epochs}  "
@@ -799,7 +850,12 @@ def train(
     logger.info("Running test evaluation …")
     task_module.eval()
     task_module.test_acc.reset()
+    task_module.test_acc_macro.reset()
+    task_module.test_acc_per_class.reset()
     task_module.test_f1.reset()
+    task_module.test_f1_micro.reset()
+    task_module.test_f1_per_class.reset()
+    task_module.test_kappa.reset()
     test_preds: list[torch.Tensor] = []
     test_labels_list: list[torch.Tensor] = []
     test_loss_total = 0.0
@@ -815,19 +871,41 @@ def train(
             loss = task_module.ce_loss(logits, labels)
             preds = logits.argmax(dim=1)
             task_module.test_acc(preds, labels)
+            task_module.test_acc_macro(preds, labels)
+            task_module.test_acc_per_class(preds, labels)
             task_module.test_f1(preds, labels)
+            task_module.test_f1_micro(preds, labels)
+            task_module.test_f1_per_class(preds, labels)
+            task_module.test_kappa(preds, labels)
             test_loss_total += loss.item()
             n_test_batches += 1
             test_preds.append(preds.cpu())
             test_labels_list.append(labels.cpu())
 
-    test_loss = test_loss_total / max(1, n_test_batches)
-    test_acc  = task_module.test_acc.compute().item()
-    test_f1   = task_module.test_f1.compute().item()
-    logger.info(f"Test results: loss={test_loss:.4f}  f1={test_f1:.4f}  acc={test_acc:.4f}")
+    test_loss       = test_loss_total / max(1, n_test_batches)
+    test_acc        = task_module.test_acc.compute().item()
+    test_acc_macro  = task_module.test_acc_macro.compute().item()
+    test_f1         = task_module.test_f1.compute().item()
+    test_f1_micro   = task_module.test_f1_micro.compute().item()
+    test_kappa      = task_module.test_kappa.compute().item()
+    per_class_acc   = task_module.test_acc_per_class.compute().cpu().numpy()
+    per_class_f1    = task_module.test_f1_per_class.compute().cpu().numpy()
+    logger.info(
+        f"Test results: loss={test_loss:.4f}  acc={test_acc:.4f}  acc_macro={test_acc_macro:.4f}"
+        f"  f1={test_f1:.4f}  f1_micro={test_f1_micro:.4f}  kappa={test_kappa:.4f}"
+    )
 
     if wandb.run:
-        wandb.log({"test_loss": test_loss, "test_acc": test_acc, "test_f1": test_f1})
+        wandb.log({
+            "test_loss":      test_loss,
+            "test_acc":       test_acc,
+            "test_acc_macro": test_acc_macro,
+            "test_f1":        test_f1,
+            "test_f1_micro":  test_f1_micro,
+            "test_kappa":     test_kappa,
+        })
+        from utils.wandb import log_per_class_metrics
+        log_per_class_metrics(per_class_acc, per_class_f1, num_classes, prefix="test")
 
     if wandb.run and test_preds:
         y_pred_all = torch.cat(test_preds).numpy().ravel()

@@ -48,7 +48,7 @@ import wandb
 from loguru import logger
 from torch.utils.data import Dataset, DataLoader
 from torchmetrics import Accuracy
-from torchmetrics.classification import MulticlassF1Score
+from torchmetrics.classification import MulticlassCohenKappa, MulticlassF1Score
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
 # ── src/ must be on sys.path (run from repo root) ────────────────────────────
@@ -508,10 +508,13 @@ def main() -> None:
     # ── Test evaluation ────────────────────────────────────────────────────────
     task.eval()
     metric_kw  = dict(task="multiclass", num_classes=args.num_classes, ignore_index=-1)
-    test_acc   = Accuracy(**metric_kw).to(device)
-    test_f1    = MulticlassF1Score(
-        num_classes=args.num_classes, average="macro", ignore_index=-1
-    ).to(device)
+    test_acc          = Accuracy(**metric_kw).to(device)
+    test_acc_macro    = Accuracy(**metric_kw, average="macro").to(device)
+    test_acc_per_class = Accuracy(**metric_kw, average="none").to(device)
+    test_f1           = MulticlassF1Score(num_classes=args.num_classes, average="macro", ignore_index=-1).to(device)
+    test_f1_micro     = MulticlassF1Score(num_classes=args.num_classes, average="micro", ignore_index=-1).to(device)
+    test_f1_per_class = MulticlassF1Score(num_classes=args.num_classes, average="none", ignore_index=-1).to(device)
+    test_kappa        = MulticlassCohenKappa(num_classes=args.num_classes, ignore_index=-1).to(device)
     test_loss_total = 0.0
     n_test_batches  = 0
     all_preds, all_labels = [], []
@@ -527,7 +530,12 @@ def main() -> None:
             loss   = task.ce_loss(logits, labels)
             preds  = logits.argmax(dim=1)
             test_acc(preds, labels)
+            test_acc_macro(preds, labels)
+            test_acc_per_class(preds, labels)
             test_f1(preds, labels)
+            test_f1_micro(preds, labels)
+            test_f1_per_class(preds, labels)
+            test_kappa(preds, labels)
             test_loss_total += loss.item()
             n_test_batches  += 1
             valid = labels != -1
@@ -535,12 +543,30 @@ def main() -> None:
             all_labels.append((labels[valid] + 1).cpu().numpy())
 
     if n_test_batches > 0:
-        acc      = test_acc.compute().item()
-        f1       = test_f1.compute().item()
-        avg_loss = test_loss_total / n_test_batches
-        logger.info(f"Test — Acc: {acc:.4f}  F1: {f1:.4f}  Loss: {avg_loss:.4f}")
+        acc          = test_acc.compute().item()
+        acc_macro    = test_acc_macro.compute().item()
+        f1           = test_f1.compute().item()
+        f1_micro     = test_f1_micro.compute().item()
+        kappa        = test_kappa.compute().item()
+        per_cls_acc  = test_acc_per_class.compute().cpu().numpy()
+        per_cls_f1   = test_f1_per_class.compute().cpu().numpy()
+        avg_loss     = test_loss_total / n_test_batches
+        logger.info(
+            f"Test — OA: {acc:.4f}  Acc_macro: {acc_macro:.4f}"
+            f"  F1_macro: {f1:.4f}  F1_micro: {f1_micro:.4f}"
+            f"  Kappa: {kappa:.4f}  Loss: {avg_loss:.4f}"
+        )
         if not args.no_wandb and wandb.run:
-            wandb.log({"test_acc": acc, "test_f1": f1, "test_loss": avg_loss})
+            wandb.log({
+                "test_acc":       acc,
+                "test_acc_macro": acc_macro,
+                "test_f1":        f1,
+                "test_f1_micro":  f1_micro,
+                "test_kappa":     kappa,
+                "test_loss":      avg_loss,
+            })
+            from utils.wandb import log_per_class_metrics
+            log_per_class_metrics(per_cls_acc, per_cls_f1, args.num_classes, prefix="test")
 
         if all_preds:
             import matplotlib
