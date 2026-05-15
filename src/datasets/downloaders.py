@@ -13,6 +13,101 @@ from loguru import logger
 _COOP_S3_PREFIX = "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/"
 
 
+def _stream_download(url: str, dest: Path, retries: int = 5) -> None:
+    """Download *url* to *dest* with resume support and retries."""
+    import requests
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            headers = {}
+            resume_pos = tmp.stat().st_size if tmp.exists() else 0
+            if resume_pos:
+                headers["Range"] = f"bytes={resume_pos}-"
+            resp = requests.get(url, stream=True, timeout=(10, 60), headers=headers)
+            if resume_pos and resp.status_code == 416:
+                tmp.rename(dest)
+                return
+            resp.raise_for_status()
+            mode = "ab" if resume_pos and resp.status_code == 206 else "wb"
+            with open(tmp, mode) as fh:
+                for chunk in resp.iter_content(chunk_size=1 << 20):
+                    fh.write(chunk)
+            tmp.rename(dest)
+            return
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                logger.debug(f"Retry {attempt + 1}/{retries - 1} for {dest.name}: {exc}")
+    tmp.unlink(missing_ok=True)
+    raise last_exc
+
+
+def _coop_s3_to_https(s3_path: str) -> str:
+    return s3_path.replace(
+        "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/",
+        "https://data.source.coop/tge-labs/aef/v1/annual/",
+    )
+
+
+def download_alpha_earth_coop_tiles(
+    s3_paths: list[str],
+    output_dir: str | Path,
+    workers: int = 8,
+) -> tuple[int, int]:
+    """Download specific COOP tiles by S3 path, skipping already-present files.
+
+    Args:
+        s3_paths: S3 paths from ``aef_index.gpkg`` (``path`` column).
+        output_dir: Local coop root (the directory that also holds ``aef_index.gpkg``).
+        workers: Number of parallel download threads.
+
+    Returns:
+        ``(n_downloaded, n_errors)`` tuple.
+    """
+    import requests
+
+    output_dir = Path(output_dir)
+
+    def _download_one(s3_path: str) -> tuple[int, int]:
+        """Return (n_downloaded, n_errors) for a single tile's .tiff + .vrt pair."""
+        https_url = _coop_s3_to_https(s3_path)
+        stem = https_url.rsplit(".", 1)[0]
+        tiff_dest = output_dir / s3_path.removeprefix(_COOP_S3_PREFIX)
+        vrt_dest = tiff_dest.with_suffix(".vrt")
+        downloaded = errors = 0
+        for url, dest in [(https_url, tiff_dest), (stem + ".vrt", vrt_dest)]:
+            if dest.exists():
+                continue
+            try:
+                _stream_download(url, dest)
+                downloaded += 1
+                logger.debug(f"Downloaded {dest.name}")
+            except requests.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 404:
+                    logger.debug(f"Not found (skipping): {url}")
+                else:
+                    logger.error(f"HTTP error for {url}: {exc}")
+                    errors += 1
+            except Exception as exc:
+                logger.error(f"Failed to download {url}: {exc}")
+                errors += 1
+        return downloaded, errors
+
+    total_dl = total_err = 0
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_download_one, p): p for p in s3_paths}
+        for future in as_completed(futures):
+            dl, err = future.result()
+            total_dl += dl
+            total_err += err
+
+    logger.info(f"Coop tile download: {total_dl} downloaded, {total_err} errors")
+    return total_dl, total_err
+
+
 def download_alpha_earth_coop(
     index_path: str | Path,
     output_dir: str | Path,
@@ -60,26 +155,9 @@ def download_alpha_earth_coop(
     def s3_to_local(s3_path: str) -> Path:
         return output_dir / s3_path.removeprefix(_COOP_S3_PREFIX)
 
-    def stream_download(url: str, dest: Path) -> None:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_suffix(dest.suffix + ".part")
-        try:
-            resp = requests.get(url, stream=True, timeout=120)
-            resp.raise_for_status()
-            with open(tmp, "wb") as fh:
-                for chunk in resp.iter_content(chunk_size=1 << 20):
-                    fh.write(chunk)
-            tmp.rename(dest)
-        except Exception:
-            tmp.unlink(missing_ok=True)
-            raise
-
     def download_tile(s3_path: str) -> tuple[int, int]:
         """Return (n_downloaded, n_skipped) for one tile's .tiff + .vrt pair."""
-        https_url = s3_path.replace(
-            "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/",
-            "https://data.source.coop/tge-labs/aef/v1/annual/",
-        )
+        https_url = _coop_s3_to_https(s3_path)
         stem = https_url.rsplit(".", 1)[0]
         pairs = [
             (https_url, s3_to_local(s3_path)),
@@ -91,7 +169,7 @@ def download_alpha_earth_coop(
                 skipped += 1
                 continue
             try:
-                stream_download(url, dest)
+                _stream_download(url, dest)
                 downloaded += 1
                 logger.debug(f"Downloaded {dest.name}")
             except requests.HTTPError as exc:
@@ -134,6 +212,7 @@ def download_tessera(
     output_dir: str | Path,
     year: int = 2024,
     output_format: str = "zarr",
+    cache_dir: str | Path | None = None,
 ) -> Path:
     """Download Tessera embeddings for a bounding box with tile-level caching.
 
@@ -146,6 +225,8 @@ def download_tessera(
         output_dir: Directory to save tiles.
         year: Year of embeddings to download.
         output_format: Output format, either "zarr" or "tif".
+        cache_dir: Directory for GeoTessera's registry cache. Defaults to
+            output_dir/../.geotessera_cache to avoid filling the home partition.
 
     Returns:
         Path to the output directory.
@@ -158,10 +239,15 @@ def download_tessera(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if cache_dir is None:
+        cache_dir = output_dir.parent / ".geotessera_cache"
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
     # Use a temporary directory for geotessera's intermediate .npy cache so
     # large cache files are cleaned up automatically after export.
     tmpdir = tempfile.mkdtemp(prefix="geotessera_")
-    gt = GeoTessera(embeddings_dir=tmpdir)
+    gt = GeoTessera(embeddings_dir=tmpdir, cache_dir=cache_dir)
     tiles = gt.registry.load_blocks_for_region(bounds=bbox, year=year)
     logger.info(f"Found {len(tiles)} tessera tiles for bbox={bbox}, year={year}")
 

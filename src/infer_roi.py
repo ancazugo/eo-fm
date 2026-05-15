@@ -569,8 +569,17 @@ def _parse_args() -> argparse.Namespace:
                    help="Directory containing source tile files (.zarr or .tif).")
     p.add_argument("--year", default=None,
                    help="Year filter (required for alpha_earth_coop).")
-    p.add_argument("--bbox", required=True,
-                   help="ROI bounding box 'west,south,east,north' in EPSG:4326.")
+    p.add_argument("--bbox", default=None,
+                   help="ROI bounding box 'west,south,east,north' in EPSG:4326. "
+                        "Mutually exclusive with --city / --smod-id.")
+    p.add_argument("--city", default=None,
+                   help="Look up bbox by JRC_NAME_MAIN from --bounds-csv (case-insensitive).")
+    p.add_argument("--smod-id", default=None,
+                   help="Look up bbox by SMOD_ID from --bounds-csv (e.g. '30_4716').")
+    p.add_argument("--bounds-csv", type=Path,
+                   default=Path(__file__).parent.parent / "data" / "guppd_bounds.csv",
+                   help="CSV with city bboxes used by --city / --smod-id. "
+                        "Default: data/guppd_bounds.csv")
     p.add_argument("--output", required=True, type=Path,
                    help="Output GeoTIFF path.")
     p.add_argument("--patch-size", type=int, default=64,
@@ -608,11 +617,37 @@ def main() -> None:
     if args.overlap is None:
         args.overlap = args.patch_size // 2
 
-    # ── Parse bbox ────────────────────────────────────────────────────────────
-    parts = [float(v) for v in args.bbox.split(",")]
-    if len(parts) != 4:
-        raise SystemExit("--bbox must be 'west,south,east,north'")
-    bbox = (parts[0], parts[1], parts[2], parts[3])
+    # ── Resolve bbox (from --bbox, --city, or --smod-id) ─────────────────────
+    n_sources = sum(x is not None for x in [args.bbox, args.city, args.smod_id])
+    if n_sources == 0:
+        raise SystemExit("Provide one of --bbox, --city, or --smod-id.")
+    if n_sources > 1:
+        raise SystemExit("--bbox, --city, and --smod-id are mutually exclusive.")
+
+    if args.bbox is not None:
+        parts = [float(v) for v in args.bbox.split(",")]
+        if len(parts) != 4:
+            raise SystemExit("--bbox must be 'west,south,east,north'")
+        bbox = (parts[0], parts[1], parts[2], parts[3])
+    else:
+        import pandas as pd
+        if not args.bounds_csv.exists():
+            raise SystemExit(f"--bounds-csv not found: {args.bounds_csv}")
+        df = pd.read_csv(args.bounds_csv)
+        if args.city is not None:
+            mask = df["JRC_NAME_MAIN"].str.lower() == args.city.lower()
+            col, val = "JRC_NAME_MAIN", args.city
+        else:
+            mask = df["SMOD_ID"].astype(str) == str(args.smod_id)
+            col, val = "SMOD_ID", args.smod_id
+        matches = df[mask]
+        if matches.empty:
+            raise SystemExit(f"No city found for {col}='{val}' in {args.bounds_csv}")
+        row = matches.iloc[0]
+        bbox = (float(row["minx"]), float(row["miny"]), float(row["maxx"]), float(row["maxy"]))
+        if args.city_name == "ROI":
+            args.city_name = str(row["JRC_NAME_MAIN"])
+        logger.info(f"Resolved bbox for '{row['JRC_NAME_MAIN']}': {bbox}")
 
     # ── Device ────────────────────────────────────────────────────────────────
     if args.accelerator == "cpu":
