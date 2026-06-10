@@ -58,44 +58,167 @@ from utils.wandb import init_wandb_run
 app = typer.Typer(pretty_exceptions_enable=False)
 
 
-# ─── ResNet Presets ───────────────────────────────────────────────────────────
+# ─── Model Presets ────────────────────────────────────────────────────────────
 
-RESNET_PRESETS: dict[str, str] = {
-    "nano":   "resnet18",
-    "small":  "resnet34",
-    "base":   "resnet50",
-    "medium": "resnet101",
-    "large":  "resnet152",
+MODEL_PRESETS: dict[str, dict[str, str]] = {
+    "resnet": {
+        "nano":   "resnet18",
+        "small":  "resnet34",
+        "base":   "resnet50",
+        "medium": "resnet101",
+        "large":  "resnet152",
+    },
+    "efficientnet": {
+        "nano":   "efficientnet_b0",
+        "small":  "efficientnet_b1",
+        "base":   "efficientnet_b3",
+        "medium": "efficientnet_b5",
+        "large":  "efficientnet_b7",
+    },
+    "convnext": {
+        "nano":   "convnext_nano",
+        "small":  "convnext_tiny",
+        "base":   "convnext_small",
+        "medium": "convnext_base",
+        "large":  "convnext_large",
+    },
+    "densenet": {
+        "nano":   "densenet121",
+        "small":  "densenet161",
+        "base":   "densenet169",
+        "medium": "densenet201",
+        "large":  "densenet264d",
+    },
+    "mobilenet": {
+        "nano":   "mobilenetv3_small_050",
+        "small":  "mobilenetv3_small_100",
+        "base":   "mobilenetv3_large_100",
+        "medium": "mobilenetv3_large_150d",
+        "large":  "mobilenetv4_conv_large",
+    },
+    "vit": {
+        "nano":   "vit_tiny_patch16_224",   # 4 tokens @ 32x32
+        "small":  "vit_small_patch16_224",  # 4 tokens @ 32x32
+        "base":   "vit_small_patch8_224",   # 16 tokens @ 32x32
+        "medium": "vit_base_patch16_224",   # 4 tokens @ 32x32
+        "large":  "vit_base_patch8_224",    # 16 tokens @ 32x32
+    },
+    "aspp": {
+        "nano":   "aspp_nano",
+        "small":  "aspp_small",
+        "base":   "aspp_base",
+        "medium": "aspp_medium",
+        "large":  "aspp_large",
+    },
+    "mlp": {
+        "nano":   "mlp_",
+        "small":  "mlp_256",
+        "base":   "mlp_512-256",
+        "medium": "mlp_512-256-128",
+        "large":  "mlp_1024-512-256",
+    },
 }
+RESNET_PRESETS = MODEL_PRESETS["resnet"]  # backward-compat alias
 
 
 def build_resnet(
     arch: str,
     in_channels: int,
     num_classes: int,
+    family: str = "resnet",
     head_dropout: float = 0.0,
+    img_size: int | None = None,
 ) -> nn.Module:
-    """Build a timm ResNet model with the given architecture.
-
-    Args:
-        arch: timm model name (e.g. "resnet50").
-        in_channels: Number of embedding input channels.
-        num_classes: Number of classification output classes.
-        head_dropout: Dropout probability before the final linear layer (0 = off).
-
-    Returns:
-        timm ResNet nn.Module.
-    """
     import timm
 
-    model = timm.create_model(
-        arch,
+    kwargs: dict = dict(
         in_chans=in_channels,
         num_classes=num_classes,
         pretrained=False,
         drop_rate=head_dropout,
     )
+    if img_size is not None:
+        kwargs["img_size"] = img_size  # required for ViT; CNNs ignore it
+    model = timm.create_model(arch, **kwargs)
+
+    if family == "resnet":
+        out_ch = model.conv1.out_channels  # preserve original width (64 for all resnet variants)
+        model.conv1 = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_ch,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
+        model.maxpool = nn.Identity()
+
+    elif family == "vit":
+        model = timm.create_model(
+            arch, **kwargs, patch_size=2             # Yields (32 / 4)^2 = 64 spatial tokens
+        )
+
+
     return model
+
+
+class MLPModel(nn.Module):
+    """GAP + configurable MLP classifier. Accepts (B, C, H, W) or (B, C).
+
+    If input is 4-D, global average pool collapses spatial dims first.
+    Empty hidden_sizes produces a linear probe equivalent (single FC layer).
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_sizes: list[int],
+        num_classes: int,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        layers: list[nn.Module] = []
+        prev = in_channels
+        for h in hidden_sizes:
+            if dropout > 0.0:
+                layers.append(nn.Dropout(p=dropout))
+            layers.append(nn.Linear(prev, h))
+            layers.append(nn.ReLU(inplace=True))
+            prev = h
+        if dropout > 0.0:
+            layers.append(nn.Dropout(p=dropout))
+        layers.append(nn.Linear(prev, num_classes))
+        self.mlp = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 4:
+            x = x.mean(dim=(-2, -1))   # GAP: (B, C, H, W) → (B, C)
+        return self.mlp(x)
+
+
+def build_mlp(
+    arch: str,
+    in_channels: int,
+    num_classes: int,
+    head_dropout: float = 0.0,
+) -> nn.Module:
+    """Construct an MLPModel from an arch string like ``'mlp_512-256'``.
+
+    Args:
+        arch: Preset arch string, e.g. ``'mlp_'`` (no hidden), ``'mlp_256'``,
+              ``'mlp_512-256-128'``.
+        in_channels: Channel dimension (after GAP when input is spatial).
+        num_classes: Number of classification outputs.
+        head_dropout: Dropout probability applied before every linear layer.
+    """
+    suffix = arch[len("mlp_"):]                          # "" | "256" | "512-256-128"
+    hidden_sizes = [int(s) for s in suffix.split("-") if s]
+    return MLPModel(
+        in_channels=in_channels,
+        hidden_sizes=hidden_sizes,
+        num_classes=num_classes,
+        dropout=head_dropout,
+    )
 
 
 # ─── Augmentation ────────────────────────────────────────────────────────────
@@ -636,6 +759,7 @@ def train(
     embedding_path: str = typer.Option(..., help="Path to embedding data directory"),
     label_path: List[str] = typer.Option([], help="Vector label file(s) (.gpkg/.geojson/.shp). Repeat for multiple cities."),
     label_column: str = typer.Option("LCZ_class", help="Column with 1-based integer class labels"),
+    city: str | None = typer.Option(None, help="City name logged to WandB (e.g. Nairobi)"),
     bbox: str | None = typer.Option(None, help="ROI bounding box 'west,south,east,north' (EPSG:4326)"),
     year: int | None = typer.Option(None, help="Year for temporal filtering of embedding tiles"),
     # Split
@@ -643,8 +767,9 @@ def train(
     train_frac: float = typer.Option(0.70, help="Fraction of cities for training (city mode only)"),
     val_frac: float = typer.Option(0.15, help="Fraction of cities for validation (city mode only)"),
     # Model
-    preset: str = typer.Option("base", help="ResNet size preset: nano (resnet18), small (resnet34), base (resnet50), medium (resnet101), large (resnet152)"),
-    arch: str | None = typer.Option(None, help="Override preset: any timm model name (e.g. resnet50, resnext50_32x4d)"),
+    family: str = typer.Option("resnet", help=f"Model family: {list(MODEL_PRESETS)}"),
+    preset: str = typer.Option("base", help="Size preset: nano / small / base / medium / large"),
+    arch: str | None = typer.Option(None, help="Override preset: any timm model name (e.g. resnext50_32x4d)"),
     head_dropout: float = typer.Option(0.0, help="Dropout probability before the final linear layer"),
     num_classes: int = typer.Option(17, help="Number of LCZ classification classes"),
     # Training
@@ -724,10 +849,14 @@ def train(
         train_roi = roi_from_gdf(train_gdf)
         val_roi   = roi_from_gdf(val_gdf)   if val_gdf  is not None else train_roi
         test_roi  = roi_from_gdf(test_gdf)  if test_gdf is not None else train_roi
+        split_counts = {
+            "train": len(train_gdf),
+            "val": len(val_gdf) if val_gdf is not None else 0,
+            "test": len(test_gdf) if test_gdf is not None else 0,
+        }
         logger.info(
-            f"City split: {len(train_gdf)} train / "
-            f"{len(val_gdf) if val_gdf is not None else 0} val / "
-            f"{len(test_gdf) if test_gdf is not None else 0} test polygons"
+            f"City split: {split_counts['train']} train / "
+            f"{split_counts['val']} val / {split_counts['test']} test polygons"
         )
 
         label_tmp_dir = Path(tempfile.mkdtemp(prefix="eo_fm_labels_"))
@@ -759,6 +888,7 @@ def train(
         n_val   = ((cx > cx.quantile(_tf)) & (cx <= cx.quantile(_tf + val_size))).sum()
         n_test  = len(gdf) - n_train - n_val
         logger.info(f"Spatial split: ~{n_train} train / ~{n_val} val / ~{n_test} test polygons")
+        split_counts = {"train": int(n_train), "val": int(n_val), "test": int(n_test)}
 
     label_ds = LCZLabelDataset(
         paths=label_tmp_dir, crs=embedding_ds.crs, res=embedding_ds.res
@@ -777,14 +907,15 @@ def train(
         augment=augment,
     )
 
-    # ── ResNet model ──────────────────────────────────────────────────────────
-    arch_name = arch if arch else RESNET_PRESETS.get(preset, "resnet50")
-    logger.info(f"Building ResNet: preset={preset}, arch={arch_name}, head_dropout={head_dropout}")
+    # ── Model ─────────────────────────────────────────────────────────────────
+    arch_name = arch if arch else MODEL_PRESETS[family][preset]
+    logger.info(f"Building {family}/{preset} → {arch_name}, head_dropout={head_dropout}")
     model = build_resnet(
         arch=arch_name,
         in_channels=in_channels,
         num_classes=num_classes,
         head_dropout=head_dropout,
+        img_size=patch_size if family == "vit" else None,
     )
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"ResNet trainable parameters: {n_params:,}")
@@ -799,16 +930,27 @@ def train(
 
     # ── WandB ─────────────────────────────────────────────────────────────────
     run_config = {
+        "task": "patch_classification",
         "embedding": embedding,
+        "cities": city,
+        "year": year,
         "preset": preset,
         "arch": arch_name,
+        "in_channels": in_channels,
         "head_dropout": head_dropout,
         "num_classes": num_classes,
         "patch_size": patch_size,
+        "batch_size": batch_size,
         "lr": lr,
         "weight_decay": weight_decay,
         "max_epochs": max_epochs,
+        "early_stopping_patience": early_stopping_patience,
         "n_params": n_params,
+        "data_source": "so2sat_patches",
+        "split_source": "grid" if split_mode == "spatial" else "city",
+        "train_patches": split_counts["train"],
+        "val_patches": split_counts["val"],
+        "test_patches": split_counts["test"],
     }
     wandb_run = None
     if not no_wandb:
@@ -954,7 +1096,8 @@ def predict(
     checkpoint_path: str = typer.Option(..., help="Path to .pt checkpoint file"),
     embedding: str = typer.Option(..., help="Embedding name: tessera, alpha_earth, seamless"),
     embedding_path: str = typer.Option(..., help="Path to embedding data directory"),
-    preset: str = typer.Option("base", help="ResNet preset used at training time"),
+    family: str = typer.Option("resnet", help=f"Model family used at training time: {list(MODEL_PRESETS)}"),
+    preset: str = typer.Option("base", help="Size preset used at training time: nano/small/base/medium/large"),
     arch: str | None = typer.Option(None, help="Override preset: timm model name (must match training)"),
     head_dropout: float = typer.Option(0.0, help="Head dropout (must match training)"),
     num_classes: int = typer.Option(17, help="Number of classes (must match training)"),
@@ -984,12 +1127,13 @@ def predict(
     in_channels = get_in_channels(embedding)
 
     # ── Reconstruct model ────────────────────────────────────────────────────
-    arch_name = arch if arch else RESNET_PRESETS.get(preset, "resnet50")
+    arch_name = arch if arch else MODEL_PRESETS[family][preset]
     model = build_resnet(
         arch=arch_name,
         in_channels=in_channels,
         num_classes=num_classes,
         head_dropout=head_dropout,
+        img_size=patch_size if family == "vit" else None,
     )
     task_module = LCZResNetModule(model=model, num_classes=num_classes)
 
@@ -1032,7 +1176,7 @@ def predict(
 
     # ── Resolve output path ───────────────────────────────────────────────────
     ckpt_dir = Path(checkpoint_path).parent
-    pred_name = f"{ckpt_dir.name}_resnet-{preset}-classification-prediction.tif"
+    pred_name = f"{ckpt_dir.name}_{family}-{preset}-classification-prediction.tif"
     resolved_output = Path(output_path) if output_path else ckpt_dir / pred_name
 
     # ── Predict ──────────────────────────────────────────────────────────────

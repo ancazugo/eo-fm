@@ -393,7 +393,7 @@ def main() -> None:
     # ── Inference ─────────────────────────────────────────────────────────────
     g = parser.add_argument_group("Inference")
     g.add_argument("--embedding-name", required=True,
-                   choices=["tessera", "tesserav1.1", "alpha_earth", "alpha_earth_coop", "seamless"],
+                   choices=["tessera", "tesserav1.1", "tesserav1.1_global", "alpha_earth", "alpha_earth_coop", "seamless"],
                    help="Embedding registry key for infer_roi.")
     g.add_argument("--embedding-dir", required=True, type=Path,
                    help="Directory containing raw source embedding tiles (.zarr or .tif).")

@@ -148,7 +148,7 @@ def main() -> None:
     parser.add_argument(
         "--embedding-name",
         required=True,
-        choices=["tessera", "tesserav1.1", "alpha_earth", "alpha_earth_coop", "seamless"],
+        choices=["tessera", "tesserav1.1", "tesserav1.1_global", "alpha_earth", "alpha_earth_coop", "seamless"],
         help="Embedding type key used to parse tile filenames.",
     )
     parser.add_argument(

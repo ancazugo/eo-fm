@@ -57,11 +57,14 @@ _src = Path(__file__).parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
+from aspp import build_aspp
 from infer_roi import infer_roi
 from train_resnet import (
+    MODEL_PRESETS,
     RESNET_PRESETS,
     LCZResNetModule,
     build_resnet,
+    build_mlp,
     augment_images,
     _run_resnet_training_loop,
 )
@@ -338,10 +341,12 @@ def main() -> None:
 
     # ── Model ─────────────────────────────────────────────────────────────────
     g = parser.add_argument_group("Model")
-    g.add_argument("--preset", choices=list(RESNET_PRESETS.keys()), default="large",
-                   help="ResNet size preset (default: large → resnet152).")
+    g.add_argument("--family", choices=list(MODEL_PRESETS), default="resnet",
+                   help="Model family (default: resnet).")
+    g.add_argument("--preset", choices=["nano", "small", "base", "medium", "large"], default="large",
+                   help="Size preset (default: large).")
     g.add_argument("--arch", default=None,
-                   help="Override with any timm model name (e.g. resnet50).")
+                   help="Override: any timm model name.")
     g.add_argument("--num-classes", type=int, default=17,
                    help="Number of output classes (default: 17).")
     g.add_argument("--patch-size", type=int, default=32,
@@ -386,7 +391,7 @@ def main() -> None:
     # ── Inference ─────────────────────────────────────────────────────────────
     g = parser.add_argument_group("Inference")
     g.add_argument("--embedding-name", required=True,
-                   choices=["tessera", "tesserav1.1", "alpha_earth", "alpha_earth_coop", "seamless"],
+                   choices=["tessera", "tesserav1.1", "tesserav1.1_global", "alpha_earth", "alpha_earth_coop", "seamless"],
                    help="Embedding registry key for infer_roi.")
     g.add_argument("--embedding-dir", required=True, type=Path,
                    help="Directory containing raw source embedding tiles (.zarr or .tif).")
@@ -468,13 +473,25 @@ def main() -> None:
     logger.info(f"Detected in_channels = {in_channels}")
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    arch = args.arch or RESNET_PRESETS[args.preset]
-    model = build_resnet(
-        arch=arch,
-        in_channels=in_channels,
-        num_classes=args.num_classes,
-        head_dropout=args.head_dropout,
-    )
+    arch = args.arch or MODEL_PRESETS[args.family][args.preset]
+    if args.family == "aspp":
+        model = build_aspp(arch=arch, in_channels=in_channels, num_classes=args.num_classes)
+    elif args.family == "mlp":
+        model = build_mlp(
+            arch=arch,
+            in_channels=in_channels,
+            num_classes=args.num_classes,
+            head_dropout=args.head_dropout,
+        )
+    else:
+        model = build_resnet(
+            arch=arch,
+            in_channels=in_channels,
+            num_classes=args.num_classes,
+            family=args.family,
+            head_dropout=args.head_dropout,
+            img_size=args.patch_size if args.family == "vit" else None,
+        )
     task = LCZResNetModule(
         model=model,
         num_classes=args.num_classes,
@@ -483,7 +500,7 @@ def main() -> None:
         max_epochs=args.max_epochs,
     )
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"ResNet '{args.preset}' ({arch}): params={n_params:,}")
+    logger.info(f"'{args.family}/{args.preset}' ({arch}): params={n_params:,}")
 
     # ── Dequantize function (selected by embedding type) ──────────────────────
     dequantize_fn = None
@@ -539,11 +556,11 @@ def main() -> None:
         )
         run_dir = args.output_dir / wandb.run.name
     else:
-        run_name = args.run_name or f"resnet_{args.preset}_{_run_label}"
+        run_name = args.run_name or f"{args.family}_{args.preset}_{_run_label}"
         run_dir = args.output_dir / run_name
 
     run_dir.mkdir(parents=True, exist_ok=True)
-    model_name = f"resnet_{args.preset}_{args.output_name}_{_run_label}"
+    model_name = f"{args.family}_{args.preset}_{args.output_name}_{_run_label}"
 
     # ── Train (or load checkpoint) ────────────────────────────────────────────
     if args.checkpoint is not None:
@@ -665,10 +682,10 @@ def main() -> None:
         west, south, east, north = grid_gdf.to_crs("EPSG:4326").total_bounds
         bbox = (west, south, east, north)
 
-        tif_path = run_dir / f"{run_dir.name}_resnet-{args.preset}-classification-prediction_{city}.tif"
+        tif_path = run_dir / f"{run_dir.name}_{args.family}-{args.preset}-classification-prediction_{city}.tif"
         infer_roi(
             model=task.model,
-            model_type="resnet",
+            model_type=args.family,
             embedding_name=args.embedding_name,
             embedding_dir=args.embedding_dir,
             bbox=bbox,

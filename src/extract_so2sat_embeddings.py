@@ -114,6 +114,41 @@ def _build_tile_index(
         logger.info(f"Tile index (tesserav1.1): {len(paths)} tiles from {geoinfo_dir}")
         return paths, STRtree(geoms)
 
+    # ── tessera v1.1 global: NPY subdirs + tiff_all for geo metadata ─────────
+    if embedding_name == "tesserav1.1_global":
+        import rasterio
+        import rasterio.warp
+
+        if year is None:
+            raise ValueError("--year is required for tesserav1.1_global.")
+
+        tiff_dir = embedding_dir / "global_0.1_degree_tiff_all"
+        npy_root = embedding_dir / "global_0.1_degree_representation" / str(year)
+
+        if not tiff_dir.exists():
+            raise FileNotFoundError(
+                f"global_0.1_degree_tiff_all/ not found under {embedding_dir}. "
+                "Pass the v1.1 root (e.g. /tessera/v1.1) as --embedding-dir."
+            )
+        if not npy_root.exists():
+            raise FileNotFoundError(
+                f"global_0.1_degree_representation/{year}/ not found under {embedding_dir}."
+            )
+
+        paths, geoms = [], []
+        for npy_dir in sorted(npy_root.iterdir()):
+            if not npy_dir.is_dir():
+                continue
+            tiff_path = tiff_dir / f"{npy_dir.name}.tiff"
+            if not tiff_path.exists():
+                continue
+            with rasterio.open(tiff_path) as ds:
+                l, b, r, t = rasterio.warp.transform_bounds(ds.crs, "EPSG:4326", *ds.bounds)
+            geoms.append(box(l, b, r, t))
+            paths.append(npy_dir)
+        logger.info(f"Tile index (tesserav1.1_global): {len(paths)} tiles from {npy_root}")
+        return paths, STRtree(geoms)
+
     # ── seamless (ESD): spatial index from rasterio bounds ───────────────────
     if embedding_name == "seamless":
         import rasterio
@@ -223,9 +258,58 @@ def _open_tile_tessera11(path: Path) -> xr.DataArray:
     return da.rio.write_crs(crs)
 
 
+@functools.lru_cache(maxsize=2)
+def _open_tile_tessera11_global(npy_dir: Path) -> xr.DataArray:
+    """Open a tessera v1.1 global tile from its NPY subdirectory.
+
+    Loads {tile_name}.npy + {tile_name}_scales.npy from npy_dir, dequantizes,
+    and returns a (band, y, x) DataArray with CRS and pixel coordinates from
+    the sibling global_0.1_degree_tiff_all/ TIFF (year-independent geo metadata).
+
+    npy_dir layout: .../global_0.1_degree_representation/{year}/grid_{lon}_{lat}/
+    """
+    import rasterio
+    import rioxarray  # noqa: F401
+
+    tile_name = npy_dir.name  # e.g. grid_-0.05_51.45
+
+    int8_path = npy_dir / f"{tile_name}.npy"
+    scales_path = npy_dir / f"{tile_name}_scales.npy"
+    if not int8_path.exists() or not scales_path.exists():
+        raise FileNotFoundError(f"NPY files not found in {npy_dir}")
+
+    # .../global_0.1_degree_representation/{year}/grid_*/ → go up 3 levels for v1.1 root
+    tiff_path = npy_dir.parent.parent.parent / "global_0.1_degree_tiff_all" / f"{tile_name}.tiff"
+    if not tiff_path.exists():
+        raise FileNotFoundError(f"Geoinfo TIFF not found: {tiff_path}")
+
+    from dequantize_embeddings import load_and_dequantize_tessera_representation
+    arr_hwc = load_and_dequantize_tessera_representation(int8_path, scales_path)
+    arr_chw = arr_hwc.transpose(2, 0, 1)  # (128, H, W)
+
+    with rasterio.open(tiff_path) as ds:
+        crs = ds.crs
+        transform = ds.transform
+        H, W = ds.height, ds.width
+
+    x_coords = [transform.c + (i + 0.5) * transform.a for i in range(W)]
+    y_coords = [transform.f + (i + 0.5) * transform.e for i in range(H)]
+
+    da = xr.DataArray(
+        arr_chw,
+        dims=("band", "y", "x"),
+        coords={"band": np.arange(arr_chw.shape[0]), "y": y_coords, "x": x_coords},
+    )
+    return da.rio.write_crs(crs)
+
+
 def _open_tile(path: Path) -> xr.DataArray:
     """Open a .zarr or .tif tile as a (band, y, x) DataArray with CRS set."""
     import rioxarray as rxr
+
+    # Tessera v1.1 global: path is the NPY subdir
+    if path.is_dir():
+        return _open_tile_tessera11_global(path)
 
     # Tessera v1.1: geoinfo tiff with a sibling infer_output/ directory
     if path.suffix in (".tiff", ".tif") and path.parent.name == "geoinfo":
@@ -313,7 +397,11 @@ def _crop_patch(
 
     arrays: list[xr.DataArray] = []
     for path in tile_paths:
-        da = _open_tile(path)
+        try:
+            da = _open_tile(path)
+        except Exception as e:
+            logger.warning(f"Skipping tile {path}: {e}")
+            continue
         if da.rio.crs is None:
             continue
 
@@ -395,7 +483,7 @@ def main() -> None:
     parser.add_argument(
         "--embedding-name",
         required=True,
-        choices=["tessera", "tesserav1.1", "alpha_earth", "alpha_earth_coop", "seamless"],
+        choices=["tessera", "tesserav1.1", "tesserav1.1_global", "alpha_earth", "alpha_earth_coop", "seamless"],
         help="Embedding type key (used to parse tile filenames).",
     )
     parser.add_argument(
@@ -466,7 +554,7 @@ def main() -> None:
         # Sort patches by centroid so tiles in the OS page cache are shared
         # across workers processing adjacent patches (critical for tesserav1.1
         # where each tile is ~110 MB and loaded fresh from npy each call).
-        if args.embedding_name == "tesserav1.1":
+        if args.embedding_name in ("tesserav1.1", "tesserav1.1_global"):
             cx = split_patches.geometry.centroid.x
             cy = split_patches.geometry.centroid.y
             split_patches = split_patches.iloc[

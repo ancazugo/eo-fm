@@ -545,7 +545,7 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Seamless ROI inference from raw source embedding tiles."
     )
-    p.add_argument("--model-type", required=True, choices=["unet", "resnet"],
+    p.add_argument("--model-type", required=True, choices=["unet", "resnet", "mlp"],
                    help="Model architecture type.")
     p.add_argument("--checkpoint", required=True, type=Path,
                    help="Path to .pt checkpoint file.")
@@ -563,7 +563,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--num-classes", type=int, default=17,
                    help="Number of LCZ classes (must match training).")
     p.add_argument("--embedding-name", required=True,
-                   choices=["tessera", "tesserav1.1", "alpha_earth", "alpha_earth_coop", "seamless"],
+                   choices=["tessera", "tesserav1.1", "tesserav1.1_global", "alpha_earth", "alpha_earth_coop", "seamless"],
                    help="Embedding type key.")
     p.add_argument("--embedding-dir", required=True, type=Path,
                    help="Directory containing source tile files (.zarr or .tif).")
@@ -685,7 +685,23 @@ def main() -> None:
         task.model.load_state_dict(state)
         model = task.model.to(device)
 
-    else:  # resnet
+    elif args.model_type == "mlp":
+        from train_resnet import MODEL_PRESETS, LCZResNetModule, build_mlp
+
+        arch_name = args.arch or MODEL_PRESETS["mlp"].get(args.preset, "mlp_512-256")
+        logger.info(f"Building MLP: preset={args.preset}, arch={arch_name}")
+        mlp = build_mlp(
+            arch=arch_name,
+            in_channels=in_channels,
+            num_classes=args.num_classes,
+        )
+        task = LCZResNetModule(mlp, num_classes=args.num_classes)
+        ckpt = torch.load(args.checkpoint, map_location="cpu")
+        state = ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
+        task.model.load_state_dict(state)
+        model = task.model.to(device)
+
+    else:  # resnet + all other timm families
         from train_resnet import RESNET_PRESETS, LCZResNetModule, build_resnet
 
         arch_name = args.arch or RESNET_PRESETS.get(args.preset, "resnet50")
