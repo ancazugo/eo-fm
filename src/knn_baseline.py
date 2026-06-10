@@ -1,32 +1,33 @@
-"""Linear probe + kNN baseline on So2Sat patch embeddings.
+"""Cosine-kNN baseline on pooled So2Sat patch embeddings.
 
 Features are extracted from pre-computed embedding .npy patches via global
-average pooling (or mean+std concatenation), z-score normalised using
-training-set statistics, then used to train a single linear layer and a
-cosine-kNN classifier.
+average pooling (or mean+std concatenation), cached to disk, z-score
+normalised using training-set statistics, then classified by majority vote
+over the k nearest training neighbours (cosine distance).
 
-Data modes (--global-split vs per-city) and dequantization logic mirror
-patch_classification.py.  Grid-tiles are not supported here.
+Linear probe training now lives in the main pipeline:
+    python src/patch_classification.py --family linear_probe ...
+(use --arch mean_std for mean+std pooling). ROI inference for those
+checkpoints goes through infer_roi.py --model-type linear_probe.
 
 Example (per-city, AlphaEarth):
-    python src/linear_probe.py \\
+    python src/knn_baseline.py \\
         --so2sat-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4 \\
         --cities-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4/cities \\
         --cities Nairobi \\
         --output-name AlphaEarth --year 2017 \\
         --embedding-name alpha_earth \\
-        --pooling gap --class-weights sqrt_inv_freq \\
-        --batch-size 1024 --max-epochs 100 \\
+        --pooling gap --knn-k 20 \\
         --output-dir /maps/acz25/phd-thesis-data/output/lcz-classification/dl
 
 Example (global split, seamless — dequantize applied automatically):
-    python src/linear_probe.py \\
+    python src/knn_baseline.py \\
         --so2sat-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4 \\
         --global-split \\
         --cities-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4/cities \\
         --output-name Seamless --year 2017 \\
         --embedding-name seamless \\
-        --pooling mean_std --class-weights effective_number \\
+        --pooling mean_std \\
         --output-dir /maps/acz25/phd-thesis-data/output/lcz-classification/dl
 """
 
@@ -43,8 +44,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
-import torch.nn as nn
 import wandb
 from loguru import logger
 from sklearn.metrics import (
@@ -56,21 +55,16 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
 )
 from sklearn.neighbors import NearestNeighbors
-from torch.utils.data import DataLoader, TensorDataset
-from torchmetrics import Accuracy
-from torchmetrics.classification import MulticlassCohenKappa, MulticlassF1Score
 from tqdm import tqdm
 
 _src = Path(__file__).parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from patch_classification import (
-    _build_city_items,
-    _build_global_items,
-    _build_patch_index,
-)
+from datasets.registry import EMBEDDING_REGISTRY
+from datasets.so2sat import build_so2sat_items
 from utils.constants import lcz_dict
+from utils.runtime import init_run, resolve_dequantize
 
 
 # ── Feature extraction ────────────────────────────────────────────────────────
@@ -166,194 +160,6 @@ def extract_and_cache(
 
 def normalize(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
     return (X - mean) / (std + 1e-8)
-
-
-# ── Class weights ─────────────────────────────────────────────────────────────
-
-def compute_class_weights(
-    labels_train: np.ndarray,
-    scheme: str,
-    num_classes: int,
-    beta: float = 0.999,
-) -> torch.Tensor | None:
-    if scheme == "none":
-        return None
-    counts = np.bincount(labels_train[labels_train >= 0], minlength=num_classes).astype(np.float64)
-    counts = np.maximum(counts, 1.0)
-    if scheme == "inv_freq":
-        w = 1.0 / counts
-    elif scheme == "sqrt_inv_freq":
-        w = 1.0 / np.sqrt(counts)
-    else:  # effective_number
-        effective_n = (1.0 - beta ** counts) / (1.0 - beta)
-        w = 1.0 / effective_n
-    w = w / w.sum() * num_classes
-    return torch.tensor(w, dtype=torch.float32)
-
-
-# ── Linear probe ──────────────────────────────────────────────────────────────
-
-class LinearProbe(nn.Module):
-    def __init__(self, feature_dim: int, num_classes: int) -> None:
-        super().__init__()
-        self.fc = nn.Linear(feature_dim, num_classes)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.fc(x)
-
-
-def train_linear_probe(
-    X_train: np.ndarray,
-    y_train: np.ndarray,
-    X_val: np.ndarray,
-    y_val: np.ndarray,
-    num_classes: int,
-    device: torch.device,
-    lr: float,
-    weight_decay: float,
-    max_epochs: int,
-    batch_size: int,
-    patience: int,
-    class_weights: torch.Tensor | None,
-    run_dir: Path,
-) -> tuple[LinearProbe, Path | None]:
-    feat_dim = X_train.shape[1]
-    model = LinearProbe(feat_dim, num_classes).to(device)
-
-    cw = class_weights.to(device) if class_weights is not None else None
-    criterion = nn.CrossEntropyLoss(weight=cw, ignore_index=-1)
-
-    optimizer = torch.optim.SGD(
-        model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
-
-    train_loader = DataLoader(
-        TensorDataset(torch.from_numpy(X_train).float(), torch.from_numpy(y_train).long()),
-        batch_size=batch_size, shuffle=True, drop_last=False,
-    )
-    val_loader = DataLoader(
-        TensorDataset(torch.from_numpy(X_val).float(), torch.from_numpy(y_val).long()),
-        batch_size=batch_size, shuffle=False,
-    )
-
-    metric_kw = dict(task="multiclass", num_classes=num_classes, ignore_index=-1)
-    f1_kw = dict(num_classes=num_classes, ignore_index=-1)
-
-    train_acc_m       = Accuracy(**metric_kw).to(device)
-    train_acc_macro_m = Accuracy(**metric_kw, average="macro").to(device)
-    train_f1_macro_m  = MulticlassF1Score(**f1_kw, average="macro").to(device)
-    train_f1_micro_m  = MulticlassF1Score(**f1_kw, average="micro").to(device)
-    train_kappa_m     = MulticlassCohenKappa(num_classes=num_classes, ignore_index=-1).to(device)
-
-    val_acc_m         = Accuracy(**metric_kw).to(device)
-    val_acc_macro_m   = Accuracy(**metric_kw, average="macro").to(device)
-    val_f1_macro_m    = MulticlassF1Score(**f1_kw, average="macro").to(device)
-    val_f1_micro_m    = MulticlassF1Score(**f1_kw, average="micro").to(device)
-    val_kappa_m       = MulticlassCohenKappa(num_classes=num_classes, ignore_index=-1).to(device)
-
-    best_val_oa = -1.0
-    patience_ctr = 0
-    best_ckpt: Path | None = None
-
-    for epoch in range(max_epochs):
-        model.train()
-        for m in (train_acc_m, train_acc_macro_m, train_f1_macro_m, train_f1_micro_m, train_kappa_m):
-            m.reset()
-        t_loss, n_t = 0.0, 0
-        for Xb, yb in train_loader:
-            Xb, yb = Xb.to(device), yb.to(device)
-            if (yb != -1).sum() == 0:
-                continue
-            optimizer.zero_grad()
-            logits = model(Xb)
-            loss = criterion(logits, yb)
-            if torch.isnan(loss):
-                continue
-            loss.backward()
-            optimizer.step()
-            t_loss += loss.item()
-            n_t += 1
-            with torch.no_grad():
-                preds = logits.argmax(1)
-                train_acc_m(preds, yb)
-                train_acc_macro_m(preds, yb)
-                train_f1_macro_m(preds, yb)
-                train_f1_micro_m(preds, yb)
-                train_kappa_m(preds, yb)
-
-        train_loss     = t_loss / max(1, n_t)
-        train_oa       = train_acc_m.compute().item()
-        train_acc_macro = train_acc_macro_m.compute().item()
-        train_f1_macro  = train_f1_macro_m.compute().item()
-        train_f1_micro  = train_f1_micro_m.compute().item()
-        train_kappa     = train_kappa_m.compute().item()
-
-        model.eval()
-        for m in (val_acc_m, val_acc_macro_m, val_f1_macro_m, val_f1_micro_m, val_kappa_m):
-            m.reset()
-        v_loss, n_v = 0.0, 0
-        with torch.no_grad():
-            for Xb, yb in val_loader:
-                Xb, yb = Xb.to(device), yb.to(device)
-                if (yb != -1).sum() == 0:
-                    continue
-                logits = model(Xb)
-                v_loss += criterion(logits, yb).item()
-                n_v += 1
-                preds = logits.argmax(1)
-                val_acc_m(preds, yb)
-                val_acc_macro_m(preds, yb)
-                val_f1_macro_m(preds, yb)
-                val_f1_micro_m(preds, yb)
-                val_kappa_m(preds, yb)
-
-        scheduler.step()
-        val_loss     = v_loss / max(1, n_v)
-        val_oa       = val_acc_m.compute().item()
-        val_acc_macro = val_acc_macro_m.compute().item()
-        val_f1_macro  = val_f1_macro_m.compute().item()
-        val_f1_micro  = val_f1_micro_m.compute().item()
-        val_kappa     = val_kappa_m.compute().item()
-
-        if wandb.run:
-            wandb.log({
-                "train_loss":      train_loss,
-                "train_oa":        train_oa,
-                "train_acc_macro": train_acc_macro,
-                "train_f1_macro":  train_f1_macro,
-                "train_f1_micro":  train_f1_micro,
-                "train_kappa":     train_kappa,
-                "val_loss":        val_loss,
-                "val_oa":          val_oa,
-                "val_acc_macro":   val_acc_macro,
-                "val_f1":          val_f1_macro,
-                "val_f1_micro":    val_f1_micro,
-                "val_kappa":       val_kappa,
-                "epoch":           epoch + 1,
-            })
-        logger.info(
-            f"Epoch {epoch+1}/{max_epochs}  "
-            f"loss={train_loss:.4f}  val_loss={val_loss:.4f}  val_oa={val_oa:.4f}"
-        )
-
-        if val_oa > best_val_oa:
-            best_val_oa = val_oa
-            patience_ctr = 0
-            best_ckpt = run_dir / "linear_probe_best.pt"
-            torch.save({"model_state_dict": model.state_dict(), "val_oa": val_oa}, best_ckpt)
-        else:
-            patience_ctr += 1
-            if patience_ctr >= patience:
-                logger.info(f"Early stopping at epoch {epoch+1} (val_oa={val_oa:.4f})")
-                break
-
-    if best_ckpt and best_ckpt.exists():
-        ckpt = torch.load(best_ckpt, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
-        logger.info(f"Loaded best model (val_oa={ckpt['val_oa']:.4f}) from {best_ckpt.name}")
-
-    return model, best_ckpt
 
 
 # ── kNN ───────────────────────────────────────────────────────────────────────
@@ -547,7 +353,7 @@ def _append_summary(summary_csv: Path, row: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Linear probe + kNN baseline on So2Sat patch embeddings."
+        description="Cosine-kNN baseline on pooled So2Sat patch embeddings."
     )
 
     g = parser.add_argument_group("Data")
@@ -566,7 +372,7 @@ def main() -> None:
     g.add_argument("--year", required=True, help="Year subfolder (e.g. 2017).")
     g.add_argument("--label-col", default="LCZ_class")
     g.add_argument("--embedding-name", required=True,
-                   choices=["tessera", "tesserav1.1", "tesserav1.1_global", "alpha_earth", "alpha_earth_coop", "seamless"],
+                   choices=sorted(EMBEDDING_REGISTRY),
                    help="Embedding type — controls auto-dequantization.")
     g.add_argument("--dequantize", action="store_true",
                    help="Force dequantize (auto-applied for alpha_earth_coop and seamless).")
@@ -578,21 +384,8 @@ def main() -> None:
                    help="Feature cache directory (default: {output_dir}/cache).")
     g.add_argument("--no-cache", action="store_true", help="Ignore and overwrite existing cache.")
 
-    g = parser.add_argument_group("Linear probe")
+    g = parser.add_argument_group("kNN")
     g.add_argument("--num-classes", type=int, default=17)
-    g.add_argument("--batch-size", type=int, default=1024)
-    g.add_argument("--lr", type=float, default=0.1)
-    g.add_argument("--weight-decay", type=float, default=1e-4)
-    g.add_argument("--max-epochs", type=int, default=100)
-    g.add_argument("--early-stopping-patience", type=int, default=10)
-    g.add_argument("--class-weights", default="sqrt_inv_freq",
-                   choices=["none", "inv_freq", "sqrt_inv_freq", "effective_number"])
-    g.add_argument("--beta", type=float, default=0.999,
-                   help="Beta for effective_number class weighting.")
-
-    g = parser.add_argument_group("Method")
-    g.add_argument("--method", choices=["linear_probe", "knn"], default="linear_probe",
-                   help="Which method to run as its own WandB run.")
     g.add_argument("--knn-k", type=int, default=20)
 
     g = parser.add_argument_group("Output")
@@ -602,77 +395,27 @@ def main() -> None:
     g.add_argument("--wandb-entity", default="phd-thesis-team")
     g.add_argument("--no-wandb", action="store_true")
     g.add_argument("--seed", type=int, default=42)
-    g.add_argument("--accelerator", choices=["auto", "cpu", "cuda", "mps"], default="auto")
 
     args = parser.parse_args()
-    torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Device ────────────────────────────────────────────────────────────────
-    if args.accelerator == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(args.accelerator)
-    logger.info(f"Device: {device}")
-
-    # ── Dequantize (auto-required for coop and seamless) ──────────────────────
-    need_dequant = args.dequantize or args.embedding_name in {"alpha_earth_coop", "seamless"}
-    dequantize_fn = None
-    in_channels_override: int | None = None
-    if need_dequant:
-        if args.embedding_name == "seamless":
-            from dequantize_embeddings import dequantize_esd
-            dequantize_fn = dequantize_esd
-            in_channels_override = 72
-            logger.info("Seamless: dequantize_esd applied (13→72 channels)")
-        else:
-            from dequantize_embeddings import dequantize_alphaearth_embeddings
-            dequantize_fn = dequantize_alphaearth_embeddings
-            logger.info("AlphaEarth coop: dequantize_alphaearth_embeddings applied")
-
-    # ── Patch index ───────────────────────────────────────────────────────────
-    patch_index = _build_patch_index(args.so2sat_dir, args.output_name, args.year)
-    if not patch_index:
-        logger.error(
-            f"No patch npy files found under {args.so2sat_dir} "
-            f"for output_name={args.output_name!r}, year={args.year!r}"
-        )
-        raise SystemExit(1)
+    # ── Dequantize (auto-applied for coop and seamless) ───────────────────────
+    dequantize_fn, in_channels_override = resolve_dequantize(
+        args.embedding_name, force=args.dequantize
+    )
 
     # ── Item lists ────────────────────────────────────────────────────────────
-    if args.global_split:
-        gpkg = args.global_gpkg or (args.so2sat_dir / "patches_reference_rxr.gpkg")
-        if not gpkg.exists():
-            logger.error(f"Global GPKG not found: {gpkg}")
-            raise SystemExit(1)
-        all_items = _build_global_items(gpkg, patch_index, args.label_col)
-        city_dirs: list[Path] = []
-        if args.cities and args.cities_dir:
-            city_dirs = [args.cities_dir / c for c in args.cities if (args.cities_dir / c).is_dir()]
-        city_names = [d.name for d in city_dirs]
-        split_mode = "global"
-    else:
-        if args.cities_dir is None:
-            logger.error("--cities-dir is required when not using --global-split")
-            raise SystemExit(1)
-        city_dirs = sorted(d for d in args.cities_dir.iterdir() if d.is_dir())
-        if args.cities:
-            city_dirs = [d for d in city_dirs if d.name in args.cities]
-        if not city_dirs:
-            logger.error(f"No matching city directories found in {args.cities_dir}")
-            raise SystemExit(1)
-        all_items = []
-        for city_dir in city_dirs:
-            all_items.extend(
-                _build_city_items(args.cities_dir, city_dir.name, patch_index, args.label_col)
-            )
-        city_names = [d.name for d in city_dirs]
-        split_mode = "grid"
-
-    if not all_items:
-        logger.error("No items found. Check --so2sat-dir, --output-name, --year.")
-        raise SystemExit(1)
+    all_items, city_dirs = build_so2sat_items(
+        args.so2sat_dir, args.output_name, args.year,
+        global_split=args.global_split,
+        global_gpkg=args.global_gpkg,
+        cities_dir=args.cities_dir,
+        cities=args.cities,
+        label_col=args.label_col,
+    )
+    city_names = [d.name for d in city_dirs]
+    split_mode = "global" if args.global_split else "grid"
 
     split_counts = {s: sum(1 for _, _, sp in all_items if sp == s) for s in ("train", "val", "test")}
     logger.info(f"Total patches: {len(all_items)}  splits: {split_counts}")
@@ -695,15 +438,13 @@ def main() -> None:
 
     # ── Normalisation ─────────────────────────────────────────────────────────
     X_train = normalize(feats["train"], feat_mean, feat_std)
-    X_val   = normalize(feats["val"],   feat_mean, feat_std)
     X_test  = normalize(feats["test"],  feat_mean, feat_std)
     y_train = labels_dict["train"]
-    y_val   = labels_dict["val"]
     y_test  = labels_dict["test"]
 
     # ── WandB ─────────────────────────────────────────────────────────────────
     run_cfg = dict(
-        task=args.method,
+        task="knn",
         embedding=args.output_name,
         embedding_name=args.embedding_name,
         cities="all_so2sat" if args.global_split else city_names,
@@ -711,92 +452,27 @@ def main() -> None:
         split_mode=split_mode,
         pooling=args.pooling,
         feature_dim=feature_dim,
+        knn_k=args.knn_k,
         **{f"{s}_patches": split_counts[s] for s in ("train", "val", "test")},
     )
-    if args.method == "linear_probe":
-        run_cfg.update(
-            class_weights=args.class_weights,
-            batch_size=args.batch_size,
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-            max_epochs=args.max_epochs,
-            early_stopping_patience=args.early_stopping_patience,
-        )
-    else:
-        run_cfg["knn_k"] = args.knn_k
 
-    if not args.no_wandb:
-        wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            dir=str(args.output_dir),
-            config=run_cfg,
-            name=args.run_name,
-        )
-        run_dir = args.output_dir / wandb.run.name
-    else:
-        run_name = args.run_name or f"{args.method}_{args.output_name}_{_run_label}"
-        run_dir = args.output_dir / run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = init_run(
+        args.output_dir, run_cfg, args.run_name,
+        default_name=f"knn_{args.output_name}_{_run_label}",
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        no_wandb=args.no_wandb,
+    )
 
     test_items = [(p, l, s) for p, l, s in all_items if s == "test"]
 
-    if args.method == "linear_probe":
-        # ── Class weights ─────────────────────────────────────────────────────
-        cw = compute_class_weights(y_train, args.class_weights, args.num_classes, args.beta)
-        if cw is not None:
-            logger.info(f"Class weights: min={cw.min():.3f}  max={cw.max():.3f}")
-
-        # ── Linear probe ──────────────────────────────────────────────────────
-        logger.info("Training linear probe …")
-        probe, _ = train_linear_probe(
-            X_train, y_train, X_val, y_val,
-            num_classes=args.num_classes,
-            device=device,
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-            max_epochs=args.max_epochs,
-            batch_size=args.batch_size,
-            patience=args.early_stopping_patience,
-            class_weights=cw,
-            run_dir=run_dir,
-        )
-
-        probe.eval()
-        test_criterion = nn.CrossEntropyLoss(
-            weight=cw.to(device) if cw is not None else None, ignore_index=-1,
-        )
-        test_loader = DataLoader(
-            TensorDataset(torch.from_numpy(X_test).float(), torch.from_numpy(y_test).long()),
-            batch_size=args.batch_size, shuffle=False,
-        )
-        lp_preds_list, t_loss_total, n_t = [], 0.0, 0
-        with torch.no_grad():
-            for Xb, yb in test_loader:
-                Xb, yb = Xb.to(device), yb.to(device)
-                logits = probe(Xb)
-                if (yb != -1).sum() > 0:
-                    t_loss_total += test_criterion(logits, yb).item()
-                    n_t += 1
-                lp_preds_list.append(logits.argmax(1).cpu())
-        lp_preds = torch.cat(lp_preds_list).numpy()
-        test_loss = t_loss_total / max(1, n_t)
-        logger.info(f"[linear_probe] test_loss={test_loss:.4f}")
-
-        metrics = _eval_and_save(
-            y_test, lp_preds, "linear_probe", args.num_classes, run_dir, not args.no_wandb,
-            test_loss=test_loss,
-        )
-        _per_city_oa(test_items, lp_preds, args.cities_dir, "linear_probe", run_dir)
-
-    else:  # knn
-        # ── kNN baseline ──────────────────────────────────────────────────────
-        logger.info(f"Running kNN (k={args.knn_k}) …")
-        knn_preds = run_knn(X_train, y_train, X_test, k=args.knn_k)
-        metrics = _eval_and_save(
-            y_test, knn_preds, "knn", args.num_classes, run_dir, not args.no_wandb,
-        )
-        _per_city_oa(test_items, knn_preds, args.cities_dir, "knn", run_dir)
+    # ── kNN baseline ──────────────────────────────────────────────────────────
+    logger.info(f"Running kNN (k={args.knn_k}) …")
+    knn_preds = run_knn(X_train, y_train, X_test, k=args.knn_k)
+    metrics = _eval_and_save(
+        y_test, knn_preds, "knn", args.num_classes, run_dir, not args.no_wandb,
+    )
+    _per_city_oa(test_items, knn_preds, args.cities_dir, "knn", run_dir)
 
     # ── Summary CSV ───────────────────────────────────────────────────────────
     _append_summary(
@@ -804,12 +480,12 @@ def main() -> None:
         {
             "run_name": run_dir.name,
             "date": datetime.now().strftime("%Y-%m-%d"),
-            "method": args.method,
+            "method": "knn",
             "embedding": args.output_name,
             "cities": "all_so2sat" if args.global_split else "_".join(city_names[:5]),
             "split_mode": split_mode,
             "pooling": args.pooling,
-            "class_weights": args.class_weights if args.method == "linear_probe" else "none",
+            "class_weights": "none",
             "feature_dim": feature_dim,
             "train_n": split_counts["train"],
             "val_n": split_counts["val"],

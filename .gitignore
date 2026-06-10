@@ -12,3 +12,4 @@ lightning_logs/
 CLAUDE.md
 wandb/
 /cache
+.Renviron

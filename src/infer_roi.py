@@ -11,9 +11,15 @@ Instead of using pre-extracted grid npy files, this script:
 This eliminates all grid-tile artifacts and UTM-zone boundary artefacts.
 
 Supports:
-- UNet (segmentation) from train_unet.py checkpoints
-- ResNet (classification) from train_resnet.py checkpoints
-- All embedding types: tessera, alpha_earth, alpha_earth_coop
+- Every model family in the models registry: segmentation families (unet,
+  resnet_unet) run per-pixel with Hanning-blended logits; classification
+  families (resnet, mlp, aspp, vit, linear_probe, ...) run patch-wise with
+  majority vote.
+- Legacy linear-probe checkpoints from the retired linear_probe.py script
+  (fc-only state dict): pass ``--stats-file`` with the training-set mean/std
+  NPZ and they are converted on load.
+- All embedding types in datasets.registry (tessera, tesserav1.1,
+  alpha_earth, alpha_earth_coop, seamless, ...)
 
 Example (segmentation):
     python src/infer_roi.py \\
@@ -53,7 +59,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from loguru import logger
 
-from extract_so2sat_embeddings import _build_tile_index, _open_tile
+from datasets.tiles import build_coop_valid_bbox_map, build_tile_index, open_tile
+
+
+def _is_segmentation(model_type: str) -> bool:
+    """Whether a model family runs per-pixel segmentation (vs patch cls)."""
+    from models import MODEL_REGISTRY
+    fam = MODEL_REGISTRY.get(model_type)
+    return fam is not None and fam.pipeline == "segmentation"
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +104,7 @@ def _open_and_clip(
     from shapely.geometry import box
     from shapely.ops import transform as shapely_transform
 
-    da = _open_tile(path)
+    da = open_tile(path)
     if da.rio.crs is None:
         return None
 
@@ -346,8 +359,9 @@ def infer_roi(
     assembled via rasterio.warp.reproject so UTM zone boundaries produce no artefacts.
 
     Args:
-        model: Loaded nn.Module (UNet or ResNet), already on ``device``.
-        model_type: ``"unet"`` (per-pixel segmentation) or ``"resnet"`` (patch cls).
+        model: Loaded nn.Module, already on ``device``.
+        model_type: Model family name from the models registry. Segmentation
+            families run per-pixel; everything else runs patch classification.
         embedding_name: Registry key — ``"tessera"``, ``"alpha_earth"``,
             ``"alpha_earth_coop"``.
         embedding_dir: Directory containing source tile files.
@@ -379,12 +393,13 @@ def infer_roi(
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    is_seg = _is_segmentation(model_type)
     stride = patch_size - overlap
     if stride <= 0:
         raise ValueError(f"overlap ({overlap}) must be < patch_size ({patch_size})")
 
     # ── Tile spatial index ────────────────────────────────────────────────────
-    tile_paths, tree = _build_tile_index(embedding_dir, embedding_name, year=year)
+    tile_paths, tree = build_tile_index(embedding_dir, embedding_name, year=year)
     roi_geom = box(*bbox)
     idxs = tree.query(roi_geom)
     if len(idxs) == 0:
@@ -394,27 +409,11 @@ def infer_roi(
     logger.info(f"Found {len(matched_paths)} tile(s) intersecting the ROI")
 
     # ── For coop tiles, build path → reported-valid-bbox map ──────────────────
-    # Coop tile data physically overshoots the UTM zone boundary (e.g. a UTM30
-    # tile extends ~0.5° into UTM31 territory) but the index clips the reported
-    # WGS84 bounds to the zone edge.  Intersecting with those bounds in
-    # _open_and_clip discards the contaminated overhang region.
+    # Intersecting with the reported bounds in _open_and_clip discards data
+    # that overshoots the tile's UTM zone boundary.
     path_to_valid_bbox: dict[Path, tuple[float, float, float, float]] = {}
     if embedding_name == "alpha_earth_coop":
-        import geopandas as _gpd
-        _idx = _gpd.read_file(
-            embedding_dir / "aef_index.gpkg",
-            where=f"year = {int(year)}" if year else "",
-        )
-        _name_to_bounds: dict[str, tuple] = {
-            Path(r["path"]).name: (
-                r["wgs84_west"], r["wgs84_south"],
-                r["wgs84_east"], r["wgs84_north"],
-            )
-            for _, r in _idx.iterrows()
-        }
-        for p in matched_paths:
-            if p.name in _name_to_bounds:
-                path_to_valid_bbox[p] = _name_to_bounds[p.name]
+        path_to_valid_bbox = build_coop_valid_bbox_map(embedding_dir, year, matched_paths)
 
     # ── Auto-detect output CRS / resolution from first valid tile ─────────────
     first_result = None
@@ -434,7 +433,7 @@ def infer_roi(
     lat_c = (bbox[1] + bbox[3]) / 2
     lon_c = (bbox[0] + bbox[2]) / 2
 
-    if model_type != "unet":
+    if not is_seg:
         # Classification: each output pixel = one physical patch (patch_physical_res_m).
         # Compute how many embedding pixels span that physical distance, then derive
         # output resolution so reproject downsamples to exactly one pixel per patch.
@@ -450,7 +449,7 @@ def infer_roi(
             )
     else:
         extract_px = patch_size
-        cls_stride = stride  # unused for unet
+        cls_stride = stride  # unused for segmentation
         if out_res is not None:
             resolved_res = out_res
         elif resolved_crs == first_crs:
@@ -486,7 +485,7 @@ def infer_roi(
             continue
 
         # Sliding window
-        if model_type == "unet":
+        if is_seg:
             pred = _sliding_window_seg(
                 model, arr, patch_size, stride, device, num_classes, batch_size
             )
@@ -542,28 +541,35 @@ def infer_roi(
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
+    from datasets.registry import EMBEDDING_REGISTRY
+    from models import MODEL_REGISTRY
+
     p = argparse.ArgumentParser(
         description="Seamless ROI inference from raw source embedding tiles."
     )
-    p.add_argument("--model-type", required=True, choices=["unet", "resnet", "mlp"],
-                   help="Model architecture type.")
+    p.add_argument("--model-type", required=True, choices=sorted(MODEL_REGISTRY),
+                   help="Model family (must match training).")
     p.add_argument("--checkpoint", required=True, type=Path,
                    help="Path to .pt checkpoint file.")
     p.add_argument("--preset", default="small",
                    choices=["nano", "small", "base", "medium", "large"],
                    help="Model size preset (must match training).")
     p.add_argument("--arch", default=None,
-                   help="timm arch override for ResNet (must match training).")
+                   help="Arch override, e.g. a timm model name (must match training).")
     p.add_argument("--depth", type=int, default=None,
                    help="U-Net depth override (must match training).")
     p.add_argument("--base-features", type=int, default=None,
                    help="U-Net base_features override (must match training).")
     p.add_argument("--bottleneck-dropout", type=float, default=0.3,
                    help="U-Net bottleneck dropout (must match training).")
+    p.add_argument("--stats-file", type=Path, default=None,
+                   help="Legacy linear_probe checkpoints only (fc-only state dict): "
+                        "NPZ with train-set 'mean'/'std' arrays. Probes trained via "
+                        "patch_classification.py carry their stats in the checkpoint.")
     p.add_argument("--num-classes", type=int, default=17,
                    help="Number of LCZ classes (must match training).")
     p.add_argument("--embedding-name", required=True,
-                   choices=["tessera", "tesserav1.1", "tesserav1.1_global", "alpha_earth", "alpha_earth_coop", "seamless"],
+                   choices=sorted(EMBEDDING_REGISTRY),
                    help="Embedding type key.")
     p.add_argument("--embedding-dir", required=True, type=Path,
                    help="Directory containing source tile files (.zarr or .tif).")
@@ -650,85 +656,67 @@ def main() -> None:
         logger.info(f"Resolved bbox for '{row['JRC_NAME_MAIN']}': {bbox}")
 
     # ── Device ────────────────────────────────────────────────────────────────
-    if args.accelerator == "cpu":
-        device = torch.device("cpu")
-    elif args.accelerator == "gpu":
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from utils.runtime import resolve_device, resolve_dequantize
+
+    device = resolve_device(args.accelerator)
     logger.info(f"Device: {device}")
 
-    # ── Build model ───────────────────────────────────────────────────────────
+    # ── Build model from the registry ─────────────────────────────────────────
     from datasets.registry import get_in_channels
+    from models import get_family, resolve_arch
+    from training.tasks import LCZResNetModule, LCZUNetModule
+
     in_channels = get_in_channels(args.embedding_name)
+    family = get_family(args.model_type)
 
-    if args.model_type == "unet":
-        from train_unet import UNet, LCZUNetModule
+    ckpt = torch.load(args.checkpoint, map_location="cpu")
+    state = ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
 
-        d, bf = UNet.PRESETS.get(args.preset, (3, 32))
-        if args.depth is not None:
-            d = args.depth
-        if args.base_features is not None:
-            bf = args.base_features
+    if args.model_type == "linear_probe" and "norm.running_mean" not in state:
+        # Legacy probe from the retired linear_probe.py script: fc-only state
+        # dict + external stats npz. Converted into a self-contained
+        # LinearProbeModel so it runs through the standard path below.
+        from models.linear_probe import load_legacy_linear_probe
 
-        logger.info(f"Building U-Net: preset={args.preset}, depth={d}, base_features={bf}")
-        unet = UNet(
-            in_channels=in_channels,
-            num_classes=args.num_classes,
-            depth=d,
-            base_features=bf,
-            bottleneck_dropout=args.bottleneck_dropout,
-        )
-        task = LCZUNetModule(unet, num_classes=args.num_classes)
-        ckpt = torch.load(args.checkpoint, map_location="cpu")
-        state = ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
-        task.model.load_state_dict(state)
-        model = task.model.to(device)
+        if args.stats_file is None:
+            raise SystemExit(
+                "Legacy linear_probe checkpoint (no normalisation stats in the "
+                "state dict) — pass --stats-file with the training-set mean/std NPZ."
+            )
+        logger.info(f"Legacy linear_probe checkpoint — loading stats from {args.stats_file}")
+        model = load_legacy_linear_probe(
+            state, args.stats_file, in_channels, args.num_classes
+        ).to(device)
+    else:
+        arch = resolve_arch(args.model_type, args.preset, args.arch)
 
-    elif args.model_type == "mlp":
-        from train_resnet import MODEL_PRESETS, LCZResNetModule, build_mlp
+        build_kwargs: dict = {}
+        if family.pipeline == "segmentation":
+            build_kwargs["bottleneck_dropout"] = args.bottleneck_dropout
+            if args.model_type == "unet":
+                d, bf = arch
+                if args.depth is not None:
+                    d = args.depth
+                if args.base_features is not None:
+                    bf = args.base_features
+                arch = (d, bf)
+        elif args.model_type == "vit":
+            build_kwargs["img_size"] = args.patch_size
 
-        arch_name = args.arch or MODEL_PRESETS["mlp"].get(args.preset, "mlp_512-256")
-        logger.info(f"Building MLP: preset={args.preset}, arch={arch_name}")
-        mlp = build_mlp(
-            arch=arch_name,
-            in_channels=in_channels,
-            num_classes=args.num_classes,
-        )
-        task = LCZResNetModule(mlp, num_classes=args.num_classes)
-        ckpt = torch.load(args.checkpoint, map_location="cpu")
-        state = ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
-        task.model.load_state_dict(state)
-        model = task.model.to(device)
+        logger.info(f"Building {args.model_type}: preset={args.preset}, arch={arch}")
+        net = family.build(arch, in_channels=in_channels, num_classes=args.num_classes,
+                           **build_kwargs)
 
-    else:  # resnet + all other timm families
-        from train_resnet import RESNET_PRESETS, LCZResNetModule, build_resnet
-
-        arch_name = args.arch or RESNET_PRESETS.get(args.preset, "resnet50")
-        logger.info(f"Building ResNet: preset={args.preset}, arch={arch_name}")
-        resnet = build_resnet(
-            arch=arch_name,
-            in_channels=in_channels,
-            num_classes=args.num_classes,
-        )
-        task = LCZResNetModule(resnet, num_classes=args.num_classes)
-        ckpt = torch.load(args.checkpoint, map_location="cpu")
-        state = ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
+        task_cls = LCZUNetModule if family.pipeline == "segmentation" else LCZResNetModule
+        task = task_cls(net, num_classes=args.num_classes)
         task.model.load_state_dict(state)
         model = task.model.to(device)
 
     model.eval()
     logger.info(f"Loaded checkpoint: {args.checkpoint}")
 
-    # ── Dequantize function ───────────────────────────────────────────────────
-    dequantize_fn = None
-    if args.dequantize:
-        if args.embedding_name == "seamless":
-            from dequantize_embeddings import dequantize_esd
-            dequantize_fn = dequantize_esd
-        else:
-            from dequantize_embeddings import dequantize_alphaearth_embeddings
-            dequantize_fn = dequantize_alphaearth_embeddings
+    # ── Dequantize function (auto-applied for coop/seamless) ──────────────────
+    dequantize_fn, _ = resolve_dequantize(args.embedding_name, force=args.dequantize)
 
     # ── Inference ─────────────────────────────────────────────────────────────
     infer_roi(

@@ -1,4 +1,7 @@
-"""Semantic segmentation (U-Net) trained on grid tile embeddings.
+"""Semantic segmentation trained on grid tile embeddings.
+
+Any segmentation family in the models registry can be trained
+(``--family``: unet, resnet_unet, ...).
 
 For each city the script:
   1. Reads {city}/{output_name}/{year}/{split}/{city}_{grid_id}.npy
@@ -7,10 +10,9 @@ For each city the script:
                        that fall in this tile → (H, W) label mask
        tif:            clips patches_reference_{city}.tif to tile bounds and
                        resizes to (H, W) by nearest-neighbour
-  3. Trains a U-Net with the grid-based train/val/test split and logs to WandB.
+  3. Trains with the grid-based train/val/test split and logs to WandB.
 
-Label convention (matching train_unet.py):
-  raw 1-17 → 0-16 (class index), raw 0 (nodata) → -1 (ignore_index)
+Label convention: raw 1-17 → 0-16 (class index), raw 0 (nodata) → -1 (ignore_index)
 
 Example (single city, AlphaEarth, labels from GeoPackage):
     python src/semantic_segmentation.py \\
@@ -20,39 +22,32 @@ Example (single city, AlphaEarth, labels from GeoPackage):
         --label-source gpkg \\
         --preset large --batch-size 16 --num-workers 4 \\
         --max-epochs 50 \\
+        --embedding-name alpha_earth \\
+        --embedding-dir /maps/acz25/phd-thesis-data/input/Google/AlphaEarth/2017 \\
         --output-dir /maps/acz25/phd-thesis-data/output/lcz-classification/dl
 
-Example (multiple cities, GeoTessera, labels from raster TIF):
+Example (ResNet-UNet, labels from raster TIF):
     python src/semantic_segmentation.py \\
         --cities-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4/cities \\
         --cities Nairobi Paris Berlin \\
         --output-name GeoTessera --year 2017 \\
         --label-source tif \\
-        --preset base --batch-size 8 --num-workers 4 \\
+        --family resnet_unet --preset base --batch-size 8 --num-workers 4 \\
         --max-epochs 50 \\
+        --embedding-name tessera \\
+        --embedding-dir /maps/acz25/phd-thesis-data/input/GeoTessera/2017 \\
         --output-dir /maps/acz25/phd-thesis-data/output/lcz-classification/dl
 """
 
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from pathlib import Path
 
-import geopandas as gpd
-import numpy as np
-import rasterio
 import torch
-import torch.nn.functional as F
 import wandb
 from loguru import logger
-from rasterio.features import rasterize as rio_rasterize
-from rasterio.transform import from_bounds as rio_from_bounds
-from pyproj import Transformer
-from shapely.ops import transform as shapely_transform
-from torch.utils.data import Dataset, DataLoader
-from torchmetrics import Accuracy, JaccardIndex
 
 # ── src/ must be on sys.path (run from repo root) ────────────────────────────
 
@@ -60,275 +55,26 @@ _src = Path(__file__).parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from infer_roi import infer_roi
-from train_unet import UNet, LCZUNetModule, _run_unet_training_loop, augment_batch
+from datasets.grid_tiles import GridSegDataModule, build_city_tile_items
+from datasets.registry import EMBEDDING_REGISTRY
+from models import build_model, families_for, resolve_arch
+from training import (
+    LCZUNetModule,
+    evaluate_segmentation,
+    run_training_loop,
+)
+from utils.runtime import (
+    detect_in_channels,
+    init_run,
+    resolve_dequantize,
+    resolve_device,
+    run_city_inference,
+)
 
-
-# ── Constants ─────────────────────────────────────────────────────────────────
-
-_FILENAME_RE = re.compile(r"^(.+)_(\d+)\.npy$")   # {city}_{grid_id}.npy
-
-
-# ── Label helpers ─────────────────────────────────────────────────────────────
-
-def _rasterize_polys(tile_geom, polys: list, out_shape: tuple[int, int]) -> np.ndarray:
-    """Burn shapely polygon/class pairs into a (H, W) uint8 label mask.
-
-    tile_geom: shapely geometry in tile CRS (provides burn extent).
-    polys: list of (shapely_geom_in_tile_crs, lcz_class_int).
-    Returns array with 1-17 (class) or 0 (nodata).
-    """
-    H, W = out_shape
-    if not polys:
-        return np.zeros((H, W), dtype=np.uint8)
-    minx, miny, maxx, maxy = tile_geom.bounds
-    transform = rio_from_bounds(minx, miny, maxx, maxy, W, H)
-    shapes = [(g, int(c)) for g, c in polys]
-    return rio_rasterize(
-        shapes, out_shape=(H, W), transform=transform, fill=0, dtype=np.uint8,
-    )
-
-
-def _clip_tif(tile_geom, tile_crs: str, tif_path: Path, out_shape: tuple[int, int]) -> np.ndarray:
-    """Clip the label TIF to the tile footprint, resize to out_shape (nearest-neighbour).
-
-    Returns (H, W) uint8 with 1-17 (class) or 0 (nodata).
-    """
-    import rasterio
-    import rasterio.mask
-    from PIL import Image
-
-    H, W = out_shape
-    with rasterio.open(tif_path) as src:
-        tif_crs = str(src.crs)
-        geom_tif = tile_geom
-        if tif_crs != tile_crs:
-            t = Transformer.from_crs(tile_crs, tif_crs, always_xy=True)
-            geom_tif = shapely_transform(t.transform, tile_geom)
-        try:
-            out, _ = rasterio.mask.mask(src, [geom_tif], crop=True, nodata=0)
-            data = out[0].astype(np.uint8)
-        except Exception:
-            return np.zeros((H, W), dtype=np.uint8)
-
-    if data.shape != (H, W):
-        data = np.array(Image.fromarray(data).resize((W, H), Image.NEAREST))
-    return data
-
-
-# ── Per-city item builder ─────────────────────────────────────────────────────
-
-def _build_city_items(
-    city_dir: Path,
-    output_name: str,
-    year: str,
-    label_source: str,
-    label_col: str,
-) -> tuple[list, dict]:
-    """Scan npy files for one city and build per-tile item tuples.
-
-    Returns:
-        items: list of (npy_path, tile_geom, tile_crs, polys_or_none, tif_path_or_none)
-        split_map: dict {npy_path: split} for DataModule split filtering
-    """
-    city = city_dir.name
-    emb_base = city_dir / output_name / year
-    grid_gpkg = city_dir / f"{city}_grid.gpkg"
-    split_gpkg = city_dir / f"patches_reference_{city}_split.gpkg"
-    tif_path = city_dir / f"patches_reference_{city}.tif"
-
-    if not grid_gpkg.exists():
-        logger.warning(f"  {city}: {grid_gpkg.name} missing — skipping")
-        return [], {}
-    if not emb_base.exists():
-        logger.warning(f"  {city}: {emb_base} missing — skipping")
-        return [], {}
-
-    grid_gdf = gpd.read_file(grid_gpkg)
-    tile_crs = str(grid_gdf.crs)
-    # Only train/val/test on tiles within the coverage threshold (is_valid=True)
-    valid_gdf = grid_gdf[grid_gdf["is_valid"]] if "is_valid" in grid_gdf.columns else grid_gdf
-    id2geom = {int(r["grid_id"]): r.geometry for _, r in valid_gdf.iterrows()}
-
-    # Build label payload
-    if label_source == "gpkg":
-        if not split_gpkg.exists():
-            logger.warning(f"  {city}: {split_gpkg.name} missing — skipping")
-            return [], {}
-        sdf = gpd.read_file(split_gpkg)
-        if str(sdf.crs) != tile_crs:
-            sdf = sdf.to_crs(tile_crs)
-        id2polys: dict[int, list] = {}
-        for _, r in sdf.iterrows():
-            gid = int(r["grid_id"])
-            id2polys.setdefault(gid, []).append((r.geometry, int(r[label_col])))
-        tif_ref = None
-    else:
-        if not tif_path.exists():
-            logger.warning(f"  {city}: {tif_path.name} missing — skipping")
-            return [], {}
-        id2polys = {}
-        tif_ref = tif_path
-
-    items = []
-    split_map = {}
-    for split in ("train", "val", "test"):
-        split_dir = emb_base / split
-        if not split_dir.exists():
-            continue
-        for npy_path in sorted(split_dir.glob(f"{city}_*.npy")):
-            m = _FILENAME_RE.match(npy_path.name)
-            if m is None:
-                continue
-            grid_id = int(m.group(2))
-            geom = id2geom.get(grid_id)
-            if geom is None:
-                continue
-            polys = id2polys.get(grid_id, []) if label_source == "gpkg" else []
-            items.append((npy_path, geom, tile_crs, polys, tif_ref))
-            split_map[npy_path] = split
-
-    n_valid = len(valid_gdf)
-    n_total = len(grid_gdf)
-    logger.info(f"  {city}: {len(items)} tiles ({n_valid}/{n_total} valid)")
-    return items, split_map
-
-
-# ── Dataset ───────────────────────────────────────────────────────────────────
-
-class GridSegDataset(Dataset):
-    """Grid tile dataset for U-Net segmentation.
-
-    Returns {"image": (C, H, W) float32, "mask": (H, W) long}
-    Label convention: raw 1-17 → 0-16, raw 0 → -1 (ignore_index=-1).
-    """
-
-    def __init__(
-        self,
-        items: list,          # (npy_path, tile_geom, tile_crs, polys, tif_path_or_None)
-        label_source: str,    # "gpkg" or "tif"
-        dequantize_fn=None,
-    ) -> None:
-        self.items = items
-        self.label_source = label_source
-        self.dequantize_fn = dequantize_fn
-
-    def __len__(self) -> int:
-        return len(self.items)
-
-    def __getitem__(self, idx: int) -> dict:
-        npy_path, tile_geom, tile_crs, polys, tif_ref = self.items[idx]
-
-        arr = np.load(npy_path).astype(np.float32)   # (C, H, W)
-        if self.dequantize_fn is not None:
-            arr = self.dequantize_fn(arr)
-        _, H, W = arr.shape
-        image = torch.from_numpy(arr)
-
-        if self.label_source == "gpkg":
-            raw = _rasterize_polys(tile_geom, polys, (H, W))
-        else:
-            raw = _clip_tif(tile_geom, tile_crs, tif_ref, (H, W))
-
-        # 0→-1, 1-17→0-16
-        mask = torch.from_numpy(raw.astype(np.int64)) - 1
-
-        return {"image": image, "mask": mask}
-
-
-# ── DataModule ────────────────────────────────────────────────────────────────
-
-class GridSegDataModule:
-    """Minimal DataModule for _run_unet_training_loop compatibility."""
-
-    def __init__(
-        self,
-        all_items: list,
-        split_map: dict,       # {npy_path: split}
-        label_source: str,
-        batch_size: int,
-        num_workers: int,
-        dequantize_fn=None,
-    ) -> None:
-        self.all_items = all_items
-        self.split_map = split_map
-        self.label_source = label_source
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.dequantize_fn = dequantize_fn
-
-    def setup(self) -> None:
-        def _for_split(s):
-            return [it for it in self.all_items if self.split_map.get(it[0]) == s]
-
-        self._train_ds = GridSegDataset(_for_split("train"), self.label_source, self.dequantize_fn)
-        self._val_ds   = GridSegDataset(_for_split("val"),   self.label_source, self.dequantize_fn)
-        self._test_ds  = GridSegDataset(_for_split("test"),  self.label_source, self.dequantize_fn)
-        logger.info(
-            f"Dataset sizes — train: {len(self._train_ds)}, "
-            f"val: {len(self._val_ds)}, test: {len(self._test_ds)}"
-        )
-
-    @staticmethod
-    def _pad_batch(batch: list) -> tuple[torch.Tensor, torch.Tensor]:
-        """Pad images and masks to the largest (H, W) in the batch.
-
-        Some edge tiles are 1-pixel smaller than interior tiles due to the grid
-        boundary falling at a sub-pixel position. Padding with 0 (embedding)
-        and -1 (nodata ignore_index) keeps the shapes consistent.
-        """
-        # Use a common square size so that rot90 never produces mismatched shapes
-        max_hw = max(
-            max(b["image"].shape[-2] for b in batch),
-            max(b["image"].shape[-1] for b in batch),
-        )
-        imgs, masks = [], []
-        for b in batch:
-            img, msk = b["image"], b["mask"]
-            ph = max_hw - img.shape[-2]
-            pw = max_hw - img.shape[-1]
-            if ph or pw:
-                img = F.pad(img,  (0, pw, 0, ph), value=0)
-                msk = F.pad(msk,  (0, pw, 0, ph), value=-1)
-            imgs.append(img)
-            masks.append(msk)
-        return torch.stack(imgs), torch.stack(masks)
-
-    @staticmethod
-    def _collate(batch: list) -> dict:
-        images, masks = GridSegDataModule._pad_batch(batch)
-        return {"image": images, "mask": masks}
-
-    @staticmethod
-    def _train_collate(batch: list) -> dict:
-        images, masks = GridSegDataModule._pad_batch(batch)
-        images, masks = augment_batch(images, masks)
-        return {"image": images, "mask": masks}
-
-    def train_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self._train_ds, batch_size=self.batch_size, shuffle=True,
-            num_workers=self.num_workers, collate_fn=self._train_collate, drop_last=True,
-        )
-
-    def val_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self._val_ds, batch_size=self.batch_size, shuffle=False,
-            num_workers=self.num_workers, collate_fn=self._collate,
-        )
-
-    def test_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self._test_ds, batch_size=self.batch_size, shuffle=False,
-            num_workers=self.num_workers, collate_fn=self._collate,
-        )
-
-
-# ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Train a U-Net segmentation model on grid tile embeddings."
+        description="Train a segmentation model on grid tile embeddings."
     )
 
     # ── Data ──────────────────────────────────────────────────────────────────
@@ -349,9 +95,11 @@ def main() -> None:
 
     # ── Model ─────────────────────────────────────────────────────────────────
     g = parser.add_argument_group("Model")
-    g.add_argument("--preset", choices=["nano","small","base","medium","large"],
+    g.add_argument("--family", choices=families_for("segmentation"), default="unet",
+                   help="Model family (default: unet).")
+    g.add_argument("--preset", choices=["nano", "small", "base", "medium", "large"],
                    default="large",
-                   help="U-Net size preset (default: large).")
+                   help="Size preset (default: large).")
     g.add_argument("--num-classes", type=int, default=17,
                    help="Number of output classes (default: 17).")
     g.add_argument("--bottleneck-dropout", type=float, default=0.3,
@@ -371,7 +119,7 @@ def main() -> None:
     g.add_argument("--max-epochs", type=int, default=50)
     g.add_argument("--early-stopping-patience", type=int, default=10)
     g.add_argument("--seed", type=int, default=411)
-    g.add_argument("--accelerator", choices=["auto","cpu","cuda","mps"], default="auto")
+    g.add_argument("--accelerator", choices=["auto", "cpu", "cuda", "mps"], default="auto")
 
     # ── Logging ───────────────────────────────────────────────────────────────
     g = parser.add_argument_group("Logging")
@@ -384,16 +132,15 @@ def main() -> None:
     g.add_argument("--run-name", default=None,
                    help="Optional WandB run name override.")
     g.add_argument("--dequantize", action="store_true",
-                   help="Dequantize embeddings when loading npy tiles. "
-                        "The function is selected from --embedding-name: "
-                        "seamless → ESD (72-ch), alpha_earth_coop → AlphaEarth int8.")
+                   help="Force dequantize when loading npy tiles "
+                        "(auto-applied for alpha_earth_coop and seamless).")
     g.add_argument("--checkpoint", type=Path, default=None,
                    help="Load model weights from this .pt file and skip training (inference only).")
 
     # ── Inference ─────────────────────────────────────────────────────────────
     g = parser.add_argument_group("Inference")
     g.add_argument("--embedding-name", required=True,
-                   choices=["tessera", "tesserav1.1", "tesserav1.1_global", "alpha_earth", "alpha_earth_coop", "seamless"],
+                   choices=sorted(EMBEDDING_REGISTRY),
                    help="Embedding registry key for infer_roi.")
     g.add_argument("--embedding-dir", required=True, type=Path,
                    help="Directory containing raw source embedding tiles (.zarr or .tif).")
@@ -412,11 +159,7 @@ def main() -> None:
     torch.manual_seed(args.seed)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Device ────────────────────────────────────────────────────────────────
-    if args.accelerator == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(args.accelerator)
+    device = resolve_device(args.accelerator)
     logger.info(f"Device: {device}")
 
     # ── Collect cities ────────────────────────────────────────────────────────
@@ -432,7 +175,7 @@ def main() -> None:
     all_items: list = []
     split_map: dict = {}
     for city_dir in city_dirs:
-        items, sm = _build_city_items(
+        items, sm = build_city_tile_items(
             city_dir, args.output_name, args.year,
             args.label_source, args.label_col,
         )
@@ -444,19 +187,17 @@ def main() -> None:
         raise SystemExit(1)
     logger.info(f"Total tiles: {len(all_items)}")
 
-    # ── Detect in_channels from first npy ─────────────────────────────────────
-    in_channels = int(np.load(all_items[0][0], mmap_mode="r").shape[0])
-    # dequantize_esd expands 13 raw ESD bands → 72 channels; override so the
-    # model is built with the post-dequantization channel count.
-    if args.dequantize and args.embedding_name == "seamless":
-        in_channels = 72
-    logger.info(f"Detected in_channels = {in_channels}")
+    dequantize_fn, in_channels_override = resolve_dequantize(
+        args.embedding_name, force=args.dequantize
+    )
+    in_channels = detect_in_channels(all_items[0][0], in_channels_override)
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    depth, base_features = UNet.PRESETS[args.preset]
-    model = UNet(
-        in_channels, args.num_classes,
-        depth=depth, base_features=base_features,
+    arch = resolve_arch(args.family, args.preset)
+    model = build_model(
+        args.family, args.preset,
+        in_channels=in_channels,
+        num_classes=args.num_classes,
         bottleneck_dropout=args.bottleneck_dropout,
     )
     task = LCZUNetModule(
@@ -465,18 +206,7 @@ def main() -> None:
         dice_weight=args.dice_weight, max_epochs=args.max_epochs,
     )
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"UNet '{args.preset}': depth={depth}, base_features={base_features}, "
-                f"params={n_params:,}")
-
-    # ── Dequantize function (selected by embedding type) ──────────────────────
-    dequantize_fn = None
-    if args.dequantize:
-        if args.embedding_name == "seamless":
-            from dequantize_embeddings import dequantize_esd
-            dequantize_fn = dequantize_esd
-        else:
-            from dequantize_embeddings import dequantize_alphaearth_embeddings
-            dequantize_fn = dequantize_alphaearth_embeddings
+    logger.info(f"'{args.family}/{args.preset}' ({arch}): params={n_params:,}")
 
     # ── DataModule ────────────────────────────────────────────────────────────
     datamodule = GridSegDataModule(
@@ -493,6 +223,7 @@ def main() -> None:
         cities=city_names,
         year=args.year,
         label_source=args.label_source,
+        family=args.family,
         preset=args.preset,
         in_channels=in_channels,
         num_classes=args.num_classes,
@@ -506,21 +237,15 @@ def main() -> None:
         data_source="grid_tiles",
     )
 
-    if not args.no_wandb:
-        wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            dir=str(args.output_dir),
-            config=run_cfg,
-            name=args.run_name,
-        )
-        run_dir = args.output_dir / wandb.run.name
-    else:
-        run_name = args.run_name or f"unet_{args.preset}_{'_'.join(city_names[:3])}"
-        run_dir = args.output_dir / run_name
-
-    run_dir.mkdir(parents=True, exist_ok=True)
-    model_name = f"unet_{args.preset}_{args.output_name}_{'_'.join(city_names[:3])}"
+    _run_label = "_".join(city_names[:3])
+    run_dir = init_run(
+        args.output_dir, run_cfg, args.run_name,
+        default_name=f"{args.family}_{args.preset}_{_run_label}",
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        no_wandb=args.no_wandb,
+    )
+    model_name = f"{args.family}_{args.preset}_{args.output_name}_{_run_label}"
 
     # ── Train (or load checkpoint) ────────────────────────────────────────────
     if args.checkpoint is not None:
@@ -530,7 +255,7 @@ def main() -> None:
         task = task.to(device)
         ckpt_path = args.checkpoint
     else:
-        task, ckpt_path = _run_unet_training_loop(
+        task, ckpt_path = run_training_loop(
             task_module=task,
             datamodule=datamodule,
             device=device,
@@ -541,74 +266,30 @@ def main() -> None:
         )
     logger.info(f"Best checkpoint: {ckpt_path}")
 
-    # ── Test evaluation ────────────────────────────────────────────────────────
-    task.eval()
-    metric_kw = dict(task="multiclass", num_classes=args.num_classes, ignore_index=-1)
-    test_miou = JaccardIndex(**metric_kw, average="macro").to(device)
-    test_acc  = Accuracy(**metric_kw).to(device)
-    test_loss_total = 0.0
-    n_test_batches  = 0
-
+    # ── Test evaluation ───────────────────────────────────────────────────────
     datamodule.setup()   # re-create test dataloader after training
-    with torch.no_grad():
-        for batch in datamodule.test_dataloader():
-            imgs  = batch["image"].to(device)
-            masks = batch["mask"].to(device)
-            if (masks != -1).sum() == 0:
-                continue
-            logits = task(imgs)
-            loss, _, _ = task._loss(logits, masks)
-            preds = logits.argmax(dim=1)
-            test_miou(preds, masks)
-            test_acc(preds, masks)
-            test_loss_total += loss.item()
-            n_test_batches  += 1
-
-    if n_test_batches > 0:
-        miou = test_miou.compute().item()
-        acc  = test_acc.compute().item()
-        avg_loss = test_loss_total / n_test_batches
-        logger.info(f"Test — mIoU: {miou:.4f}  Acc: {acc:.4f}  Loss: {avg_loss:.4f}")
-        if not args.no_wandb and wandb.run:
-            wandb.log({"test_miou": miou, "test_acc": acc, "test_loss": avg_loss})
-    else:
-        logger.warning("No test batches with valid labels found.")
+    evaluate_segmentation(
+        task, datamodule.test_dataloader(), device, args.num_classes,
+        run_dir, _run_label, use_wandb=not args.no_wandb,
+    )
 
     if not args.no_wandb and wandb.run:
         wandb.finish()
 
-    # ── Per-city inference raster + map ──────────────────────────────────────
+    # ── Per-city inference raster + map ───────────────────────────────────────
     logger.info("Running full-ROI inference …")
-    task.model.eval()
-    for city_dir in city_dirs:
-        city = city_dir.name
-        grid_gpkg = city_dir / f"{city}_grid.gpkg"
-        if not grid_gpkg.exists():
-            logger.warning(f"  {city}: {grid_gpkg.name} not found — skipping inference")
-            continue
-        grid_gdf = gpd.read_file(grid_gpkg)
-        west, south, east, north = grid_gdf.to_crs("EPSG:4326").total_bounds
-        bbox = (west, south, east, north)
-
-        tif_path = run_dir / f"{run_dir.name}_unet-{args.preset}-segmentation-prediction_{city}.tif"
-        infer_roi(
-            model=task.model,
-            model_type="unet",
-            embedding_name=args.embedding_name,
-            embedding_dir=args.embedding_dir,
-            bbox=bbox,
-            output_path=tif_path,
-            num_classes=args.num_classes,
-            patch_size=args.patch_size,
-            overlap=args.overlap,
-            batch_size=args.batch_size,
-            device=device,
-            dequantize_fn=dequantize_fn,
-            year=args.year,
-            city_name=city,
-            margin_m=args.margin_m,
-        )
-        logger.info(f"  {city}: saved {tif_path.name}")
+    run_city_inference(
+        task.model, args.family, "segmentation", args.preset,
+        city_dirs, run_dir, device, dequantize_fn,
+        embedding_name=args.embedding_name,
+        embedding_dir=args.embedding_dir,
+        num_classes=args.num_classes,
+        patch_size=args.patch_size,
+        overlap=args.overlap,
+        batch_size=args.batch_size,
+        year=args.year,
+        margin_m=args.margin_m,
+    )
 
     logger.info(f"Run complete. Outputs in {run_dir}")
 

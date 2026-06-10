@@ -43,8 +43,8 @@ import geopandas as gpd
 from loguru import logger
 from tqdm import tqdm
 
-# Reuse tile index + per-patch crop logic from the patch extraction script
-from extract_so2sat_embeddings import _build_tile_index, _crop_patch
+from datasets.registry import EMBEDDING_REGISTRY
+from datasets.tiles import build_tile_index as _build_tile_index, crop_patch as _crop_patch
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +148,7 @@ def main() -> None:
     parser.add_argument(
         "--embedding-name",
         required=True,
-        choices=["tessera", "tesserav1.1", "tesserav1.1_global", "alpha_earth", "alpha_earth_coop", "seamless"],
+        choices=sorted(EMBEDDING_REGISTRY),
         help="Embedding type key used to parse tile filenames.",
     )
     parser.add_argument(
