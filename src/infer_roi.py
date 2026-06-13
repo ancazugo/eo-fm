@@ -236,7 +236,13 @@ def _sliding_window_cls(
     extract_size: int | None = None,
     model_input_size: int | None = None,
 ) -> np.ndarray:
-    """Run classification model with majority-vote sliding window.
+    """Run classification model with softmax-voting sliding window.
+
+    Each patch's softmax probabilities are accumulated over its full footprint;
+    the per-pixel argmax of the accumulated probabilities is returned. With
+    overlapping patches (stride < extract_size) this soft-votes among all
+    patches covering a pixel; with non-overlapping patches it reduces to the
+    plain per-patch argmax.
 
     Args:
         model: ResNet (takes (B, C, H, W) → (B, num_classes)).
@@ -263,7 +269,7 @@ def _sliding_window_cls(
         arr = np.pad(arr, ((0, 0), (0, pad_h), (0, pad_w)), mode="reflect")
     _, H_pad, W_pad = arr.shape
 
-    vote_sum = np.zeros((num_classes, H_pad, W_pad), dtype=np.int32)
+    prob_sum = np.zeros((num_classes, H_pad, W_pad), dtype=np.float32)
 
     positions = _patch_positions(H_pad, W_pad, extract_size, stride)
     model.eval()
@@ -278,11 +284,11 @@ def _sliding_window_cls(
                     batch, size=(model_input_size, model_input_size),
                     mode="bilinear", align_corners=False,
                 )
-            preds = model(batch).argmax(dim=1).cpu().numpy()
-            for (r, c), cls in zip(batch_pos, preds):
-                vote_sum[int(cls), r:r + extract_size, c:c + extract_size] += 1
+            probs = torch.softmax(model(batch), dim=1).cpu().numpy()
+            for (r, c), p in zip(batch_pos, probs):
+                prob_sum[:, r:r + extract_size, c:c + extract_size] += p[:, None, None]
 
-    return vote_sum.argmax(axis=0).astype(np.uint8)[:H, :W]
+    return prob_sum.argmax(axis=0).astype(np.uint8)[:H, :W]
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +357,7 @@ def infer_roi(
     city_name: str = "ROI",
     margin_m: float = 200.0,
     patch_physical_res_m: float = 320.0,
+    patch_physical_stride_m: float | None = None,
 ) -> Path:
     """Run model inference over a bbox directly from raw source embedding tiles.
 
@@ -379,9 +386,16 @@ def infer_roi(
         city_name: Title string for the PNG.
         margin_m: Extra metres clipped around the bbox per tile for edge context.
         patch_physical_res_m: Physical side length of one patch in metres (resnet only).
-            Determines how many embedding pixels to extract per patch and the output
-            resolution. Default 320 m = 32 px × 10 m/px (So2Sat patch size). Ignored
+            Determines how many embedding pixels to extract per patch.
+            Default 320 m = 32 px × 10 m/px (So2Sat patch size). Ignored
             for unet (segmentation always outputs at embedding resolution).
+        patch_physical_stride_m: Distance in metres between patch origins
+            (classification only). Defaults to ``patch_physical_res_m``
+            (non-overlapping, one prediction per patch). Smaller values slide
+            overlapping patches and soft-vote their softmax probabilities per
+            pixel, producing a finer output grid — e.g. 160 m yields a 160 m map
+            where each pixel averages the 4 overlapping 320 m patches. Also sets
+            the output resolution (unless ``out_res`` is given).
 
     Returns:
         Path to the saved GeoTIFF.
@@ -434,18 +448,26 @@ def infer_roi(
     lon_c = (bbox[0] + bbox[2]) / 2
 
     if not is_seg:
-        # Classification: each output pixel = one physical patch (patch_physical_res_m).
-        # Compute how many embedding pixels span that physical distance, then derive
-        # output resolution so reproject downsamples to exactly one pixel per patch.
+        # Classification: each output pixel = one stride cell (patch_physical_stride_m,
+        # default = patch_physical_res_m → non-overlapping, one pixel per patch).
+        # Compute how many embedding pixels span those physical distances, then derive
+        # output resolution so reproject downsamples to exactly one pixel per stride.
+        stride_m = patch_physical_stride_m or patch_physical_res_m
+        if not 0 < stride_m <= patch_physical_res_m:
+            raise ValueError(
+                f"patch_physical_stride_m ({stride_m}) must be in "
+                f"(0, patch_physical_res_m={patch_physical_res_m}] — a larger stride "
+                "would leave uncovered pixels."
+            )
         extract_px = max(1, round(patch_physical_res_m / embedding_res_m))
-        cls_stride = extract_px  # non-overlapping: one patch per output pixel
+        cls_stride = max(1, round(stride_m / embedding_res_m))
         if out_res is not None:
             resolved_res = out_res
         elif resolved_crs == first_crs:
-            resolved_res = extract_px * embedding_res_m
+            resolved_res = cls_stride * embedding_res_m
         else:
             resolved_res = _meters_to_out_res(
-                extract_px * embedding_res_m, first_crs, resolved_crs, lon_c, lat_c
+                cls_stride * embedding_res_m, first_crs, resolved_crs, lon_c, lat_c
             )
     else:
         extract_px = patch_size
@@ -594,6 +616,12 @@ def _parse_args() -> argparse.Namespace:
                    help="Physical side length of one patch in metres, resnet only "
                         "(default: 320 = 32 px × 10 m/px, So2Sat standard). "
                         "Controls extraction window size and output resolution.")
+    p.add_argument("--patch-physical-stride", type=float, default=None,
+                   help="Stride between patch origins in metres, classification only "
+                        "(default: --patch-physical-res, i.e. non-overlapping). "
+                        "Smaller values soft-vote overlapping patches per pixel and "
+                        "set the output resolution, e.g. 160 gives a 160 m map "
+                        "averaging the softmax of the 4 overlapping 320 m patches.")
     p.add_argument("--overlap", type=int, default=None,
                    help="Overlap between adjacent patches in pixels "
                         "(default: patch_size // 2).")
@@ -738,6 +766,7 @@ def main() -> None:
         city_name=args.city_name,
         margin_m=args.margin_m,
         patch_physical_res_m=args.patch_physical_res,
+        patch_physical_stride_m=args.patch_physical_stride,
     )
 
 
