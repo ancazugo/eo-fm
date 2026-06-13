@@ -29,8 +29,8 @@ class LCZResNetModule(nn.Module):
     """Wraps a classification model for multiclass LCZ patch classification.
 
     Loss: CrossEntropyLoss with ignore_index=-1 (skips all-nodata patches),
-    optionally class-weighted and label-smoothed.
-    Monitored metric: val_f1 (macro F1).
+    optionally class-weighted, label-smoothed and mixup-regularized.
+    Monitored metric: val_f1 (macro F1) by default, or val_kappa.
 
     Args:
         model: Any (B, C, H, W) → (B, num_classes) module.
@@ -40,9 +40,10 @@ class LCZResNetModule(nn.Module):
         max_epochs: Total training epochs (used for CosineAnnealingLR T_max).
         class_weights: Optional (num_classes,) tensor of per-class CE weights.
         label_smoothing: CE label smoothing (default 0.0).
+        mixup_alpha: Beta(alpha, alpha) mixup on training batches (0 = off).
+        monitor: Validation metric for checkpointing/early stopping
+            ("val_f1" or "val_kappa").
     """
-
-    monitor = "val_f1"
 
     def __init__(
         self,
@@ -53,6 +54,8 @@ class LCZResNetModule(nn.Module):
         max_epochs: int = 50,
         class_weights: torch.Tensor | None = None,
         label_smoothing: float = 0.0,
+        mixup_alpha: float = 0.0,
+        monitor: str = "val_f1",
     ) -> None:
         super().__init__()
         self.model = model
@@ -60,6 +63,8 @@ class LCZResNetModule(nn.Module):
         self.lr = lr
         self.weight_decay = weight_decay
         self.max_epochs = max_epochs
+        self.mixup_alpha = mixup_alpha
+        self.monitor = monitor
 
         self.ce_loss = nn.CrossEntropyLoss(
             ignore_index=-1, weight=class_weights, label_smoothing=label_smoothing
@@ -104,10 +109,20 @@ class LCZResNetModule(nn.Module):
         labels = batch["label"].to(device)
         if (labels != -1).sum() == 0:
             return None
-        logits = self.model(images)
-        loss = self.ce_loss(logits, labels)
+        if self.mixup_alpha > 0 and self.training:
+            lam = float(torch.distributions.Beta(
+                self.mixup_alpha, self.mixup_alpha).sample())
+            perm = torch.randperm(images.size(0), device=device)
+            logits = self.model(lam * images + (1 - lam) * images[perm])
+            loss = lam * self.ce_loss(logits, labels) + \
+                (1 - lam) * self.ce_loss(logits, labels[perm])
+        else:
+            logits = self.model(images)
+            loss = self.ce_loss(logits, labels)
         if torch.isnan(loss):
             return None
+        # Train metrics are computed against the dominant (unpermuted) labels;
+        # under mixup they are an approximation, useful only as a trend.
         with torch.no_grad():
             preds = logits.argmax(dim=1)
             self.train_acc(preds, labels)

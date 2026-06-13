@@ -138,6 +138,10 @@ def main() -> None:
                    help="Per-class CE weights from train-split frequencies (default: none).")
     g.add_argument("--label-smoothing", type=float, default=0.0,
                    help="CE label smoothing (default: 0.0).")
+    g.add_argument("--mixup-alpha", type=float, default=0.0,
+                   help="Mixup Beta(alpha, alpha) on training batches (default: 0.0 = off).")
+    g.add_argument("--monitor", choices=["val_f1", "val_kappa"], default="val_f1",
+                   help="Validation metric for checkpointing/early stopping (default: val_f1).")
     g.add_argument("--tta", action="store_true",
                    help="Test-time augmentation: average logits over flips/90° rotations.")
     g.add_argument("--max-epochs", type=int, default=50)
@@ -232,6 +236,8 @@ def main() -> None:
         max_epochs=args.max_epochs,
         class_weights=class_weights,
         label_smoothing=args.label_smoothing,
+        mixup_alpha=args.mixup_alpha,
+        monitor=args.monitor,
     )
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"'{args.family}/{args.preset}' ({arch}): params={n_params:,}")
@@ -264,6 +270,8 @@ def main() -> None:
         weight_decay=args.weight_decay,
         class_weights=args.class_weights,
         label_smoothing=args.label_smoothing,
+        mixup_alpha=args.mixup_alpha,
+        monitor=args.monitor,
         tta=args.tta,
         max_epochs=args.max_epochs,
         early_stopping_patience=args.early_stopping_patience,
