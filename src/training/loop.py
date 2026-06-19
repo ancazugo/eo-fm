@@ -25,6 +25,7 @@ def run_training_loop(
     early_stopping_patience: int,
     run_dir: Path,
     model_name: str,
+    warmup_epochs: int = 0,
 ):
     """Train ``task_module`` and return ``(task_with_best_weights, best_ckpt_path)``.
 
@@ -37,6 +38,7 @@ def run_training_loop(
             of the task's monitored metric.
         run_dir: Directory to save checkpoints.
         model_name: Stem for the checkpoint filename.
+        warmup_epochs: Linear LR warmup epochs before cosine decay (0 = off).
     """
     import wandb
 
@@ -44,7 +46,18 @@ def run_training_loop(
     opt = torch.optim.Adam(
         task_module.parameters(), lr=task_module.lr, weight_decay=task_module.weight_decay
     )
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max_epochs)
+    if warmup_epochs > 0:
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            opt, start_factor=0.01, total_iters=warmup_epochs
+        )
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=max(1, max_epochs - warmup_epochs)
+        )
+        sched = torch.optim.lr_scheduler.SequentialLR(
+            opt, schedulers=[warmup, cosine], milestones=[warmup_epochs]
+        )
+    else:
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max_epochs)
 
     datamodule.setup()
     train_loader = datamodule.train_dataloader()

@@ -144,6 +144,8 @@ def main() -> None:
                    help="Validation metric for checkpointing/early stopping (default: val_f1).")
     g.add_argument("--tta", action="store_true",
                    help="Test-time augmentation: average logits over flips/90° rotations.")
+    g.add_argument("--warmup-epochs", type=int, default=0,
+                   help="Linear LR warmup epochs before cosine decay (0 = off).")
     g.add_argument("--max-epochs", type=int, default=50)
     g.add_argument("--early-stopping-patience", type=int, default=10)
     g.add_argument("--seed", type=int, default=42)
@@ -273,6 +275,7 @@ def main() -> None:
         mixup_alpha=args.mixup_alpha,
         monitor=args.monitor,
         tta=args.tta,
+        warmup_epochs=args.warmup_epochs,
         max_epochs=args.max_epochs,
         early_stopping_patience=args.early_stopping_patience,
         n_params=n_params,
@@ -307,6 +310,7 @@ def main() -> None:
             early_stopping_patience=args.early_stopping_patience,
             run_dir=run_dir,
             model_name=model_name,
+            warmup_epochs=args.warmup_epochs,
         )
     logger.info(f"Best checkpoint: {ckpt_path}")
 
