@@ -21,29 +21,65 @@ from torchmetrics.classification import MulticlassCohenKappa, MulticlassF1Score
 _MAX_CM_SAMPLES = 2_000_000
 
 
+def style_lcz_ticklabels(ax, present_1idx) -> None:
+    """Replace a confusion-matrix axes' tick labels with short LCZ codes
+    (1-10, A-G) and highlight each with its class colour.
+
+    ``present_1idx`` is the list of 1-indexed LCZ classes, in the same order
+    used for the matrix axes. Only the tick labels are restyled — the matrix
+    colour palette is left untouched.
+    """
+    from matplotlib.colors import to_rgb
+
+    from utils.constants import lcz_dict
+
+    short_labels = [lcz_dict.get(l, {}).get("alt_code", str(l)) for l in present_1idx]
+    colors = [lcz_dict.get(l, {}).get("color", "#ffffff") for l in present_1idx]
+
+    def _text_color(bg: str) -> str:
+        r, g, b = to_rgb(bg)
+        # perceived luminance → dark text on light backgrounds, light on dark
+        return "black" if (0.299 * r + 0.587 * g + 0.114 * b) > 0.5 else "white"
+
+    ax.set_xticks(range(len(short_labels)))
+    ax.set_yticks(range(len(short_labels)))
+    ax.set_xticklabels(short_labels, rotation=0)
+    ax.set_yticklabels(short_labels, rotation=0)
+
+    for axis_labels in (ax.get_xticklabels(), ax.get_yticklabels()):
+        for tick, color in zip(axis_labels, colors):
+            tick.set_color(_text_color(color))
+            tick.set_fontweight("bold")
+            tick.set_bbox(dict(facecolor=color, edgecolor="none",
+                               boxstyle="round,pad=0.2"))
+
+
 def save_confusion_matrix(
     y_true_1idx: np.ndarray,
     y_pred_1idx: np.ndarray,
     run_dir: Path,
-    title: str,
     filename: str = "test_confusion_matrix.png",
+    normalize: str | None = None,
 ) -> Path:
-    """Plot + save a confusion matrix PNG for 1-indexed LCZ labels."""
+    """Plot + save a confusion matrix PNG for 1-indexed LCZ labels.
+
+    ``normalize=None`` plots raw integer counts; ``normalize="true"`` plots the
+    proportion of each true class (rows sum to 1).
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix
 
-    from utils.constants import lcz_dict
-
     present = sorted(set(y_true_1idx.tolist()) | set(y_pred_1idx.tolist()))
-    display_labels = [lcz_dict.get(l, {}).get("name", str(l)) for l in present]
-    cm = confusion_matrix(y_true_1idx, y_pred_1idx, labels=present)
+    cm = confusion_matrix(y_true_1idx, y_pred_1idx, labels=present,
+                          normalize=normalize)
     fig, ax = plt.subplots(figsize=(12, 10))
-    ConfusionMatrixDisplay(cm, display_labels=display_labels).plot(
-        ax=ax, colorbar=True, xticks_rotation=45
+    ConfusionMatrixDisplay(cm).plot(
+        ax=ax, colorbar=True, xticks_rotation=45,
+        values_format=".2f" if normalize else "d",
     )
-    ax.set_title(title)
+    style_lcz_ticklabels(ax, present)
     plt.tight_layout()
     cm_path = run_dir / filename
     fig.savefig(cm_path, dpi=120, bbox_inches="tight")
@@ -163,8 +199,14 @@ def _evaluate(
             idx = rng.choice(len(y_true), _MAX_CM_SAMPLES, replace=False)
             y_true, y_pred = y_true[idx], y_pred[idx]
         save_confusion_matrix(
-            y_true, y_pred, run_dir, f"Test Confusion Matrix — {run_label}"
+            y_true, y_pred, run_dir, filename="test_confusion_matrix.png"
         )
+        if not segmentation:
+            save_confusion_matrix(
+                y_true, y_pred, run_dir,
+                filename="test_confusion_matrix_proportions.png",
+                normalize="true",
+            )
 
     return results
 

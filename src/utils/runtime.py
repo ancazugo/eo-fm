@@ -155,6 +155,7 @@ def run_city_inference(
             dequantize_fn=dequantize_fn,
             year=year,
             city_name=city,
+            title=f"LCZ — {city} — {embedding_name} — {model_type}/{preset}",
             margin_m=margin_m,
         )
         logger.info(f"  {city}: saved {tif_path.name}")

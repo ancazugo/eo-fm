@@ -355,6 +355,7 @@ def infer_roi(
     out_res: float | None = None,
     year: str | None = None,
     city_name: str = "ROI",
+    title: str | None = None,
     margin_m: float = 200.0,
     patch_physical_res_m: float = 320.0,
     patch_physical_stride_m: float | None = None,
@@ -383,7 +384,8 @@ def infer_roi(
         out_crs: Output CRS (auto-detected from first tile if None).
         out_res: Output pixel size in ``out_crs`` units (auto-detected if None).
         year: Year string, required for ``"alpha_earth_coop"``.
-        city_name: Title string for the PNG.
+        city_name: City/area name used in the default PNG title.
+        title: Explicit PNG title; overrides the default ``LCZ <MODEL> — <city>``.
         margin_m: Extra metres clipped around the bbox per tile for edge context.
         patch_physical_res_m: Physical side length of one patch in metres (resnet only).
             Determines how many embedding pixels to extract per patch.
@@ -552,7 +554,8 @@ def infer_roi(
     # ── Save PNG ──────────────────────────────────────────────────────────────
     from utils.plot_lcz import save_lcz_map
     png_path = output_path.with_suffix(".png")
-    save_lcz_map(raster, f"LCZ {model_type.upper()} — {city_name}", png_path)
+    map_title = title if title is not None else f"LCZ {model_type.upper()} — {city_name}"
+    save_lcz_map(raster, map_title, png_path, extent=bbox)
     logger.info(f"Saved PNG: {png_path}")
 
     return output_path
