@@ -83,17 +83,28 @@ def build_global_items(
     return items
 
 
+# Hybrid (orig_test) mode: original train/val patches get their grid split, but
+# grid-test-cell patches fold into train (the test set comes from the original split).
+_GRID_FOLD = {"train": "train", "test": "train", "val": "val"}
+
+
 def build_city_items(
     cities_dir: Path,
     city: str,
     patch_index: dict[str, dict[str, Path]],
     label_col: str = "LCZ_class",
+    *,
+    orig_test: bool = False,
 ) -> list[tuple]:
     """Build (npy_path, label_int, split) tuples for one city.
 
     Uses patches_reference_{city}_split.gpkg as the authoritative source of
     patch_ids and their grid-based train/val/test split assignment; the
     'dataset' column disambiguates which original So2Sat dir holds each npy.
+
+    With ``orig_test=True`` the test set is taken from the original So2Sat split
+    ('dataset' == 'testing'); the remaining (original train+val) patches get their
+    grid split, with grid-test-cell patches folded into train (see _GRID_FOLD).
     """
     split_gpkg = cities_dir / city / f"patches_reference_{city}_split.gpkg"
     if not split_gpkg.exists():
@@ -111,7 +122,12 @@ def build_city_items(
             n_missing += 1
             continue
         label = int(row[label_col]) - 1   # 1-17 → 0-16
-        items.append((path, label, str(row["split"])))
+        if orig_test:
+            split = ("test" if str(row["dataset"]) == "testing"
+                     else _GRID_FOLD[str(row["split"])])
+        else:
+            split = str(row["split"])
+        items.append((path, label, split))
 
     logger.info(
         f"  {city}: {len(items)} patches matched "
@@ -130,6 +146,7 @@ def build_so2sat_items(
     cities_dir: Path | None = None,
     cities: list[str] | None = None,
     label_col: str = "LCZ_class",
+    orig_test: bool = False,
 ) -> tuple[list[tuple], list[Path]]:
     """Build the full item list plus the city dirs used for per-city inference.
 
@@ -137,9 +154,16 @@ def build_so2sat_items(
     are used for training AND inference.
     Global mode: all patches from the global GPKG are used for training;
     ``cities`` (with ``cities_dir``) selects cities for inference only.
+    Hybrid mode (``orig_test``): trains on ALL cities' grid splits but keeps the
+    original So2Sat testing patches as the test set; like global mode, ``cities``
+    selects cities for inference only.
 
     Raises SystemExit on missing inputs (CLI-friendly).
     """
+    if orig_test and global_split:
+        logger.error("--orig-test and --global-split are mutually exclusive")
+        raise SystemExit(1)
+
     patch_index = build_patch_index(so2sat_dir, output_name, year)
     if not patch_index:
         logger.error(
@@ -148,7 +172,22 @@ def build_so2sat_items(
         )
         raise SystemExit(1)
 
-    if global_split:
+    if orig_test:
+        if cities_dir is None:
+            logger.error("--cities-dir is required when using --orig-test")
+            raise SystemExit(1)
+        all_cities = sorted(d for d in cities_dir.iterdir() if d.is_dir())
+        all_items = []
+        for city_dir in all_cities:
+            all_items.extend(
+                build_city_items(cities_dir, city_dir.name, patch_index,
+                                 label_col, orig_test=True)
+            )
+        # --cities selects cities for post-training inference only
+        city_dirs = []
+        if cities:
+            city_dirs = [cities_dir / c for c in cities if (cities_dir / c).is_dir()]
+    elif global_split:
         gpkg = global_gpkg or (so2sat_dir / "patches_reference_rxr.gpkg")
         if not gpkg.exists():
             logger.error(f"Global GPKG not found: {gpkg}")

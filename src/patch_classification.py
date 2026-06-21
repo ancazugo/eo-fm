@@ -91,6 +91,12 @@ def main() -> None:
                    help="Path to global patches GPKG "
                         "(default: {so2sat_dir}/patches_reference_rxr.gpkg). "
                         "Only used with --global-split.")
+    g.add_argument("--orig-test", action="store_true",
+                   help="Hybrid split: train/val come from the per-city grid split "
+                        "(grid-test-cell patches fold into train) but the test set is "
+                        "the original So2Sat testing patches. Trains on ALL cities; "
+                        "--cities selects inference cities only. Mutually exclusive "
+                        "with --global-split.")
     g.add_argument("--cities-dir", required=False, default=None, type=Path,
                    help="Directory containing one subfolder per city "
                         "(each must have patches_reference_{city}_split.gpkg). "
@@ -198,6 +204,7 @@ def main() -> None:
         cities_dir=args.cities_dir,
         cities=args.cities,
         label_col=args.label_col,
+        orig_test=args.orig_test,
     )
     split_counts = {s: sum(1 for _, _, sp in all_items if sp == s)
                     for s in ("train", "val", "test")}
@@ -254,10 +261,11 @@ def main() -> None:
 
     # ── WandB ─────────────────────────────────────────────────────────────────
     city_names = [d.name for d in city_dirs]
+    _global_like = args.global_split or args.orig_test
     run_cfg = dict(
         task="patch_classification",
         embedding=args.output_name,
-        cities="all_so2sat" if args.global_split else city_names,
+        cities="all_so2sat" if _global_like else city_names,
         year=args.year,
         family=args.family,
         preset=args.preset,
@@ -280,11 +288,12 @@ def main() -> None:
         early_stopping_patience=args.early_stopping_patience,
         n_params=n_params,
         data_source="so2sat_patches",
-        split_source="global_so2sat" if args.global_split else "grid",
+        split_source=("grid_orig_test" if args.orig_test
+                      else "global_so2sat" if args.global_split else "grid"),
         **{f"{s}_patches": split_counts[s] for s in ("train", "val", "test")},
     )
 
-    _run_label = "global" if args.global_split else "_".join(city_names[:3])
+    _run_label = "global" if _global_like else "_".join(city_names[:3])
     run_dir = init_run(
         args.output_dir, run_cfg, args.run_name,
         default_name=f"{args.family}_{args.preset}_{_run_label}",
