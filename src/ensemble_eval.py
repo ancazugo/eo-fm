@@ -44,7 +44,7 @@ if str(_src) not in sys.path:
 from datasets.so2sat import PatchDataset, build_patch_index
 from models import build_model
 from training.evaluate import predict_probs, save_confusion_matrix
-from utils.cli import parse_model_spec
+from utils.cli import add_eval_args, parse_model_spec
 from utils.runtime import detect_in_channels, resolve_dequantize, resolve_device
 
 
@@ -72,13 +72,7 @@ def main() -> None:
     parser.add_argument("--label-col", default="LCZ_class")
     parser.add_argument("--model", action="append", required=True, type=parse_model_spec,
                         help="OUTPUT_NAME,EMBEDDING_NAME,CHECKPOINT[,FAMILY,PRESET]; repeatable.")
-    parser.add_argument("--num-classes", type=int, default=17)
-    parser.add_argument("--patch-size", type=int, default=32)
-    parser.add_argument("--batch-size", type=int, default=512)
-    parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument("--tta", action="store_true")
-    parser.add_argument("--accelerator", choices=["auto", "cpu", "cuda", "mps"], default="auto")
-    parser.add_argument("--output-dir", required=True, type=Path)
+    add_eval_args(parser, batch_size=512)
     args = parser.parse_args()
 
     device = resolve_device(args.accelerator)

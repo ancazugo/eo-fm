@@ -46,7 +46,7 @@ if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
 from datasets.so2sat import PatchDataset, build_patch_index
-from utils.cli import parse_model_spec
+from utils.cli import add_eval_args, parse_model_spec
 from utils.geo_lookup import assign_cities
 from models import build_model
 from training.evaluate import predict_probs
@@ -125,13 +125,7 @@ def main() -> None:
     parser.add_argument("--cities", nargs="+", default=None,
                         help="Restrict to these cities (smoke tests); default all.")
     parser.add_argument("--city-bounds", type=Path, default=Path("data/so2sat_guppd_bounds.csv"))
-    parser.add_argument("--num-classes", type=int, default=17)
-    parser.add_argument("--patch-size", type=int, default=32)
-    parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument("--tta", action="store_true")
-    parser.add_argument("--accelerator", choices=["auto", "cpu", "cuda", "mps"], default="auto")
-    parser.add_argument("--output-dir", required=True, type=Path)
+    add_eval_args(parser, batch_size=256)
     args = parser.parse_args()
 
     for m in args.model:

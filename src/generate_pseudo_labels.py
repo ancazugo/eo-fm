@@ -50,6 +50,7 @@ from datasets.registry import EMBEDDING_REGISTRY
 from datasets.so2sat import PatchDataset, build_patch_index
 from models import build_model
 from training.evaluate import predict_probs
+from utils.cli import add_eval_args
 from utils.runtime import detect_in_channels, resolve_dequantize, resolve_device
 
 
@@ -62,7 +63,6 @@ def main() -> None:
     parser.add_argument("--family", default="resnet")
     parser.add_argument("--preset", default="small")
     parser.add_argument("--arch", default=None)
-    parser.add_argument("--num-classes", type=int, default=17)
     parser.add_argument("--unlabeled-gpkg", required=True, type=Path,
                         help="GeoPackage from sample_unlabeled_patches.py.")
     parser.add_argument("--so2sat-dir", required=True, type=Path,
@@ -71,11 +71,7 @@ def main() -> None:
                         help="Embedding subfolder (e.g. GeoTessera_v1.1_global).")
     parser.add_argument("--year", required=True)
     parser.add_argument("--embedding-name", required=True, choices=sorted(EMBEDDING_REGISTRY))
-    parser.add_argument("--patch-size", type=int, default=32)
-    parser.add_argument("--batch-size", type=int, default=512)
-    parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument("--tta", action="store_true")
-    parser.add_argument("--accelerator", choices=["auto", "cpu", "cuda", "mps"], default="auto")
+    add_eval_args(parser, batch_size=512)
     # Selection thresholds
     parser.add_argument("--min-conf", type=float, default=0.70,
                         help="Teacher confidence for the agree rule.")
@@ -86,7 +82,6 @@ def main() -> None:
     parser.add_argument("--rare-min-prob", type=float, default=0.20,
                         help="Teacher prob of the Demuzere class for the rare-relax rule.")
     parser.add_argument("--rare-weight", type=float, default=0.3)
-    parser.add_argument("--output-dir", required=True, type=Path)
     args = parser.parse_args()
 
     device = resolve_device(args.accelerator)

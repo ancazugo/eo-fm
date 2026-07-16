@@ -90,6 +90,25 @@ def resolve_overlap(args: argparse.Namespace) -> None:
         args.overlap = args.patch_size // 2
 
 
+def add_eval_args(
+    parser: argparse.ArgumentParser, *, batch_size: int, patch_size: int = 32
+) -> argparse.ArgumentParser:
+    """Common inference block of the evaluation/SSL scripts (ensemble_eval,
+    tta_city_adapt, generate_pseudo_labels, eval_seg_on_patches):
+    --num-classes, --patch-size, --batch-size, --num-workers, --tta,
+    --accelerator, --output-dir. Per-script defaults come in as keywords.
+    """
+    parser.add_argument("--num-classes", type=int, default=17)
+    parser.add_argument("--patch-size", type=int, default=patch_size)
+    parser.add_argument("--batch-size", type=int, default=batch_size)
+    parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--tta", action="store_true",
+                        help="Test-time augmentation: average probs over flips/90° rotations.")
+    parser.add_argument("--accelerator", choices=["auto", "cpu", "cuda", "mps"], default="auto")
+    parser.add_argument("--output-dir", required=True, type=Path)
+    return parser
+
+
 def parse_model_spec(spec: str) -> dict:
     """argparse type= for the --model spec used by the ensemble/TTA scripts.
 

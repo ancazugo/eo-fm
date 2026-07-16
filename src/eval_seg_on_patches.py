@@ -38,6 +38,7 @@ from datasets.so2sat import PatchDataset, build_so2sat_items
 from models import build_model, families_for
 from training.evaluate import evaluate_classification
 from training.tasks import LCZResNetModule
+from utils.cli import add_eval_args
 from utils.runtime import detect_in_channels, resolve_dequantize, resolve_device
 
 
@@ -68,7 +69,6 @@ def main() -> None:
     parser.add_argument("--family", choices=families_for("segmentation"), default="unet")
     parser.add_argument("--preset", default="large",
                         choices=["nano", "small", "base", "medium", "large"])
-    parser.add_argument("--num-classes", type=int, default=17)
     parser.add_argument("--bottleneck-dropout", type=float, default=0.3)
     parser.add_argument("--so2sat-dir", required=True, type=Path)
     parser.add_argument("--output-name", required=True, nargs="+",
@@ -79,7 +79,6 @@ def main() -> None:
                         help="Zero input channels >= this index before the forward "
                              "(fused-model robustness probe, e.g. 128).")
     parser.add_argument("--embedding-name", required=True, choices=sorted(EMBEDDING_REGISTRY))
-    parser.add_argument("--patch-size", type=int, default=32)
     parser.add_argument("--global-split", action="store_true",
                         help="Use the original So2Sat train/val/test split (global GPKG).")
     parser.add_argument("--global-gpkg", type=Path, default=None)
@@ -88,13 +87,7 @@ def main() -> None:
     parser.add_argument("--cities-dir", type=Path, default=None)
     parser.add_argument("--cities", nargs="+", default=None)
     parser.add_argument("--label-col", default="LCZ_class")
-    parser.add_argument("--batch-size", type=int, default=512)
-    parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument("--tta", action="store_true",
-                        help="Average logits over flips/90° rotations.")
-    parser.add_argument("--accelerator", choices=["auto", "cpu", "cuda", "mps"], default="auto")
-    parser.add_argument("--output-dir", required=True, type=Path,
-                        help="Directory for the confusion-matrix PNG.")
+    add_eval_args(parser, batch_size=512)
     args = parser.parse_args()
 
     device = resolve_device(args.accelerator)
