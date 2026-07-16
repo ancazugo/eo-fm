@@ -104,7 +104,11 @@ def _open_and_clip(
     from shapely.geometry import box
     from shapely.ops import transform as shapely_transform
 
-    da = open_tile(path)
+    try:
+        da = open_tile(path)
+    except Exception as e:
+        logger.warning(f"Failed to open tile {path.name}: {e} — skipping")
+        return None
     if da.rio.crs is None:
         return None
 
@@ -255,7 +259,9 @@ def _sliding_window_cls(
             from extract_size.
 
     Returns:
-        (H, W) uint8 with 0-indexed class predictions.
+        (pred, conf): (H, W) uint8 0-indexed class predictions and (H, W)
+        float32 normalized confidence (max accumulated prob / total accumulated
+        prob, i.e. the soft-voted probability of the winning class).
     """
     import torch.nn.functional as F
 
@@ -288,7 +294,11 @@ def _sliding_window_cls(
             for (r, c), p in zip(batch_pos, probs):
                 prob_sum[:, r:r + extract_size, c:c + extract_size] += p[:, None, None]
 
-    return prob_sum.argmax(axis=0).astype(np.uint8)[:H, :W]
+    pred = prob_sum.argmax(axis=0).astype(np.uint8)
+    total = prob_sum.sum(axis=0)
+    conf = np.zeros_like(total, dtype=np.float32)
+    np.divide(prob_sum.max(axis=0), total, out=conf, where=total > 0)
+    return pred[:H, :W], conf[:H, :W]
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +369,7 @@ def infer_roi(
     margin_m: float = 200.0,
     patch_physical_res_m: float = 320.0,
     patch_physical_stride_m: float | None = None,
+    save_confidence: bool = False,
 ) -> Path:
     """Run model inference over a bbox directly from raw source embedding tiles.
 
@@ -398,6 +409,9 @@ def infer_roi(
             pixel, producing a finer output grid — e.g. 160 m yields a 160 m map
             where each pixel averages the 4 overlapping 320 m patches. Also sets
             the output resolution (unless ``out_res`` is given).
+        save_confidence: Classification only — also write a float32 sidecar
+            ``<output>_conf.tif`` with the soft-voted probability of the
+            winning class per pixel (0 = nodata). Ignored for segmentation.
 
     Returns:
         Path to the saved GeoTIFF.
@@ -488,6 +502,11 @@ def infer_roi(
     raster = np.zeros((out_H, out_W), dtype=np.uint8)
     logger.info(f"Output raster: {out_H}×{out_W} px")
 
+    if save_confidence and is_seg:
+        logger.warning("save_confidence is classification-only — ignoring for segmentation")
+        save_confidence = False
+    conf_raster = np.zeros((out_H, out_W), dtype=np.float32) if save_confidence else None
+
     # ── Process each tile ─────────────────────────────────────────────────────
     n_done = n_skip = 0
     for i, tile_path in enumerate(matched_paths):
@@ -514,7 +533,7 @@ def infer_roi(
                 model, arr, patch_size, stride, device, num_classes, batch_size
             )
         else:
-            pred = _sliding_window_cls(
+            pred, conf = _sliding_window_cls(
                 model, arr, patch_size, cls_stride, device, num_classes, batch_size,
                 extract_size=extract_px, model_input_size=patch_size,
             )
@@ -535,6 +554,21 @@ def infer_roi(
             dst_nodata=0,
         )
         np.copyto(raster, tmp[0], where=tmp[0] > 0)
+
+        if conf_raster is not None:
+            tmp_conf = np.zeros((1, out_H, out_W), dtype=np.float32)
+            reproject(
+                source=conf[None],
+                destination=tmp_conf,
+                src_transform=tile_transform,
+                src_crs=tile_crs,
+                dst_transform=out_transform,
+                dst_crs=resolved_crs,
+                resampling=Resampling.nearest,
+                dst_nodata=0.0,
+            )
+            # Same last-write-wins mask as the class raster so the two stay aligned
+            np.copyto(conf_raster, tmp_conf[0], where=tmp[0] > 0)
         n_done += 1
 
     logger.info(f"Tiles processed: {n_done} done, {n_skip} skipped")
@@ -550,6 +584,16 @@ def infer_roi(
     ) as dst:
         dst.write(raster, 1)
     logger.info(f"Saved GeoTIFF: {output_path}")
+
+    if conf_raster is not None:
+        conf_path = output_path.with_name(output_path.stem + "_conf.tif")
+        with rasterio.open(
+            str(conf_path), "w", driver="GTiff",
+            height=out_H, width=out_W, count=1, dtype="float32",
+            crs=resolved_crs, transform=out_transform, nodata=0.0,
+        ) as dst:
+            dst.write(conf_raster, 1)
+        logger.info(f"Saved confidence GeoTIFF: {conf_path}")
 
     # ── Save PNG ──────────────────────────────────────────────────────────────
     from utils.plot_lcz import save_lcz_map
@@ -641,6 +685,9 @@ def _parse_args() -> argparse.Namespace:
                    help="Output CRS (e.g. 'EPSG:4326'). Auto-detected from tiles if omitted.")
     p.add_argument("--out-res", type=float, default=None,
                    help="Output pixel size in out-crs units. Auto-detected if omitted.")
+    p.add_argument("--save-confidence", action="store_true",
+                   help="Classification only: also write <output>_conf.tif with the "
+                        "soft-voted probability of the winning class per pixel.")
     p.add_argument("--city-name", default="ROI",
                    help="City/area name for the PNG title.")
     p.add_argument("--accelerator", default="auto",
@@ -770,6 +817,7 @@ def main() -> None:
         margin_m=args.margin_m,
         patch_physical_res_m=args.patch_physical_res,
         patch_physical_stride_m=args.patch_physical_stride,
+        save_confidence=args.save_confidence,
     )
 
 

@@ -23,6 +23,7 @@ from shapely.strtree import STRtree
 # Tile index
 # ---------------------------------------------------------------------------
 
+@functools.lru_cache(maxsize=4)
 def build_tile_index(
     embedding_dir: Path,
     embedding_name: str,
@@ -33,6 +34,9 @@ def build_tile_index(
     Returns (tile_paths, tree) where tree is built over tile bounding boxes in
     EPSG:4326.  Indexing into tile_paths with positions returned by
     tree.query() gives the matching Path objects.
+
+    Cached: multi-city callers (e.g. generate_seg_pseudo_rasters.py) reuse the
+    index instead of re-scanning the tile directory per city.
     """
     from datasets.registry import EMBEDDING_REGISTRY
 
@@ -315,6 +319,24 @@ def _open_tile_tessera11_global(npy_dir: Path) -> xr.DataArray:
     return da.rio.write_crs(crs)
 
 
+def _open_tile_aux_struct(path: Path) -> xr.DataArray:
+    """Open a precomputed 4-band auxiliary-structural tile (lazily).
+
+    path = .../aux_struct/merged_aux/aux_{lon}_{lat}.tif (10 m grid), built by
+    precompute_aux_tiles.py as a tiled+DEFLATE GeoTIFF. Bands, already
+    normalised ~[0,1] with NaN→0:
+      0 ANBH/50 · 1 built fraction · 2 non-res built fraction · 3 canopy/50.
+
+    Returned lazily (not cached, no eager .astype) so crop_patch's clip_box
+    reads only the ~1 block overlapping the patch instead of the whole ~480 MB
+    tile — the striped/eager version made extraction ~10 patch/s. The merge/
+    reproject is done once per tile at precompute time, not per patch here.
+    """
+    import rioxarray as rxr
+
+    return rxr.open_rasterio(path, chunks={"band": -1, "x": 512, "y": 512})
+
+
 def open_tile(path: Path) -> xr.DataArray:
     """Open a .zarr or .tif tile as a (band, y, x) DataArray with CRS set."""
     import rioxarray as rxr
@@ -322,6 +344,10 @@ def open_tile(path: Path) -> xr.DataArray:
     # Tessera v1.1 global: path is the NPY subdir
     if path.is_dir():
         return _open_tile_tessera11_global(path)
+
+    # Auxiliary structural bands: precomputed 4-band merged tile
+    if path.name.startswith("aux_") and path.parent.name == "merged_aux":
+        return _open_tile_aux_struct(path)
 
     # Tessera v1.1: geoinfo tiff with a sibling infer_output/ directory
     if path.suffix in (".tiff", ".tif") and path.parent.name == "geoinfo":
@@ -395,8 +421,10 @@ def crop_patch(
     tile_paths: list[Path],
     output_path: Path,
     skip_existing: bool = False,
+    dtype: str = "float32",
 ) -> bool:
-    """Clip *tile_paths* to *patch_geom*, mosaic if needed, save as float32 .npy.
+    """Clip *tile_paths* to *patch_geom*, mosaic if needed, save as .npy
+    (``dtype``: float32 default, or float16 to halve disk use).
 
     Clips each tile to the patch bounds BEFORE any y-flip so that zarr only
     reads the relevant chunks (~15 MB) rather than the full ~244 MB tile.
@@ -450,7 +478,7 @@ def crop_patch(
     arr = numpy_mosaic(arrays) if len(arrays) > 1 else arrays[0].values.astype(np.float32)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    np.save(output_path, arr)
+    np.save(output_path, arr.astype(np.float16) if dtype == "float16" else arr)
     return True
 
 

@@ -39,10 +39,10 @@ from datasets.tiles import build_tile_index as _build_tile_index, crop_patch as 
 # ---------------------------------------------------------------------------
 
 def _process_patch(args: tuple) -> tuple[str, bool]:
-    patch_id, geom_wkt, patch_crs, tile_paths, output_path, skip_existing = args
+    patch_id, geom_wkt, patch_crs, tile_paths, output_path, skip_existing, dtype = args
     from shapely import from_wkt
     patch_geom = from_wkt(geom_wkt)
-    ok = _crop_patch(patch_geom, patch_crs, tile_paths, output_path, skip_existing)
+    ok = _crop_patch(patch_geom, patch_crs, tile_paths, output_path, skip_existing, dtype)
     return patch_id, ok
 
 
@@ -96,8 +96,16 @@ def main() -> None:
         "--splits",
         nargs="+",
         default=["training", "validation", "testing"],
-        choices=["training", "validation", "testing"],
-        help="Dataset splits to process (default: all three).",
+        choices=["training", "validation", "testing", "unlabeled"],
+        help="Dataset splits to process (default: the three So2Sat splits; "
+             "'unlabeled' for semi-supervised patch pools).",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=["float32", "float16"],
+        default="float32",
+        help="npy dtype for saved patches (float16 halves disk use; "
+             "PatchDataset casts back to float32 on load).",
     )
     parser.add_argument(
         "--workers",
@@ -150,7 +158,7 @@ def main() -> None:
         # Sort patches by centroid so tiles in the OS page cache are shared
         # across workers processing adjacent patches (critical for tesserav1.1
         # where each tile is ~110 MB and loaded fresh from npy each call).
-        if args.embedding_name in ("tesserav1.1", "tesserav1.1_global"):
+        if args.embedding_name in ("tesserav1.1", "tesserav1.1_global", "aux_struct"):
             cx = split_patches.geometry.centroid.x
             cy = split_patches.geometry.centroid.y
             split_patches = split_patches.iloc[
@@ -175,6 +183,7 @@ def main() -> None:
                     matched_paths,
                     output_path,
                     args.skip_existing,
+                    args.dtype,
                 ))
 
             with ProcessPoolExecutor(max_workers=args.workers) as pool:
@@ -206,7 +215,8 @@ def main() -> None:
 
                 matched_paths = [tile_paths[i] for i in idxs]
                 output_path = out_dir / f"patch_{row.patch_id}.npy"
-                ok = _crop_patch(patch_geom, patch_crs, matched_paths, output_path, args.skip_existing)
+                ok = _crop_patch(patch_geom, patch_crs, matched_paths, output_path,
+                                 args.skip_existing, args.dtype)
                 if ok:
                     n_saved += 1
                 else:
