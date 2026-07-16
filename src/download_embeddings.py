@@ -6,8 +6,6 @@ import pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from loguru import logger
 
-from pathlib import Path
-
 from datasets.downloaders import download_tessera, download_alpha_earth, download_alpha_earth_coop
 from utils.paths import TESSERA_DIR, ALPHA_EARTH_DIR
 

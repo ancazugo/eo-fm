@@ -13,7 +13,6 @@ dependencies = [
     "ipywidgets>=8.1.8",
     "loguru>=0.7.3",
     "matplotlib>=3.10.8",
-    "mgrs>=1.5.4",
     "osm-rasterizer>=0.3.0",
     "osmnx>=2.1",
     "plotly>=6.7.0",
