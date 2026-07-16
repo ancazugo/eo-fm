@@ -52,6 +52,31 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "resolution": 10,
         "description": "Tessera v1.1 global tiles (global_0.1_degree_representation + tiff_all), 128-band float32",
     },
+    "osm_evidence": {
+        "in_channels": 15,
+        "resolution": 10,
+        "description": "Binary OSM evidence layers (buildings + height buckets, "
+                       "roads, rail, landuse groups, vegetation, water, bare, "
+                       "completeness mask) rasterized by build_osm_rasters.py. "
+                       "--embedding-dir = .../osm_evidence/tiles",
+        # 0.5° tiles named by bottom-left corner: osm_{lon}_{lat}.tif
+        "zarr_tile_size": 0.5,
+        "zarr_filename_pattern": r"osm_(?P<lon>[-\d.]+)_(?P<lat>[-\d.]+)\.(zarr|tif)",
+        "zarr_filename_crs": "EPSG:4326",
+        "zarr_filename_is_center": False,
+    },
+    "aux_struct": {
+        "in_channels": 4,
+        "resolution": 10,
+        "description": "Auxiliary structural bands, normalised to ~[0,1]: GHSL ANBH/50, "
+                       "built fraction, non-residential built fraction, ETH canopy height/50. "
+                       "--embedding-dir = .../aux_struct/merged_aux (precompute_aux_tiles.py)",
+        # 0.5° precomputed tiles named by bottom-left corner: aux_{lon}_{lat}.tif
+        "zarr_tile_size": 0.5,
+        "zarr_filename_pattern": r"aux_(?P<lon>[-\d.]+)_(?P<lat>[-\d.]+)\.(zarr|tif)",
+        "zarr_filename_crs": "EPSG:4326",
+        "zarr_filename_is_center": False,
+    },
 }
 
 

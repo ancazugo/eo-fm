@@ -410,6 +410,41 @@ GEE_DATASET_REGISTRY: dict[str, dict] = {
         "tile_size": 0.5,
         "prefix": "lcz",
     },
+    # GHSL R2023A average net building height (metres), epoch 2018, 100 m
+    "ghs_built_h": {
+        "ee_path": "JRC/GHSL/P2023A/GHS_BUILT_H/2018",
+        "asset_type": "image",
+        "bands": ["built_height"],
+        "scale": 100,
+        "crs": "utm",
+        "dtype": np.float32,
+        "tile_size": 0.5,
+        "prefix": "builth",
+    },
+    # GHSL R2023A built-up surface (m² per 100 m cell, 0-10000), epoch 2020
+    # (closest 5-yearly epoch to the 2018 Sentinel-2 composite behind BUILT_H);
+    # built_surface_nres = non-residential share, a land-function signal
+    "ghs_built_s": {
+        "ee_path": "JRC/GHSL/P2023A/GHS_BUILT_S/2020",
+        "asset_type": "image",
+        "bands": ["built_surface", "built_surface_nres"],
+        "scale": 100,
+        "crs": "utm",
+        "dtype": np.float32,
+        "tile_size": 0.5,
+        "prefix": "builts",
+    },
+    # Lang et al. 2023 global canopy height 2020, 10 m
+    # (float32 so GEE-masked nodata survives as NaN)
+    "eth_canopy_height": {
+        "ee_path": "users/nlang/ETH_GlobalCanopyHeight_2020_10m_v1",
+        "asset_type": "image",
+        "scale": 10,
+        "crs": "utm",
+        "dtype": np.float32,
+        "tile_size": 0.5,
+        "prefix": "canopy",
+    },
 }
 
 
@@ -424,6 +459,7 @@ def download_gee_dataset(
     dtype: np.dtype | None = None,
     tile_size: float | None = None,
     prefix: str | None = None,
+    asset_type: str | None = None,
 ) -> Path:
     """Download a GEE ImageCollection as tiled GeoTIFFs with tile-level caching.
 
@@ -458,6 +494,7 @@ def download_gee_dataset(
     dtype = dtype or defaults.get("dtype", np.float32)
     tile_size = tile_size or defaults.get("tile_size", 0.5)
     prefix = prefix or defaults.get("prefix", "gee")
+    asset_type = asset_type or defaults.get("asset_type", "collection")
 
     if ee_path is None:
         raise ValueError(
@@ -522,19 +559,51 @@ def download_gee_dataset(
             geometry = ee.Geometry.Rectangle(
                 [tile_bbox[0], tile_bbox[1], tile_bbox[2], tile_bbox[3]]
             )
-            ic = ee.ImageCollection(ee_path).filter(ee.Filter.bounds(geometry))
+            if asset_type == "image":
+                # Single ee.Image asset (e.g. GHSL epoch images, ETH canopy);
+                # xee needs system:time_start, which bare images may lack
+                img = ee.Image(ee_path).set("system:time_start", 0)
+                ic = ee.ImageCollection([img])
+            else:
+                ic = ee.ImageCollection(ee_path).filter(ee.Filter.bounds(geometry))
+
+            # xee ≥0.1 dropped geometry/scale — pass an explicit crs_transform +
+            # pixel grid instead. Snap the tile bbox (reprojected to tile_crs) to
+            # a scale-aligned grid, north-up (negative y step).
+            from pyproj import Transformer
+
+            _tr = Transformer.from_crs("EPSG:4326", tile_crs, always_xy=True)
+            _xs, _ys = _tr.transform(
+                [tile_bbox[0], tile_bbox[2], tile_bbox[0], tile_bbox[2]],
+                [tile_bbox[1], tile_bbox[1], tile_bbox[3], tile_bbox[3]],
+            )
+            x_origin = math.floor(min(_xs) / scale) * scale
+            y_origin = math.ceil(max(_ys) / scale) * scale
+            grid_w = int(math.ceil((max(_xs) - x_origin) / scale))
+            grid_h = int(math.ceil((y_origin - min(_ys)) / scale))
+            crs_transform = (float(scale), 0.0, float(x_origin),
+                             0.0, float(-scale), float(y_origin))
 
             ds = xr.open_dataset(
-                ic, engine="ee", geometry=geometry, scale=scale, crs=tile_crs,
+                ic, engine="ee", crs=tile_crs,
+                crs_transform=crs_transform, shape_2d=(grid_w, grid_h),
             )
-            ds_merged = (
-                ds.ffill(dim="time").bfill(dim="time").isel(time=0).drop_vars("time")
-            )
-            # xee returns X/Y for projected CRS, lon/lat for geographic CRS
-            if "lon" in ds_merged.dims:
-                ds_merged = ds_merged.transpose("lat", "lon").rename({"lat": "y", "lon": "x"})
+            # Single-image assets need no temporal fill (and ffill needs
+            # bottleneck, which isn't installed); multi-image collections
+            # (e.g. demuzere) still coalesce over time.
+            if asset_type == "image":
+                ds_merged = ds.isel(time=0).drop_vars("time")
             else:
-                ds_merged = ds_merged.transpose("Y", "X").rename({"Y": "y", "X": "x"})
+                ds_merged = (
+                    ds.ffill(dim="time").bfill(dim="time").isel(time=0).drop_vars("time")
+                )
+            # Normalise spatial dim names: older xee used X/Y (projected) or
+            # lon/lat (geographic); xee ≥0.1 already yields lowercase y/x.
+            if "lon" in ds_merged.dims:
+                ds_merged = ds_merged.rename({"lat": "y", "lon": "x"})
+            elif "Y" in ds_merged.dims:
+                ds_merged = ds_merged.rename({"Y": "y", "X": "x"})
+            ds_merged = ds_merged.transpose("y", "x")
 
             # Select and stack requested bands
             if bands:
