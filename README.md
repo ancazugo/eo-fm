@@ -8,7 +8,7 @@ Earth Observation Foundation Model pipeline for Local Climate Zone (LCZ) classif
 
 ```bash
 source /maps/acz25/envs/eo_fm-env/bin/activate
-uv sync
+uv sync --active   # --active targets the activated env instead of ./.venv
 ```
 
 Requires a `.env` file at the repo root:
@@ -24,17 +24,78 @@ WANDB_KEY="your-wandb-key"
 ## Workflow Overview
 
 ```
-1. Download embeddings        extract_so2sat_embeddings.py / extract_grid_embeddings.py
+1. Download embeddings        download_embeddings.py / download_missing_coop_tiles.py
         ↓
 2. Extract patch/grid npy     extract_so2sat_embeddings.py / extract_grid_embeddings.py
         ↓
-3a. Patch classification      patch_classification.py   (ResNet per-patch)
-3b. Semantic segmentation     semantic_segmentation.py  (U-Net per-grid-tile)
+3a. Patch classification      patch_classification.py   (per-patch; any classification family)
+3b. Semantic segmentation     semantic_segmentation.py  (per-grid-tile; any segmentation family)
+3c. Seg distillation          generate_seg_pseudo_rasters.py → semantic_segmentation.py --label-tif-dir
+                              → eval_seg_on_patches.py  (patch-benchmark kappa for seg checkpoints)
+3d. Patch SSL (noisy student) sample_unlabeled_patches.py → generate_pseudo_labels.py
+                              → patch_classification.py --pseudo-gpkg
         ↓
 4. ROI inference              infer_roi.py              (auto-called at end of training)
+        ↓
+6. Ensembles & honest eval    ensemble_eval.py → ensemble_stacking.py / tta_city_adapt.py
 ```
 
 All scripts are run from the repo root (`/home/acz25/repos/eo_fm`). Scripts are in `src/`.
+
+### Code layout
+
+```
+src/
+  patch_classification.py    # ENTRY: patch classification pipeline
+  semantic_segmentation.py   # ENTRY: segmentation pipeline
+  knn_baseline.py            # ENTRY: cosine-kNN / per-class GMM density baselines on cached pooled features
+  infer_roi.py               # ENTRY + library: sliding-window ROI inference (all families;
+                             #   --stats-file for legacy fc-only linear probe checkpoints)
+  sample_unlabeled_patches.py / generate_pseudo_labels.py
+                             # ENTRY: noisy-student SSL data prep (Step 3d)
+  ensemble_eval.py           # ENTRY: multi-checkpoint softmax-ensemble eval + cached probs (Step 6)
+  ensemble_stacking.py       # ENTRY: weighted/calibrated/stacked ensembling + leave-one-city-out audit
+  tta_city_adapt.py          # ENTRY: per-city AdaBN/TENT test-time adaptation
+  models/                    # Architectures + family registry
+    registry.py              #   ModelFamily, build_model(), families_for()
+    timm_families.py         #   resnet, efficientnet, convnext, densenet, mobilenet, vit
+    mlp.py, aspp.py          #   classification families
+    linear_probe.py          #   pooling + BatchNorm + Linear probe (classification family)
+    unet.py, resnet_unet.py  #   segmentation families
+  training/                  # Shared training library
+    tasks.py                 #   LCZResNetModule (cls), LCZUNetModule (seg)
+    loop.py                  #   run_training_loop() — one generic loop
+    evaluate.py              #   test eval + confusion matrix for both pipelines
+    augment.py               #   flip/rot90/noise augmentation
+  datasets/                  # Data layer
+    registry.py              #   EMBEDDING_REGISTRY metadata
+    tiles.py                 #   raw tile index/open/crop (zarr, tif, tessera v1.1, coop)
+    so2sat.py                #   patch items + PatchDataset/DataModule (classification)
+    grid_tiles.py            #   grid-tile items + GridSegDataset/DataModule (segmentation)
+  utils/
+    runtime.py               #   device/dequantize/wandb-run/city-inference helpers
+```
+
+### Model families
+
+`--family` selects the architecture; `--preset` (nano/small/base/medium/large) the size.
+
+| Pipeline | Families |
+|---|---|
+| `patch_classification.py` | `resnet` (default), `efficientnet`, `convnext`, `densenet`, `mobilenet`, `vit`, `aspp`, `mlp`, `linear_probe` |
+| `semantic_segmentation.py` | `unet` (default), `resnet_unet` |
+
+`linear_probe` is pooling + `BatchNorm1d(affine=False)` + Linear (the "BN + linear"
+probe). Presets are all equivalent (GAP pooling); pass `--arch mean_std` for
+mean+std pooling (doubled feature dim). Normalisation stats are stored in the
+checkpoint, so `infer_roi.py --model-type linear_probe` works without a stats file.
+The kNN and per-class GMM density counterparts live in `knn_baseline.py`
+(cached pooled features; `--classifier knn|gmm`).
+
+**Adding a new model** = one module in `src/models/` defining the architecture +
+a `register(ModelFamily(...))` call + an import in `src/models/__init__.py`.
+It automatically appears in the `--family` choices of the matching pipeline and
+in `infer_roi.py --model-type`.
 
 ---
 
@@ -56,7 +117,9 @@ Raw tiles for `alpha_earth_coop` and `seamless` store compressed values that mus
 - **`seamless`**: ESD codebook factorization — 13 uint16 indices → 72 float32 channels in [-1, 1]
 - **`tesserav1.1`**: `int8 × scales` — handled automatically at extraction time; no flag needed at training
 
-Always pass `--dequantize` for `alpha_earth_coop` and `seamless` in training and inference commands.
+Dequantization is **applied automatically** for `alpha_earth_coop` and `seamless`
+in all training and inference scripts (`utils.runtime.resolve_dequantize`);
+`--dequantize` remains as an explicit force flag for other embeddings.
 
 ---
 
@@ -90,6 +153,14 @@ python src/download_missing_coop_tiles.py --workers 8 --year 2017
 ```
 
 It compares the existing `.npy` files in `training/AlphaEarthCoop/{year}/` against `patches_reference_rxr.gpkg`, queries `aef_index.gpkg` for the covering tiles, and downloads any that are absent. Re-run `extract_so2sat_embeddings.py` with `--skip-existing` afterwards to extract the newly available patches.
+
+### `download_coop_tiles_bbox.py`
+
+Companion to `download_missing_coop_tiles.py` for arbitrary areas: downloads the COOP tiles covering one or more city bboxes (GUPPD `SMOD_ID`s looked up in `data/so2sat_guppd_bounds.csv`), rather than back-filling the So2Sat patch set.
+
+```bash
+python src/download_coop_tiles_bbox.py --smod-ids 30_4732 --year 2017 --workers 8
+```
 
 ---
 
@@ -208,9 +279,10 @@ Use `--only-valid` to skip tiles flagged as invalid (recommended). Use `--skip-e
 
 ### `patch_classification.py`
 
-Trains a ResNet patch classifier on pre-extracted So2Sat patch `.npy` files. After training, automatically runs full-ROI inference via `infer_roi.py`.
+Trains a patch classifier on pre-extracted So2Sat patch `.npy` files. After training, automatically runs full-ROI inference via `infer_roi.py`.
 
-**ResNet presets:** `nano` · `tiny` · `small` · `base` · `large` (resnet10t → resnet152)
+**Families** (`--family`): `resnet` (default) · `efficientnet` · `convnext` · `densenet` · `mobilenet` · `vit` · `aspp` · `mlp`
+**Presets** (`--preset`): `nano` · `small` · `base` · `medium` · `large` (resnet: resnet18 → resnet152)
 
 #### Split modes
 
@@ -298,17 +370,19 @@ python src/patch_classification.py \
 **Key flags:**
 - `--global-split` — use all So2Sat patches with the original dataset split (no city selection)
 - `--global-gpkg` — override the default `{so2sat_dir}/patches_reference_rxr.gpkg` path (only with `--global-split`)
-- `--preset` — ResNet size (`nano`/`tiny`/`small`/`base`/`large`)
+- `--family` — model family (see Model families table)
+- `--preset` — model size (`nano`/`small`/`base`/`medium`/`large`)
 - `--patch-size` — resize input patches to this square (pixels); use 32 for 10 m embeddings
-- `--dequantize` — apply embedding-specific dequantization at load time
+- `--dequantize` — force dequantization (auto-applied for `alpha_earth_coop`/`seamless`)
 - `--checkpoint` — skip training, load weights and run inference only
 
 **Output per run** (under `--output-dir/{wandb-run-name}/`):
 ```
-resnet_{preset}_{output_name}_{city}-best.pt   ← best checkpoint (per-city mode)
-resnet_{preset}_{output_name}_global-best.pt   ← best checkpoint (global mode)
-{run_name}_resnet-{preset}-classification-prediction_{city}.tif
-{run_name}_resnet-{preset}-classification-prediction_{city}.png
+{family}_{preset}_{output_name}_{city}-best.pt   ← best checkpoint (per-city mode)
+{family}_{preset}_{output_name}_global-best.pt   ← best checkpoint (global mode)
+{run_name}_{family}-{preset}-classification-prediction_{city}.tif
+{run_name}_{family}-{preset}-classification-prediction_{city}.png
+test_confusion_matrix.png
 ```
 
 ---
@@ -317,7 +391,9 @@ resnet_{preset}_{output_name}_global-best.pt   ← best checkpoint (global mode)
 
 ### `semantic_segmentation.py`
 
-Trains a U-Net segmentation model on pre-extracted grid tile `.npy` files. Label masks are rasterized on the fly from `patches_reference_{city}_split.gpkg` polygons. After training, automatically runs full-ROI inference via `infer_roi.py`.
+Trains a segmentation model on pre-extracted grid tile `.npy` files. Label masks are rasterized on the fly from `patches_reference_{city}_split.gpkg` polygons. After training, automatically runs full-ROI inference via `infer_roi.py`.
+
+**Families** (`--family`): `unet` (default) · `resnet_unet` (timm ResNet encoder + U-Net decoder; presets nano/small/base → resnet18/34/50)
 
 **U-Net presets:**
 
@@ -386,16 +462,134 @@ python src/semantic_segmentation.py \
 
 **Key flags:**
 - `--label-source` — `gpkg` (rasterize polygons on the fly) or `tif` (clip label raster)
-- `--preset` — U-Net size preset (see table above)
-- `--dequantize` — apply embedding-specific dequantization at load time
+- `--label-tif-dir` — train on dense pseudo-label rasters (see Step 3c); val/test stay on gpkg GT
+- `--family` — model family (`unet` or `resnet_unet`)
+- `--preset` — size preset (see table above)
+- `--dequantize` — force dequantization (auto-applied for `alpha_earth_coop`/`seamless`)
 - `--checkpoint` — skip training, load weights and run inference only
+
+Test metrics are reported at two scales: native 10 m per-pixel (`test_*`) and majority-pooled 10×10 blocks (`test_*_100m`) — the ~100 m scale LCZ is defined at.
 
 **Output per run** (under `--output-dir/{wandb-run-name}/`):
 ```
-unet_{preset}_{output_name}_{city}-best.pt
-{run_name}_unet-{preset}-segmentation-prediction_{city}.tif
-{run_name}_unet-{preset}-segmentation-prediction_{city}.png
+{family}_{preset}_{output_name}_{city}-best.pt
+{run_name}_{family}-{preset}-segmentation-prediction_{city}.tif
+{run_name}_{family}-{preset}-segmentation-prediction_{city}.png
+test_confusion_matrix.png
 ```
+
+---
+
+## Step 3c — Segmentation Distillation (dense pseudo-labels)
+
+So2Sat supervision rasterizes to sparse single-class 32×32 blocks, so a UNet trained on it never
+sees dense labels or class boundaries. The distillation route fixes this by teaching the UNet from
+a strong patch classifier:
+
+### `generate_seg_pseudo_rasters.py`
+
+Runs a patch-classification teacher checkpoint over each city with infer_roi's soft-voting sliding
+window (default: 320 m patches every 80 m, 10 m output) and writes a dense label raster:
+teacher argmax kept where soft-voted confidence ≥ `--min-conf` (default 0.5), val/test-split patch
+footprints zeroed (no leakage into eval pixels), train-split GT polygons burned in on top.
+
+```bash
+python src/generate_seg_pseudo_rasters.py \
+    --checkpoint <run_dir>/resnet_small_GeoTessera_v1.1_global_global-best.pt \
+    --family resnet --preset small \
+    --cities-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4/cities --cities Nairobi \
+    --embedding-name tesserav1.1 \
+    --embedding-dir /maps/acz25/phd-thesis-data/input/GeoTessera/v1.1/2017 --year 2017 \
+    --output-dir /maps/acz25/phd-thesis-data/output/lcz-classification/pseudo_seg_rasters
+```
+
+Outputs per city: `teacher_{city}.tif` + `teacher_{city}_conf.tif` (raw teacher argmax +
+confidence) and `pseudo_seg_{city}.tif` (+ `.png`) — the training raster. Re-run with
+`--skip-inference` to sweep `--min-conf` without redoing teacher inference.
+
+Then train segmentation on the pseudo rasters (train split only; val/test evaluate against GT):
+
+```bash
+python src/semantic_segmentation.py ... \
+    --label-tif-dir /maps/acz25/phd-thesis-data/output/lcz-classification/pseudo_seg_rasters
+```
+
+### `eval_seg_on_patches.py`
+
+Evaluates a segmentation checkpoint on the So2Sat patch benchmark: runs the model over the
+extracted 32×32 test patch npys (the exact inputs the classifiers see), mean-pools the per-pixel
+logits into one prediction per patch, and reports OA / macro acc / F1 / kappa — directly comparable
+to `patch_classification.py` numbers. Supports the same split modes (`--global-split`,
+`--orig-test`, per-city `--cities`). Caveat: the model gets no context beyond the 32×32 patch, so
+this is a conservative estimate.
+
+```bash
+python src/eval_seg_on_patches.py \
+    --checkpoint <run_dir>/unet_large_...-best.pt --family unet --preset large \
+    --so2sat-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4 \
+    --output-name GeoTessera_v1.1_global --year 2017 \
+    --embedding-name tesserav1.1_global --global-split \
+    --output-dir data/seg_patch_eval
+```
+
+---
+
+## Step 3d — Noisy-Student SSL (patch classification)
+
+Semi-supervised pipeline that imports unlabeled patches weakly labeled by the Demuzere et al.
+2022 global 100 m LCZ map, filters them through a trained teacher, and trains a student with
+down-weighted pseudo-labels. Delivered +3.1 kappa pts on the global split (0.619 → 0.6497 over
+two iterations); full results and lessons in `docs/global_lcz_campaign_2026-07.md`.
+End-to-end runners: `run_phase1_noisy_student.sh` (and `_iter2/_iter3/_coop_student` variants).
+
+### `sample_unlabeled_patches.py`
+
+Samples candidate 320 m boxes on a 480 m stride inside the Tessera-2017 tile footprints,
+labels each by majority vote over its ~3×3 px Demuzere footprint, and writes
+`data/patches_reference_unlabeled.gpkg` (`dataset="unlabeled"`). Filters: purity ≥ `--min-purity`
+(0.65), map probability ≥ `--min-prob` (50), no So2Sat overlap; rare classes uncapped, common
+classes capped per class and per tile. `--dry-run N` processes N tiles and prints yield stats.
+
+```bash
+python src/sample_unlabeled_patches.py \
+    --tiles-gpkg data/tessera_v1.1_global_2017_tiles.gpkg \
+    --demuzere-dir ${DATA_DIR}/input/Demuzere_2022_complete \
+    --exclude-gpkg ${DATA_DIR}/input/So2Sat-LCZ42/v4/patches_reference_rxr.gpkg \
+    --n-patches 300000 --output data/patches_reference_unlabeled.gpkg
+```
+
+Then extract embeddings for the pool (float16 halves the footprint; ~76 GB for 286k tessera
+patches): `extract_so2sat_embeddings.py --patches-file data/patches_reference_unlabeled.gpkg
+--splits unlabeled --dtype float16 --skip-existing`.
+
+### `generate_pseudo_labels.py`
+
+Teacher TTA inference over the unlabeled pool + label fusion. Keep rules (thresholds CLI-tunable):
+**agree** — teacher top-1 = Demuzere label ∧ confidence ≥ `--min-conf` (0.7) → weight 0.5;
+**rare-relax** — Demuzere label rare ∧ purity ≥ 0.75 ∧ teacher p ≥ `--rare-min-prob` (0.2) →
+weight 0.3; else drop. Writes `pseudo_labels.parquet` (full audit trail) and
+`patches_reference_pseudo.gpkg` (kept rows, for training).
+
+**Calibration caveat**: a mixup + label-smoothed teacher has a softmax ceiling ≈ 0.9, so
+`--min-conf` is stricter than it looks (0.8 collapsed the keep-rate to 7.9% and lost).
+
+```bash
+python src/generate_pseudo_labels.py \
+    --checkpoint <run_dir>/resnet_small_GeoTessera_v1.1_global_global-best.pt \
+    --family resnet --preset small \
+    --unlabeled-gpkg data/patches_reference_unlabeled.gpkg \
+    --so2sat-dir ${DATA_DIR}/input/So2Sat-LCZ42/v4 \
+    --output-name GeoTessera_v1.1_global --year 2017 \
+    --embedding-name tesserav1.1_global --tta --min-conf 0.7 \
+    --output-dir data/pseudo_labels
+```
+
+### Student training
+
+`patch_classification.py --pseudo-gpkg data/pseudo_labels/patches_reference_pseudo.gpkg`
+appends the pseudo items to the train split with per-sample loss weights (weighted CE,
+compatible with mixup and class weights); `--pseudo-weight-scale` is a global multiplier.
+Without `--pseudo-gpkg` the labeled-only path is byte-identical to before.
 
 ---
 
@@ -405,7 +599,9 @@ unet_{preset}_{output_name}_{city}-best.pt
 
 Runs inference over an arbitrary bounding box from raw source embedding tiles (no pre-extracted grid files needed). Called automatically at the end of `patch_classification.py` and `semantic_segmentation.py`, but can also be run standalone.
 
-Uses a sliding window with Hanning-weighted logit blending (segmentation) or majority vote (classification). Reprojects each tile's predictions into a single output GeoTIFF.
+`--model-type` accepts any registered family: segmentation families run a sliding window with Hanning-weighted logit blending; classification families run patch-wise majority vote. Reprojects each tile's predictions into a single output GeoTIFF. For classification, `--save-confidence` additionally writes `<output>_conf.tif` with the soft-voted probability of the winning class per pixel (used by `generate_seg_pseudo_rasters.py`).
+
+Legacy linear-probe checkpoints (fc-only state dict from the retired standalone script) are also handled: pass `--model-type linear_probe --stats-file <cache>/<key>_stats.npz` and the checkpoint is converted on load (numerically identical to the old normalisation). Probes trained via `patch_classification.py --family linear_probe` need no stats file.
 
 ```bash
 # Segmentation inference (U-Net)
@@ -435,6 +631,128 @@ python src/infer_roi.py \
     --num-classes 17 \
     --patch-size 32
 ```
+
+---
+
+## Step 5 — Embedding Analysis & Visualization
+
+### `embedding_projection.py`
+
+Pools every So2Sat patch to a vector, reduces with PCA → UMAP / t-SNE, and writes
+a `projection_*.parquet` (2-D coords + per-patch metadata) plus static scatters
+and separability / train-test-shift / entanglement diagnostics.
+
+```bash
+python src/embedding_projection.py \
+    --so2sat-dir ${DATA_DIR}/input/So2Sat-LCZ42/v4 \
+    --output-name GeoTessera_v1.1_global --year 2017 \
+    --embedding-name tesserav1.1_global --global-split \
+    --pooling gap --methods umap tsne \
+    --output-dir ${DATA_DIR}/output/lcz-classification/embedding_viz
+```
+
+### `embedding_explorer.py`
+
+Interactive Dash web app over the `projection_*.parquet`: pick the method
+(UMAP/t-SNE/PCA), colour by one facet and set marker **shape** by a second, filter
+by any facet values, and switch between a single plot, side-by-side **facet
+panels**, or **linked dual plots** (box/lasso select in one highlights the same
+patches in the other). A run dropdown lists every `projection_*.parquet` under
+`--data-dir`.
+
+```bash
+python src/embedding_explorer.py \
+    --data-dir ${DATA_DIR}/output/lcz-classification/embedding_viz \
+    --port 8050
+# then port-forward 8050 over SSH and open http://localhost:8050
+```
+
+---
+
+## Step 6 — Ensembles, Stacking Audit & Test-Time Adaptation
+
+Tools for combining trained checkpoints and evaluating the combination honestly.
+Campaign results using them: `docs/global_lcz_campaign_2026-07.md`.
+
+### `ensemble_eval.py`
+
+Softmax-average ensemble of any number of checkpoints (typically one per embedding) on the
+global So2Sat split. Aligns patches by `(dataset, patch_id)` across sources (only patches
+present in ALL sources are scored), reports metrics for **every model subset**, and caches
+per-model probs to `probs.npz` for the downstream tools. `--split val|test` — run both to
+feed `ensemble_stacking.py`.
+
+```bash
+python src/ensemble_eval.py \
+    --so2sat-dir ${DATA_DIR}/input/So2Sat-LCZ42/v4 --year 2017 --split test \
+    --model GeoTessera_v1.1_global,tesserav1.1_global,<ckpt>.pt \
+    --model AlphaEarthCoop,alpha_earth_coop,<ckpt>.pt \
+    --model EmbeddedSeamless,seamless,<ckpt>.pt \
+    --tta --output-dir ${DATA_DIR}/output/lcz-classification/dl/my_ensemble
+```
+
+Model spec: `OUTPUT_NAME,EMBEDDING_NAME,CHECKPOINT[,FAMILY,PRESET]` (defaults `resnet,small`).
+
+### `ensemble_stacking.py`
+
+Fits combiners on the val probs and evaluates on the test probs: equal-weight baseline,
+simplex weight grid search, LR stacker, per-model temperature calibration
+(`--temperature-scale`), and — critically — a **leave-one-city-out audit** (`--city-holdout`):
+So2Sat val and test contain the *same 10 cities*, so anything expressive fit on val reads
+city-conditional structure back off test (a val-fit LR stacker inflates by ~16 kappa pts here;
+its LOCO number *loses* to plain averaging). Report LOCO numbers, or at minimum the weighted
+average with a DoF caveat.
+
+```bash
+python src/ensemble_stacking.py \
+    --val-npz  .../my_ensemble/ensemble_3models_val/probs.npz \
+    --test-npz .../my_ensemble/ensemble_3models_test/probs.npz \
+    --temperature-scale \
+    --city-holdout --global-gpkg ${DATA_DIR}/input/So2Sat-LCZ42/v4/patches_reference_rxr.gpkg
+```
+
+### `tta_city_adapt.py`
+
+Per-(model, city) test-time adaptation: `--method adabn` (re-estimate BN running stats on the
+city's unlabeled patches) or `tent` (entropy minimization on BN affine params);
+`--adapt-split val` (default) adapts on val inputs and evaluates on test — fully honest.
+Emits `ensemble_eval`-format npz pairs, so `ensemble_stacking.py` runs on the output
+unchanged. `--method none` is a plain aligned-inference mode (regression checks).
+Runner: `run_phase2_tta.sh`.
+
+**Result on this benchmark: negative** — the city shift is label-shift-shaped, and per-city BN
+statistics absorb the class mix (pooled kappa −5 pts; helps Tehran/Munich, craters
+Santiago/Jakarta). Kept as a general tool and as the documented negative.
+
+---
+
+## Step 7 — Auxiliary Structural & OSM Features
+
+Optional side-channel data used by the `ensemble_stacking.py --aux-parquet` offset corrector
+(and, experimentally, as extra fusion channels via the `aux_struct` / `osm_evidence`
+embedding registry entries).
+
+### `extract_aux_features.py`
+
+Per-patch zonal statistics from GHSL built height/surface and ETH canopy height
+(GEE-downloaded 0.5° UTM tiles, cached) — writes one parquet per split for the
+stacking corrector.
+
+### `extract_osm_features.py`
+
+Per-patch OSM landuse features via Overpass/osmnx (cached on `/maps`) — same parquet
+format as `extract_aux_features.py`.
+
+### `precompute_aux_tiles.py`
+
+Merges GHSL (100 m) onto the ETH canopy 10 m grid into 4-band `merged_aux/aux_*.tif`
+tiles so `extract_so2sat_embeddings.py --embedding-name aux_struct` can extract patch
+npy files quickly.
+
+### `build_osm_rasters.py`
+
+Rasterizes OSM evidence layers into 15-band 10 m per-city GeoTIFFs (`osm_evidence`
+registry entry) for use as fusion channels.
 
 ---
 
@@ -470,5 +788,5 @@ Dequantized as: `arr_int8.astype(float32) * scales` → transposed to `(128, H, 
 
 - **Project**: `lcz-classification-dl` (team: `phd-thesis-team`)
 - Each run logs train/val loss and metrics per epoch, plus final test metrics
-- Metrics: `val_miou` / `test_miou` / `test_acc` (segmentation); `val_f1` / `test_f1` / `test_acc` (classification)
+- Metrics (both pipelines): `test_acc`, `test_acc_macro`, `test_f1`, `test_f1_micro`, `test_kappa`, `test_loss`, per-class table, confusion matrix; segmentation adds `val_miou` / `test_miou`
 - Run outputs (checkpoints, prediction rasters) are saved under `{output-dir}/{wandb-run-name}/`
