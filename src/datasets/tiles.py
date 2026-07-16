@@ -162,9 +162,13 @@ def build_tile_index(
     is_center = meta.get("zarr_filename_is_center")
 
     if pattern is None or tile_size is None or is_center is None:
+        supported = sorted(
+            k for k, m in EMBEDDING_REGISTRY.items() if m.get("zarr_filename_pattern")
+        )
         raise ValueError(
             f"Embedding '{embedding_name}' has no filename-pattern metadata. "
-            "Only 'tessera', 'alpha_earth', and 'seamless' are supported."
+            f"Embeddings with filename-indexed tiles: {supported} "
+            "(tesserav1.1*/seamless are handled by their own branches above)."
         )
 
     regex = re.compile(pattern)
@@ -379,6 +383,8 @@ def numpy_mosaic(arrays: list[xr.DataArray]) -> np.ndarray:
 
     Avoids rasterio.merge which rejects south-up rasters.  All input arrays
     must already be normalised to north-up (descending y) before calling this.
+    Where tiles overlap, the last array in the list wins (last-writer-wins);
+    callers that care about overlap quality must order or pre-clip the inputs.
     """
     a0 = arrays[0]
     yres = abs(float(a0.y.values[0] - a0.y.values[1])) if len(a0.y) > 1 else 1.0

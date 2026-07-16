@@ -381,8 +381,8 @@ def infer_roi(
         model: Loaded nn.Module, already on ``device``.
         model_type: Model family name from the models registry. Segmentation
             families run per-pixel; everything else runs patch classification.
-        embedding_name: Registry key — ``"tessera"``, ``"alpha_earth"``,
-            ``"alpha_earth_coop"``.
+        embedding_name: Any key in ``datasets.registry.EMBEDDING_REGISTRY``
+            (e.g. ``"tesserav1.1"``, ``"alpha_earth_coop"``, ``"seamless"``).
         embedding_dir: Directory containing source tile files.
         bbox: ``(west, south, east, north)`` in EPSG:4326.
         output_path: Output GeoTIFF path (PNG is saved alongside).
@@ -391,7 +391,8 @@ def infer_roi(
         overlap: Overlap between adjacent patches in pixels (0 = no overlap).
         batch_size: GPU batch size for the sliding window.
         device: Torch device; auto-selected if None.
-        dequantize: Apply AlphaEarth coop dequantization.
+        dequantize_fn: Optional per-tile dequantize function (see
+            ``utils.runtime.resolve_dequantize`` — coop int8 / seamless ESD).
         out_crs: Output CRS (auto-detected from first tile if None).
         out_res: Output pixel size in ``out_crs`` units (auto-detected if None).
         year: Year string, required for ``"alpha_earth_coop"``.
@@ -421,7 +422,8 @@ def infer_roi(
     from shapely.geometry import box
 
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        from utils.runtime import resolve_device
+        device = resolve_device("auto")
 
     is_seg = _is_segmentation(model_type)
     stride = patch_size - overlap
@@ -486,8 +488,6 @@ def infer_roi(
                 cls_stride * embedding_res_m, first_crs, resolved_crs, lon_c, lat_c
             )
     else:
-        extract_px = patch_size
-        cls_stride = stride  # unused for segmentation
         if out_res is not None:
             resolved_res = out_res
         elif resolved_crs == first_crs:

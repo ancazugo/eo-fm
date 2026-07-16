@@ -173,8 +173,11 @@ class GridSegDataset(Dataset):
 
     Fusion: when an item's npy_path is a tuple (one npy per embedding source,
     same grid cell), the sources are loaded, resized to source 0's grid if
-    off-by-a-pixel, and concatenated along channels. ``dequantize_fn`` applies
-    to source 0 only.
+    off-by-a-pixel (nearest-neighbour — extra sources are categorical/aux
+    rasters), and concatenated along channels. ``dequantize_fn`` applies to
+    source 0 only: the segmentation CLI takes a single --embedding-name, so
+    extra sources must be stored ready-to-use (unlike PatchDataset, which
+    accepts a per-source dequantize list for the classification pipeline).
     """
 
     def __init__(

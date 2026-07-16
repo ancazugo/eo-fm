@@ -1,9 +1,10 @@
 """Shared runtime helpers for the training / inference entry scripts.
 
-Centralises the boilerplate that was previously copy-pasted across
-patch_classification.py, semantic_segmentation.py, linear_probe.py and
-infer_roi.py: device selection, dequantize-function selection, input-channel
-detection, WandB run initialisation, and the per-city full-ROI inference loop.
+Centralises boilerplate used by patch_classification.py,
+semantic_segmentation.py, infer_roi.py and the ensemble/SSL scripts:
+device selection, checkpoint loading, dequantize-function selection,
+input-channel detection, WandB run initialisation, and the per-city
+full-ROI inference loop. (Shared argparse helpers live in utils.cli.)
 """
 
 from __future__ import annotations

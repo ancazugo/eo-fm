@@ -39,7 +39,7 @@ class ResNetUNet(nn.Module):
     Args:
         in_channels: Embedding input channels (e.g. 128 for Tessera, 64 for AlphaEarth).
         num_classes: Number of segmentation output classes.
-        backbone: timm model name; one of the keys in ``_BACKBONE_CHANNELS``.
+        backbone: timm model name; one of ``_SUPPORTED_BACKBONES``.
         bottleneck_dropout: Dropout2d probability applied to the deepest encoder
             features before decoding (0 = off).
         pretrained: Whether to load ImageNet-pretrained weights.  Only meaningful

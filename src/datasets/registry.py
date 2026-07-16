@@ -99,8 +99,8 @@ def find_tiles_for_roi(
     Args:
         directory: Folder containing ``.zarr`` or ``.tif`` tile files.
         roi: ``(west, south, east, north)`` bounding box in EPSG:4326.
-        embedding_name: Key in :data:`EMBEDDING_REGISTRY` with filename
-            metadata (``"tessera"`` or ``"alpha_earth"``).
+        embedding_name: Key in :data:`EMBEDDING_REGISTRY` that carries
+            filename-pattern metadata (``zarr_filename_pattern`` etc.).
 
     Returns:
         Sorted list of :class:`~pathlib.Path` objects for matching tiles.
@@ -118,9 +118,12 @@ def find_tiles_for_roi(
     is_center = meta.get("zarr_filename_is_center")
 
     if pattern is None or tile_size is None or is_center is None:
+        supported = sorted(
+            k for k, m in EMBEDDING_REGISTRY.items() if m.get("zarr_filename_pattern")
+        )
         raise ValueError(
             f"Embedding '{embedding_name}' has no filename-pattern metadata. "
-            "Only 'tessera' and 'alpha_earth' support find_tiles_for_roi."
+            f"Embeddings supporting find_tiles_for_roi: {supported}."
         )
 
     directory = Path(directory)

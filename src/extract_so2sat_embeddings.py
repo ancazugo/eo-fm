@@ -5,6 +5,10 @@ For each patch in patches_reference_rxr.gpkg the script:
   2. Clips the embedding to the patch bounding box.
   3. Saves the result as a float32 .npy file.
 
+Note: unlike infer_roi.py, extraction does NOT clip alpha_earth_coop tiles to
+their valid bbox (aef_index.gpkg wgs84_* bounds), so a patch at a UTM-zone
+boundary can be filled from an adjacent tile's contaminated overhang pixels.
+
 Output layout:
     {so2sat_dir}/{split}/{output_name}/{year}/patch_{patch_id}.npy
 

@@ -4,14 +4,23 @@ Any classification family in the models registry can be trained
 (``--family``: resnet, efficientnet, convnext, densenet, mobilenet, vit,
 aspp, mlp, ...).
 
-Two split modes:
+Three split modes:
 
   Per-city (default): specify --cities-dir and --cities.
     Uses patches_reference_{city}_split.gpkg (grid-based split column: train/val/test).
 
   Global (--global-split): uses patches_reference_rxr.gpkg directly.
     The 'dataset' column (training/validation/testing) defines the split — no
-    city selection needed, all 400 k+ patches across 51 cities are included.
+    city selection needed, every patch in the GeoPackage is included.
+
+  Hybrid (--orig-test): grid-based train/val from the per-city GeoPackages,
+    test set = the original So2Sat testing patches (comparable to the global
+    benchmark without its training split).
+
+Class imbalance / SSL levers: --class-weights, --sampler, --logit-adjustment,
+--mixup-alpha, and --pseudo-gpkg (noisy-student pseudo-labels with per-sample
+loss weights). Multiple --output-name/--embedding-name pairs fuse embeddings
+by channel concatenation.
 
 Label convention: LCZ_class 1-17 → 0-16 (class index)
 
@@ -83,8 +92,9 @@ from utils.runtime import (
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Train a patch classifier on So2Sat patches "
-                    "using the grid-based train/val/test split."
+        description="Train a patch classifier on So2Sat patches. Split modes: "
+                    "per-city grid (default), --global-split (original So2Sat "
+                    "split), or --orig-test (grid train/val + original test set)."
     )
 
     # ── Data ──────────────────────────────────────────────────────────────────

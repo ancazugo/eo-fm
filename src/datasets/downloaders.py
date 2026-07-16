@@ -59,6 +59,10 @@ def download_alpha_earth_coop_tiles(
 ) -> tuple[int, int]:
     """Download specific COOP tiles by S3 path, skipping already-present files.
 
+    Path-list driven counterpart of ``download_alpha_earth_coop`` (bbox+index
+    driven). Behavioural differences to keep in mind: this variant counts 404s
+    as skips (not errors) and has no ``overwrite`` flag.
+
     Args:
         s3_paths: S3 paths from ``aef_index.gpkg`` (``path`` column).
         output_dir: Local coop root (the directory that also holds ``aef_index.gpkg``).
@@ -121,7 +125,10 @@ def download_alpha_earth_coop(
     Reads the ``aef_index.gpkg`` registry to find tiles overlapping *bbox*,
     then downloads each tile's ``.tiff`` and ``.vrt`` files in parallel from
     the public HTTPS endpoint.  Already-present files are skipped unless
-    *overwrite* is set.
+    *overwrite* is set. Bbox+index driven counterpart of
+    ``download_alpha_earth_coop_tiles`` (path-list driven, no overwrite,
+    404s counted as skips); unlike that variant this one re-raises non-404
+    HTTP errors.
 
     Local files are saved at ``output_dir/{year}/{utm_zone}/{filename}`` to
     mirror the S3 directory layout and avoid filename collisions across UTM

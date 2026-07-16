@@ -304,6 +304,10 @@ class LCZUNetModule(nn.Module):
         weight_decay: Adam L2 regularization.
         dice_weight: Weighting of Dice loss (0 = CE only, 1 = Dice only).
         max_epochs: Total training epochs (used for CosineAnnealingLR T_max).
+
+    ``monitor`` is a class attribute here (segmentation always checkpoints on
+    val_miou), whereas LCZResNetModule takes it as a constructor argument;
+    ``run_training_loop`` only requires that ``task_module.monitor`` exists.
     """
 
     monitor = "val_miou"
