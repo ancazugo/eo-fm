@@ -156,3 +156,38 @@ def assign_city(coords: np.ndarray, bounds_csv: Path) -> np.ndarray:
     nn.fit(centers)
     _, idx = nn.kneighbors(coords)
     return names[idx.flatten()]
+
+
+def assign_cities(patch_ids: np.ndarray, split: str, gpkg: Path, bounds_csv: Path) -> np.ndarray:
+    """Map each patch to the So2Sat city whose bounding box contains its centroid.
+
+    Bbox-containment variant used by the ensemble/TTA scripts (ties and misses
+    fall back to the nearest bbox centre); ``assign_city`` above is the pure
+    nearest-centroid variant — they can disagree near city borders, so pick one
+    per analysis and stay with it.
+    """
+    import geopandas as gpd
+    from loguru import logger
+
+    dataset = "validation" if split == "val" else "testing"
+    gdf = gpd.read_file(gpkg)
+    gdf = gdf[gdf["dataset"] == dataset]
+    gdf = gdf.set_index(gdf["patch_id"].astype(str))
+    cent = gdf.geometry.centroid
+    xy = np.stack([cent.x.loc[patch_ids].to_numpy(), cent.y.loc[patch_ids].to_numpy()], axis=1)
+
+    b = pd.read_csv(bounds_csv)
+    inside = (
+        (xy[:, 0:1] >= b["minx"].to_numpy()) & (xy[:, 0:1] <= b["maxx"].to_numpy())
+        & (xy[:, 1:2] >= b["miny"].to_numpy()) & (xy[:, 1:2] <= b["maxy"].to_numpy())
+    )   # (N, n_cities)
+    # ties/misses → nearest bbox centre
+    centres = np.stack([(b["minx"] + b["maxx"]) / 2, (b["miny"] + b["maxy"]) / 2], axis=1)
+    dist = np.linalg.norm(xy[:, None, :] - centres[None], axis=2)
+    dist[~inside] = np.inf
+    n_miss = int((~inside.any(axis=1)).sum())
+    if n_miss:
+        logger.warning(f"{split}: {n_miss} patches outside every city bbox — using nearest bbox centre")
+        miss = ~inside.any(axis=1)
+        dist[miss] = np.linalg.norm(xy[miss, None, :] - centres[None], axis=2)
+    return b["JRC_NAME_MAIN"].to_numpy()[dist.argmin(axis=1)]

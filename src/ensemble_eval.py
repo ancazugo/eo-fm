@@ -44,30 +44,9 @@ if str(_src) not in sys.path:
 from datasets.so2sat import PatchDataset, build_patch_index
 from models import build_model
 from training.evaluate import predict_probs, save_confusion_matrix
+from utils.cli import parse_model_spec
 from utils.runtime import detect_in_channels, resolve_dequantize, resolve_device
 
-
-def parse_model_spec(spec: str) -> dict:
-    parts = spec.split(",")
-    if len(parts) == 3:
-        parts += ["resnet", "small"]
-    if len(parts) != 5:
-        raise argparse.ArgumentTypeError(
-            f"Bad --model spec {spec!r}; expected "
-            "OUTPUT_NAME,EMBEDDING_NAME,CHECKPOINT[,FAMILY,PRESET]"
-        )
-    # A fused model joins several sources with '+', e.g.
-    # "GeoTessera_v1.1_global+AuxStruct,tesserav1.1_global+aux_struct,<ckpt>".
-    output_names = parts[0].split("+")
-    embedding_names = parts[1].split("+")
-    if len(output_names) != len(embedding_names):
-        raise argparse.ArgumentTypeError(
-            f"Bad --model spec {spec!r}: output/embedding source counts differ"
-        )
-    return dict(
-        output_names=output_names, embedding_names=embedding_names,
-        name=parts[0], checkpoint=Path(parts[2]), family=parts[3], preset=parts[4],
-    )
 
 
 def compute_metrics(probs: np.ndarray, labels: np.ndarray) -> dict[str, float]:

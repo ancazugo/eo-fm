@@ -46,8 +46,8 @@ if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
 from datasets.so2sat import PatchDataset, build_patch_index
-from ensemble_eval import parse_model_spec
-from ensemble_stacking import assign_cities
+from utils.cli import parse_model_spec
+from utils.geo_lookup import assign_cities
 from models import build_model
 from training.evaluate import predict_probs
 from utils.runtime import detect_in_channels, resolve_dequantize, resolve_device

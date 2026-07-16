@@ -88,3 +88,31 @@ def resolve_overlap(args: argparse.Namespace) -> None:
     """Default --overlap to half the patch size (in place)."""
     if args.overlap is None:
         args.overlap = args.patch_size // 2
+
+
+def parse_model_spec(spec: str) -> dict:
+    """argparse type= for the --model spec used by the ensemble/TTA scripts.
+
+    Format: ``OUTPUT_NAME,EMBEDDING_NAME,CHECKPOINT[,FAMILY,PRESET]``
+    (family/preset default to resnet/small).
+    """
+    parts = spec.split(",")
+    if len(parts) == 3:
+        parts += ["resnet", "small"]
+    if len(parts) != 5:
+        raise argparse.ArgumentTypeError(
+            f"Bad --model spec {spec!r}; expected "
+            "OUTPUT_NAME,EMBEDDING_NAME,CHECKPOINT[,FAMILY,PRESET]"
+        )
+    # A fused model joins several sources with '+', e.g.
+    # "GeoTessera_v1.1_global+AuxStruct,tesserav1.1_global+aux_struct,<ckpt>".
+    output_names = parts[0].split("+")
+    embedding_names = parts[1].split("+")
+    if len(output_names) != len(embedding_names):
+        raise argparse.ArgumentTypeError(
+            f"Bad --model spec {spec!r}: output/embedding source counts differ"
+        )
+    return dict(
+        output_names=output_names, embedding_names=embedding_names,
+        name=parts[0], checkpoint=Path(parts[2]), family=parts[3], preset=parts[4],
+    )
