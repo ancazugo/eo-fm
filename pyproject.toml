@@ -1,33 +1,40 @@
 [project]
 name = "eo-fm"
 version = "0.2.0"
-description = "Earth Observation Foundation Model — LCZ classification with torchgeo"
+description = "Earth Observation Foundation Model — LCZ classification with satellite embeddings"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "dash>=2.17",
     "earthengine-api>=1.7.12",
-    "geotessera==0.8.0",
-    "gdal==3.10.0",
+    "folium>=0.20.0",
     "geopandas>=1.1.2",
-    "ipykernel>=7.1.0",
+    "geotessera==0.8.0",
+    "ipywidgets>=8.1.8",
     "loguru>=0.7.3",
     "matplotlib>=3.10.8",
+    "mgrs>=1.5.4",
+    "osm-rasterizer>=0.3.0",
+    "osmnx>=2.1",
+    "plotly>=6.7.0",
     "python-dotenv>=1.2.1",
     "rioxarray>=0.21.0",
     "scikit-learn>=1.4",
-    "torchgeo>=0.9",
+    "seaborn>=0.13.2",
+    "timm>=1.0.24",
+    # torch >=2.11 ships CUDA 13 wheels; cluster driver only supports CUDA 12.2
+    "torch>=2.10,<2.11",
+    "torchmetrics>=1.8",
+    "tqdm>=4.67",
     "typer>=0.21.1",
+    "umap-learn>=0.5.12",
     "wandb>=0.24.1",
     "xee>=0.0.24",
     "zarr>=3.1.5",
-    "lightgbm>=4.6.0",
-    "xgboost>=3.2.0",
-    "faiss-cpu>=1.7",
-    "osm-rasterizer>=0.1.1",
-    "seaborn>=0.13.2",
-    "geojson>=3.2.0",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.1.0",
     "nbformat>=5.10.4",
-    "mgrs>=1.5.4",
-    "plotly>=6.7.0",
-    "umap-learn>=0.5.12",
 ]
