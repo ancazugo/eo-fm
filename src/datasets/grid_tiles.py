@@ -197,7 +197,7 @@ class GridSegDataset(Dataset):
         arr = np.load(path).astype(np.float32)   # (C, H, W)
         if dequantize and self.dequantize_fn is not None:
             arr = self.dequantize_fn(arr)
-        return arr
+        return np.nan_to_num(arr, copy=False)
 
     def __getitem__(self, idx: int) -> dict:
         npy_path, tile_geom, tile_crs, polys, tif_ref = self.items[idx]

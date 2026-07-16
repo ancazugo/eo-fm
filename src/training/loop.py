@@ -64,7 +64,7 @@ def run_training_loop(
     val_loader = datamodule.val_dataloader()
 
     monitor = task_module.monitor
-    best_value = -1.0
+    best_value = float("-inf")
     patience_counter = 0
     best_ckpt_path: Path | None = None
 

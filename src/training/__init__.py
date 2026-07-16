@@ -4,6 +4,7 @@ from training.augment import augment_batch, augment_images
 from training.evaluate import (
     evaluate_classification,
     evaluate_segmentation,
+    predict_probs,
     save_confusion_matrix,
 )
 from training.loop import run_training_loop
@@ -14,6 +15,7 @@ __all__ = [
     "augment_images",
     "evaluate_classification",
     "evaluate_segmentation",
+    "predict_probs",
     "save_confusion_matrix",
     "run_training_loop",
     "LCZResNetModule",

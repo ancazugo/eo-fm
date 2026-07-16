@@ -109,7 +109,9 @@ def main() -> None:
         choices=["float32", "float16"],
         default="float32",
         help="npy dtype for saved patches (float16 halves disk use; "
-             "PatchDataset casts back to float32 on load).",
+             "PatchDataset casts back to float32 on load). Not allowed for "
+             "seamless, whose raw VQ indices exceed float16's exact-integer "
+             "range and would be silently corrupted.",
     )
     parser.add_argument(
         "--workers",
@@ -123,6 +125,11 @@ def main() -> None:
         help="Skip patches whose .npy output file already exists (useful for resuming).",
     )
     args = parser.parse_args()
+    if args.dtype == "float16" and args.embedding_name == "seamless":
+        parser.error(
+            "--dtype float16 corrupts seamless ESD indices (values > 2048 are "
+            "not exactly representable); use float32."
+        )
 
     # Ensure src/ is on sys.path when running directly
     src_dir = Path(__file__).parent
