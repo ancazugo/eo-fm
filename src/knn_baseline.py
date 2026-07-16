@@ -1,9 +1,14 @@
-"""Cosine-kNN baseline on pooled So2Sat patch embeddings.
+"""Non-parametric baselines (cosine-kNN / per-class GMM density) on pooled So2Sat patch embeddings.
 
 Features are extracted from pre-computed embedding .npy patches via global
 average pooling (or mean+std concatenation), cached to disk, z-score
-normalised using training-set statistics, then classified by majority vote
-over the k nearest training neighbours (cosine distance).
+normalised using training-set statistics, then classified either by majority
+vote over the k nearest training neighbours (cosine distance) or by a
+LUCERA-style generative rule: one GaussianMixture per LCZ class fitted in
+embedding space, prediction = argmax_c log p(x|c) + log P(c).
+
+Both classifiers are also evaluated on the validation split (val_* metrics):
+select hyperparameters (--knn-k, --gmm-*, --pca-dim) on val, report test once.
 
 Linear probe training now lives in the main pipeline:
     python src/patch_classification.py --family linear_probe ...
@@ -28,6 +33,17 @@ Example (global split, seamless — dequantize applied automatically):
         --output-name Seamless --year 2017 \\
         --embedding-name seamless \\
         --pooling mean_std \\
+        --output-dir /maps/acz25/phd-thesis-data/output/lcz-classification/dl
+
+Example (per-class GMM density classifier, Tessera v1.1):
+    python src/knn_baseline.py \\
+        --so2sat-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4 \\
+        --cities-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4/cities \\
+        --cities Nairobi \\
+        --output-name GeoTessera_v1.1 --year 2017 \\
+        --embedding-name tesserav1.1 \\
+        --pooling gap \\
+        --classifier gmm --gmm-components 3 \\
         --output-dir /maps/acz25/phd-thesis-data/output/lcz-classification/dl
 """
 
@@ -54,6 +70,8 @@ from sklearn.metrics import (
     f1_score,
     precision_recall_fscore_support,
 )
+from sklearn.decomposition import PCA
+from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import NearestNeighbors
 from tqdm import tqdm
 
@@ -191,6 +209,92 @@ def run_knn(
     return preds
 
 
+# ── GMM density classifier ────────────────────────────────────────────────────
+
+LOG_FLOOR = -1e30  # score for classes with no fitted GMM
+
+
+def fit_gmm(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    num_classes: int = 17,
+    n_components: int = 3,
+    covariance_type: str = "diag",
+    reg_covar: float = 1e-4,
+    prior: str = "uniform",
+    pca_dim: int = 0,
+    seed: int = 42,
+) -> dict:
+    """Fit one GaussianMixture per class (plus optional PCA-whitening).
+
+    Returns a dict {"models": list[GaussianMixture | None], "log_priors": (C,),
+    "pca": PCA | None} consumed by predict_gmm. models[c] is None for classes
+    with fewer than 2 training samples.
+    """
+    pca = None
+    if pca_dim > 0:
+        pca = PCA(n_components=pca_dim, whiten=True, random_state=seed)
+        X_train = pca.fit_transform(X_train)
+        logger.info(
+            f"  PCA: dim {pca.n_features_in_} → {pca_dim}"
+            f" (explained var {pca.explained_variance_ratio_.sum():.3f})"
+        )
+
+    mask = y_train >= 0
+    counts = np.bincount(y_train[mask].astype(np.intp), minlength=num_classes)
+    if counts.sum() == 0:
+        logger.warning("No labelled training samples — all predictions will be -1")
+
+    models: list[GaussianMixture | None] = [None] * num_classes
+    log_priors = np.zeros(num_classes, dtype=np.float64)
+    for c in range(num_classes):
+        n_c = int(counts[c])
+        if n_c < 2:  # GaussianMixture needs ≥2 samples even for one component
+            logger.info(f"  class {c + 1}: n={n_c} — skipped")
+            continue
+        # ≥10 samples per component (also satisfies sklearn's n_samples ≥ n_components)
+        k_c = min(n_components, max(1, n_c // 10))
+        gm = GaussianMixture(
+            n_components=k_c,
+            covariance_type=covariance_type,
+            reg_covar=reg_covar,
+            max_iter=200,
+            init_params="kmeans",
+            random_state=seed,
+        )
+        gm.fit(X_train[mask & (y_train == c)])
+        models[c] = gm
+        if prior == "empirical":
+            log_priors[c] = float(np.log(n_c / counts.sum()))
+        logger.info(f"  class {c + 1}: n={n_c} components={k_c}")
+
+    return {"models": models, "log_priors": log_priors, "pca": pca}
+
+
+def predict_gmm(fitted: dict, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Classify X with fitted per-class GMMs: argmax_c log p(x|c) + log P(c).
+
+    Returns:
+        preds:     (N,) int64 — -1 if no class could be fitted
+        log_joint: (N, num_classes) float32 — log p(x|c) + log P(c),
+                   LOG_FLOOR for classes without a fitted GMM
+    """
+    if fitted["pca"] is not None:
+        X = fitted["pca"].transform(X)
+
+    num_classes = len(fitted["models"])
+    log_joint = np.full((len(X), num_classes), LOG_FLOOR, dtype=np.float64)
+    for c, gm in enumerate(fitted["models"]):
+        if gm is not None:
+            log_joint[:, c] = gm.score_samples(X) + fitted["log_priors"][c]
+
+    if all(gm is None for gm in fitted["models"]):
+        preds = np.full(len(X), -1, dtype=np.int64)
+    else:
+        preds = log_joint.argmax(axis=1).astype(np.int64)
+    return preds, log_joint.astype(np.float32)
+
+
 # ── Evaluation ────────────────────────────────────────────────────────────────
 
 def _eval_and_save(
@@ -200,7 +304,8 @@ def _eval_and_save(
     num_classes: int,
     run_dir: Path,
     use_wandb: bool,
-    test_loss: float | None = None,
+    loss: float | None = None,
+    split: str = "test",
 ) -> dict[str, float]:
     valid = y_true != -1
     yt, yp = y_true[valid], y_pred[valid]
@@ -219,12 +324,12 @@ def _eval_and_save(
     acc_macro = float(np.mean(rec))  # mean per-class recall = macro accuracy
 
     logger.info(
-        f"[{method}] OA={oa:.4f}  Acc_macro={acc_macro:.4f}"
+        f"[{method}/{split}] OA={oa:.4f}  Acc_macro={acc_macro:.4f}"
         f"  F1_macro={f1_macro:.4f}  F1_micro={f1_micro:.4f}  Kappa={kappa:.4f}"
     )
 
     # Per-class metrics CSV
-    cls_csv = run_dir / f"per_class_metrics_{method}.csv"
+    cls_csv = run_dir / f"per_class_metrics_{split}_{method}.csv"
     with cls_csv.open("w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["class_id", "class_name", "precision", "recall", "f1", "support"])
@@ -238,7 +343,7 @@ def _eval_and_save(
     display_labels = [lcz_dict.get(l + 1, {}).get("name", str(l + 1)) for l in present]
     cm = confusion_matrix(yt, yp, labels=present)
 
-    cm_csv = run_dir / f"test_confusion_matrix_{method}.csv"
+    cm_csv = run_dir / f"{split}_confusion_matrix_{method}.csv"
     with cm_csv.open("w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["true\\pred"] + display_labels)
@@ -246,12 +351,14 @@ def _eval_and_save(
             w.writerow([row_label] + list(row))
 
     fig, ax = plt.subplots(figsize=(13, 11))
-    ConfusionMatrixDisplay(cm, display_labels=display_labels).plot(
+    ConfusionMatrixDisplay(cm).plot(
         ax=ax, colorbar=True, xticks_rotation=45,
     )
-    ax.set_title(f"Test Confusion Matrix — {method}")
+    from training.evaluate import style_lcz_ticklabels
+    style_lcz_ticklabels(ax, [l + 1 for l in present])
+    ax.set_title(f"{split.capitalize()} Confusion Matrix — {method}")
     plt.tight_layout()
-    cm_png = run_dir / f"test_confusion_matrix_{method}.png"
+    cm_png = run_dir / f"{split}_confusion_matrix_{method}.png"
     fig.savefig(cm_png, dpi=120, bbox_inches="tight")
     plt.close(fig)
     logger.info(f"  Confusion matrix → {cm_png.name}")
@@ -262,18 +369,18 @@ def _eval_and_save(
             for i in range(num_classes)
         ])
         log_dict = {
-            "test_oa":        oa,
-            "test_acc_macro": acc_macro,
-            "test_f1_macro":  f1_macro,
-            "test_f1_micro":  f1_micro,
-            "test_kappa":     kappa,
-            "confusion_matrix": wandb.Image(str(cm_png)),
+            f"{split}_oa":        oa,
+            f"{split}_acc_macro": acc_macro,
+            f"{split}_f1_macro":  f1_macro,
+            f"{split}_f1_micro":  f1_micro,
+            f"{split}_kappa":     kappa,
+            f"{split}_confusion_matrix": wandb.Image(str(cm_png)),
         }
-        if test_loss is not None:
-            log_dict["test_loss"] = test_loss
+        if loss is not None:
+            log_dict[f"{split}_loss"] = loss
         wandb.log(log_dict)
         from utils.wandb import log_per_class_metrics
-        log_per_class_metrics(per_cls_acc, f1_per, num_classes, prefix="test")
+        log_per_class_metrics(per_cls_acc, f1_per, num_classes, prefix=split)
 
     return {"oa": oa, "acc_macro": acc_macro, "f1_macro": f1_macro, "f1_micro": f1_micro, "kappa": kappa}
 
@@ -337,9 +444,23 @@ def _append_summary(summary_csv: Path, row: dict) -> None:
         "run_name", "date", "method", "embedding", "cities", "split_mode",
         "pooling", "class_weights", "feature_dim",
         "train_n", "val_n", "test_n",
+        "val_oa", "val_f1_macro", "val_kappa",
         "test_oa", "test_f1_macro", "test_kappa",
     ]
     summary_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    # Migrate files written before the val_* columns existed (old rows get blanks)
+    if summary_csv.exists():
+        with summary_csv.open(newline="") as fh:
+            reader = csv.DictReader(fh)
+            if reader.fieldnames != fieldnames:
+                old_rows = list(reader)
+                with summary_csv.open("w", newline="") as out:
+                    w = csv.DictWriter(out, fieldnames=fieldnames, extrasaction="ignore")
+                    w.writeheader()
+                    w.writerows(old_rows)
+                logger.info(f"Migrated {summary_csv.name} to new column layout ({len(old_rows)} rows)")
+
     write_header = not summary_csv.exists()
     with summary_csv.open("a", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
@@ -384,9 +505,21 @@ def main() -> None:
                    help="Feature cache directory (default: {output_dir}/cache).")
     g.add_argument("--no-cache", action="store_true", help="Ignore and overwrite existing cache.")
 
-    g = parser.add_argument_group("kNN")
+    g = parser.add_argument_group("Classifier")
     g.add_argument("--num-classes", type=int, default=17)
+    g.add_argument("--classifier", choices=["knn", "gmm"], default="knn",
+                   help="knn = cosine-kNN majority vote; gmm = per-class GMM density.")
     g.add_argument("--knn-k", type=int, default=20)
+    g.add_argument("--gmm-components", type=int, default=3,
+                   help="Max GMM components per class (capped at n_samples//10 for rare classes).")
+    g.add_argument("--gmm-covariance-type", default="diag",
+                   choices=["diag", "full", "tied", "spherical"],
+                   help="diag is the high-dim default; full is viable with --pca-dim.")
+    g.add_argument("--gmm-reg-covar", type=float, default=1e-4)
+    g.add_argument("--gmm-prior", choices=["uniform", "empirical"], default="uniform",
+                   help="uniform = balanced generative classifier (favours macro-F1).")
+    g.add_argument("--pca-dim", type=int, default=0,
+                   help="PCA(whiten) pre-reduction fitted on train features; 0 = off.")
 
     g = parser.add_argument_group("Output")
     g.add_argument("--output-dir", required=True, type=Path)
@@ -438,13 +571,31 @@ def main() -> None:
 
     # ── Normalisation ─────────────────────────────────────────────────────────
     X_train = normalize(feats["train"], feat_mean, feat_std)
+    X_val   = normalize(feats["val"],   feat_mean, feat_std)
     X_test  = normalize(feats["test"],  feat_mean, feat_std)
     y_train = labels_dict["train"]
+    y_val   = labels_dict["val"]
     y_test  = labels_dict["test"]
 
     # ── WandB ─────────────────────────────────────────────────────────────────
+    if args.classifier == "knn":
+        clf_cfg = dict(knn_k=args.knn_k)
+        default_name = f"knn_{args.output_name}_{_run_label}"
+    else:
+        clf_cfg = dict(
+            gmm_components=args.gmm_components,
+            covariance_type=args.gmm_covariance_type,
+            reg_covar=args.gmm_reg_covar,
+            prior=args.gmm_prior,
+            pca_dim=args.pca_dim,
+        )
+        default_name = (
+            f"gmm-c{args.gmm_components}-{args.gmm_covariance_type}-{args.gmm_prior}"
+            f"_{args.output_name}_{_run_label}"
+        )
+
     run_cfg = dict(
-        task="knn",
+        task=args.classifier,
         embedding=args.output_name,
         embedding_name=args.embedding_name,
         cities="all_so2sat" if args.global_split else city_names,
@@ -452,13 +603,13 @@ def main() -> None:
         split_mode=split_mode,
         pooling=args.pooling,
         feature_dim=feature_dim,
-        knn_k=args.knn_k,
+        **clf_cfg,
         **{f"{s}_patches": split_counts[s] for s in ("train", "val", "test")},
     )
 
     run_dir = init_run(
         args.output_dir, run_cfg, args.run_name,
-        default_name=f"knn_{args.output_name}_{_run_label}",
+        default_name=default_name,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         no_wandb=args.no_wandb,
@@ -466,13 +617,49 @@ def main() -> None:
 
     test_items = [(p, l, s) for p, l, s in all_items if s == "test"]
 
-    # ── kNN baseline ──────────────────────────────────────────────────────────
-    logger.info(f"Running kNN (k={args.knn_k}) …")
-    knn_preds = run_knn(X_train, y_train, X_test, k=args.knn_k)
+    # ── Classifier ────────────────────────────────────────────────────────────
+    # Val predictions are reported alongside test so hyperparameter sweeps
+    # (--knn-k, --gmm-*) can select on val_* metrics without touching test.
+    if args.classifier == "knn":
+        logger.info(f"Running kNN (k={args.knn_k}) …")
+        val_preds = run_knn(X_train, y_train, X_val, k=args.knn_k) if len(X_val) else None
+        preds = run_knn(X_train, y_train, X_test, k=args.knn_k)
+    else:
+        logger.info(
+            f"Fitting per-class GMM (components={args.gmm_components},"
+            f" cov={args.gmm_covariance_type}, prior={args.gmm_prior},"
+            f" pca_dim={args.pca_dim}) …"
+        )
+        fitted = fit_gmm(
+            X_train, y_train,
+            num_classes=args.num_classes,
+            n_components=args.gmm_components,
+            covariance_type=args.gmm_covariance_type,
+            reg_covar=args.gmm_reg_covar,
+            prior=args.gmm_prior,
+            pca_dim=args.pca_dim,
+            seed=args.seed,
+        )
+        val_preds = None
+        if len(X_val):
+            val_preds, val_log_joint = predict_gmm(fitted, X_val)
+            np.save(run_dir / "val_log_joint_gmm.npy", val_log_joint)
+        preds, log_joint = predict_gmm(fitted, X_test)
+        np.save(run_dir / "test_log_joint_gmm.npy", log_joint)
+        logger.info("  Per-class log-joint matrices → {val,test}_log_joint_gmm.npy")
+        if not args.no_wandb and wandb.run:
+            wandb.log({"test_mean_max_log_density": float(log_joint.max(axis=1).mean())})
+
+    val_metrics = None
+    if val_preds is not None:
+        val_metrics = _eval_and_save(
+            y_val, val_preds, args.classifier, args.num_classes, run_dir,
+            not args.no_wandb, split="val",
+        )
     metrics = _eval_and_save(
-        y_test, knn_preds, "knn", args.num_classes, run_dir, not args.no_wandb,
+        y_test, preds, args.classifier, args.num_classes, run_dir, not args.no_wandb,
     )
-    _per_city_oa(test_items, knn_preds, args.cities_dir, "knn", run_dir)
+    _per_city_oa(test_items, preds, args.cities_dir, args.classifier, run_dir)
 
     # ── Summary CSV ───────────────────────────────────────────────────────────
     _append_summary(
@@ -480,7 +667,7 @@ def main() -> None:
         {
             "run_name": run_dir.name,
             "date": datetime.now().strftime("%Y-%m-%d"),
-            "method": "knn",
+            "method": args.classifier,
             "embedding": args.output_name,
             "cities": "all_so2sat" if args.global_split else "_".join(city_names[:5]),
             "split_mode": split_mode,
@@ -490,6 +677,9 @@ def main() -> None:
             "train_n": split_counts["train"],
             "val_n": split_counts["val"],
             "test_n": split_counts["test"],
+            "val_oa": f"{val_metrics['oa']:.4f}" if val_metrics else "",
+            "val_f1_macro": f"{val_metrics['f1_macro']:.4f}" if val_metrics else "",
+            "val_kappa": f"{val_metrics['kappa']:.4f}" if val_metrics else "",
             "test_oa": f"{metrics['oa']:.4f}",
             "test_f1_macro": f"{metrics['f1_macro']:.4f}",
             "test_kappa": f"{metrics['kappa']:.4f}",
