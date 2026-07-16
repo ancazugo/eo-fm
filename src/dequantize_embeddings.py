@@ -7,8 +7,6 @@ import torch
 from torch import Tensor, int32
 from torch.nn import Module
 
-from einops import rearrange
-
 
 def load_and_dequantize_tessera_representation(representation_file_path, scales_file_path):
     """
@@ -105,7 +103,7 @@ class Quantizer(Module):
         return (zhat - half_width) / half_width
 
     def indices_to_level_indices(self, indices: Tensor) -> Tensor:
-        indices = rearrange(indices, "... -> ... 1")
+        indices = indices.unsqueeze(-1)
         codes_non_centered = (indices // self._basis) % self._levels
         return codes_non_centered
 

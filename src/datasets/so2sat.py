@@ -17,7 +17,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from loguru import logger
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from training.augment import augment_images
 
@@ -39,7 +39,7 @@ def build_patch_index(
     to the wrong files.
     """
     index: dict[str, dict[str, Path]] = {}
-    for orig_split in ("training", "validation", "testing"):
+    for orig_split in ("training", "validation", "testing", "unlabeled"):
         d = so2sat_dir / orig_split / output_name / year
         if not d.exists():
             continue
@@ -49,6 +49,33 @@ def build_patch_index(
     n_total = sum(len(v) for v in index.values())
     logger.info(f"Patch index: {n_total} npy files found under {so2sat_dir}")
     return index
+
+
+def merge_patch_indexes(indexes: list[dict]) -> dict:
+    """Intersect per-source patch indexes into one tuple-valued index.
+
+    Input: one ``{orig_split: {patch_id: Path}}`` index per embedding source.
+    Output: same structure but values are tuples of Paths (one per source, in
+    input order); only patch_ids present in EVERY source survive.
+    """
+    merged: dict[str, dict[str, tuple]] = {}
+    n_dropped = 0
+    for orig_split in indexes[0]:
+        if not all(orig_split in ix for ix in indexes):
+            continue
+        common = set(indexes[0][orig_split])
+        for ix in indexes[1:]:
+            common &= set(ix[orig_split])
+        n_dropped += max(len(ix.get(orig_split, {})) for ix in indexes) - len(common)
+        merged[orig_split] = {
+            pid: tuple(ix[orig_split][pid] for ix in indexes) for pid in common
+        }
+    n_total = sum(len(v) for v in merged.values())
+    logger.info(
+        f"Fused patch index: {n_total} patches present in all "
+        f"{len(indexes)} sources ({n_dropped} dropped)"
+    )
+    return merged
 
 
 def build_global_items(
@@ -79,6 +106,40 @@ def build_global_items(
     logger.info(
         f"Global split: {len(items)} patches matched "
         f"({n_missing} patch_ids had no npy)"
+    )
+    return items
+
+
+def build_pseudo_items(
+    pseudo_gpkg: Path,
+    patch_index: dict,
+    label_col: str = "LCZ_class",
+    weight_col: str = "weight",
+    weight_scale: float = 1.0,
+) -> list[tuple]:
+    """Build weighted train items from a pseudo-label GeoPackage
+    (generate_pseudo_labels.py output).
+
+    Returns 4-tuples ``(npy_path, label_int, "train", weight)``; the weight
+    (scaled by ``weight_scale``) flows through PatchDataset into the
+    per-sample weighted CE loss.
+    """
+    gdf = gpd.read_file(pseudo_gpkg)
+    items: list[tuple] = []
+    n_missing = 0
+    for _, row in gdf.iterrows():
+        pid = str(row["patch_id"])
+        dataset = str(row.get("dataset", "unlabeled"))
+        path = patch_index.get(dataset, {}).get(pid)
+        if path is None:
+            n_missing += 1
+            continue
+        label = int(row[label_col]) - 1   # 1-17 → 0-16
+        weight = float(row[weight_col]) * weight_scale
+        items.append((path, label, "train", weight))
+    logger.info(
+        f"Pseudo items: {len(items)} weighted train patches from "
+        f"{pseudo_gpkg.name} ({n_missing} had no npy)"
     )
     return items
 
@@ -138,7 +199,7 @@ def build_city_items(
 
 def build_so2sat_items(
     so2sat_dir: Path,
-    output_name: str,
+    output_name: str | list[str],
     year: str,
     *,
     global_split: bool,
@@ -149,6 +210,10 @@ def build_so2sat_items(
     orig_test: bool = False,
 ) -> tuple[list[tuple], list[Path]]:
     """Build the full item list plus the city dirs used for per-city inference.
+
+    ``output_name`` may be a list of embedding names (fusion): the per-source
+    patch indexes are intersected and item paths become tuples of npy paths,
+    one per source in input order.
 
     Per-city mode: ``cities_dir`` is required; ``cities`` filters which cities
     are used for training AND inference.
@@ -164,13 +229,18 @@ def build_so2sat_items(
         logger.error("--orig-test and --global-split are mutually exclusive")
         raise SystemExit(1)
 
-    patch_index = build_patch_index(so2sat_dir, output_name, year)
-    if not patch_index:
-        logger.error(
-            f"No patch npy files found under {so2sat_dir} "
-            f"for output_name={output_name!r}, year={year!r}"
-        )
-        raise SystemExit(1)
+    names = [output_name] if isinstance(output_name, str) else list(output_name)
+    indexes = []
+    for name in names:
+        index = build_patch_index(so2sat_dir, name, year)
+        if not index:
+            logger.error(
+                f"No patch npy files found under {so2sat_dir} "
+                f"for output_name={name!r}, year={year!r}"
+            )
+            raise SystemExit(1)
+        indexes.append(index)
+    patch_index = indexes[0] if len(indexes) == 1 else merge_patch_indexes(indexes)
 
     if orig_test:
         if cities_dir is None:
@@ -233,6 +303,11 @@ class PatchDataset(Dataset):
     When sub_patch_size is set, each parent patch is tiled into sub-patches of
     that size (with sub_patch_stride step). Each sub-patch inherits the parent
     label. The full-patch path (sub_patch_size=None) is identical to before.
+
+    Fusion: when item paths are tuples (one npy per embedding source), each
+    source is loaded, dequantized (``dequantize_fn`` must then be a matching
+    sequence), resized to patch_size and concatenated along channels. Sources
+    may have different native resolutions. Incompatible with sub_patch_size.
     """
 
     def __init__(
@@ -248,34 +323,33 @@ class PatchDataset(Dataset):
         self.sub_patch_stride = sub_patch_stride or sub_patch_size
         self.dequantize_fn = dequantize_fn
 
+        if items and isinstance(items[0][0], tuple) and sub_patch_size is not None:
+            raise ValueError("sub_patch_size is not supported with fused (multi-source) items")
+
+        # Items are (path, label, split) or (path, label, split, weight);
+        # the "weight" batch key is only emitted when any item carries one,
+        # so unweighted runs keep their exact previous batch format.
+        self.has_weights = any(len(it) > 3 for it in items)
+
+        def _w(it) -> float:
+            return float(it[3]) if len(it) > 3 else 1.0
+
         if sub_patch_size is None:
-            self.expanded = [(path, label, None, None) for path, label, _ in items]
+            self.expanded = [(it[0], it[1], None, None, _w(it)) for it in items]
         else:
             stride = self.sub_patch_stride
             self.expanded = []
-            for path, label, _ in items:
+            for it in items:
+                path, label = it[0], it[1]
                 _, H, W = np.load(path, mmap_mode="r").shape
                 for r in range(0, H - sub_patch_size + 1, stride):
                     for c in range(0, W - sub_patch_size + 1, stride):
-                        self.expanded.append((path, label, r, c))
+                        self.expanded.append((path, label, r, c, _w(it)))
 
     def __len__(self) -> int:
         return len(self.expanded)
 
-    def __getitem__(self, idx: int) -> dict:
-        path, label, r, c = self.expanded[idx]
-
-        arr = np.load(path).astype(np.float32)   # (C, H, W)
-        arr = np.nan_to_num(arr, nan=0.0)
-        if self.dequantize_fn is not None:
-            arr = self.dequantize_fn(arr)
-
-        if r is None:
-            image = torch.from_numpy(arr)
-        else:
-            image = torch.from_numpy(arr[:, r:r + self.sub_patch_size, c:c + self.sub_patch_size])
-
-        # Resize to fixed patch size if needed
+    def _resize(self, image: torch.Tensor) -> torch.Tensor:
         if image.shape[-2:] != (self.patch_size, self.patch_size):
             image = F.interpolate(
                 image.unsqueeze(0),
@@ -283,17 +357,54 @@ class PatchDataset(Dataset):
                 mode="bilinear",
                 align_corners=False,
             ).squeeze(0)
+        return image
 
-        return {
+    def _load_source(self, path: Path, dequantize_fn) -> np.ndarray:
+        arr = np.load(path).astype(np.float32)   # (C, H, W)
+        arr = np.nan_to_num(arr, nan=0.0)
+        if dequantize_fn is not None:
+            arr = dequantize_fn(arr)
+        return arr
+
+    def __getitem__(self, idx: int) -> dict:
+        path, label, r, c, weight = self.expanded[idx]
+
+        if isinstance(path, tuple):
+            # Fusion: resize each source to the common grid, then concat channels
+            fns = (self.dequantize_fn if isinstance(self.dequantize_fn, (list, tuple))
+                   else [self.dequantize_fn] * len(path))
+            image = torch.cat(
+                [self._resize(torch.from_numpy(self._load_source(p, fn)))
+                 for p, fn in zip(path, fns)],
+                dim=0,
+            )
+        else:
+            arr = self._load_source(path, self.dequantize_fn)
+            if r is None:
+                image = torch.from_numpy(arr)
+            else:
+                image = torch.from_numpy(arr[:, r:r + self.sub_patch_size, c:c + self.sub_patch_size])
+            image = self._resize(image)
+
+        out = {
             "image": image,
             "label": torch.tensor(label, dtype=torch.long),
         }
+        if self.has_weights:
+            out["weight"] = torch.tensor(weight, dtype=torch.float32)
+        return out
 
 
 # ── DataModule ────────────────────────────────────────────────────────────────
 
 class PatchDataModule:
-    """Minimal DataModule for run_training_loop compatibility."""
+    """Minimal DataModule for run_training_loop compatibility.
+
+    ``sampler``: "none" (shuffle), or "balanced"/"sqrt_balanced" for a
+    WeightedRandomSampler with per-sample weights 1/count (resp. 1/sqrt(count))
+    of the sample's class in the train split (with replacement, one epoch =
+    len(train) draws).
+    """
 
     def __init__(
         self,
@@ -304,6 +415,7 @@ class PatchDataModule:
         sub_patch_size: int | None = None,
         sub_patch_stride: int | None = None,
         dequantize_fn=None,
+        sampler: str = "none",
     ) -> None:
         self.all_items = all_items
         self.patch_size = patch_size
@@ -312,6 +424,7 @@ class PatchDataModule:
         self.sub_patch_size = sub_patch_size
         self.sub_patch_stride = sub_patch_stride
         self.dequantize_fn = dequantize_fn
+        self.sampler = sampler
 
     def setup(self) -> None:
         def _for_split(s: str) -> list:
@@ -329,20 +442,35 @@ class PatchDataModule:
 
     @staticmethod
     def _collate(batch: list) -> dict:
-        return {
+        out = {
             "image": torch.stack([b["image"] for b in batch]),
             "label": torch.stack([b["label"] for b in batch]),
         }
+        if "weight" in batch[0]:
+            out["weight"] = torch.stack([b["weight"] for b in batch])
+        return out
 
     def _train_collate(self, batch: list) -> dict:
-        images = torch.stack([b["image"] for b in batch])
-        labels = torch.stack([b["label"] for b in batch])
-        images = augment_images(images)
-        return {"image": images, "label": labels}
+        out = self._collate(batch)
+        out["image"] = augment_images(out["image"])
+        return out
 
     def train_dataloader(self) -> DataLoader:
+        sampler = None
+        if self.sampler != "none":
+            labels = np.array([it[1] for it in self._train_ds.expanded])
+            counts = np.bincount(labels, minlength=int(labels.max()) + 1).astype(np.float64)
+            class_w = 1.0 / np.maximum(counts, 1)
+            if self.sampler == "sqrt_balanced":
+                class_w = np.sqrt(class_w)
+            sampler = WeightedRandomSampler(
+                torch.as_tensor(class_w[labels], dtype=torch.double),
+                num_samples=len(labels), replacement=True,
+            )
+            logger.info(f"Train sampler: {self.sampler} over {len(counts)} classes")
         return DataLoader(
-            self._train_ds, batch_size=self.batch_size, shuffle=True,
+            self._train_ds, batch_size=self.batch_size,
+            shuffle=sampler is None, sampler=sampler,
             num_workers=self.num_workers, collate_fn=self._train_collate, drop_last=True,
         )
 

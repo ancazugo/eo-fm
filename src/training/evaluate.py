@@ -88,6 +88,36 @@ def save_confusion_matrix(
     return cm_path
 
 
+@torch.no_grad()
+def predict_probs(
+    model: torch.nn.Module,
+    loader,
+    device: torch.device,
+    tta: bool = False,
+) -> np.ndarray:
+    """Run classification inference and return (N, num_classes) softmax probs.
+
+    With ``tta``, logits are averaged over the dihedral group (4 rotations ×
+    {id, hflip}) before the softmax — the same scheme _evaluate uses.
+    Batches must carry an "image" key; order follows the loader.
+    """
+    model.eval()
+    out = []
+    for batch in loader:
+        imgs = batch["image"].to(device).float()
+        if tta:
+            logits = None
+            for k in range(4):
+                r = torch.rot90(imgs, k, dims=(-2, -1)) if k else imgs
+                o = model(r) + model(r.flip(-1))
+                logits = o if logits is None else logits + o
+            logits = logits / 8.0
+        else:
+            logits = model(imgs)
+        out.append(torch.softmax(logits, dim=1).cpu().numpy())
+    return np.concatenate(out, axis=0)
+
+
 def _make_metrics(num_classes: int, device: torch.device, with_miou: bool) -> dict:
     metric_kw = dict(task="multiclass", num_classes=num_classes, ignore_index=-1)
     f1_kw = dict(num_classes=num_classes, ignore_index=-1)
@@ -105,6 +135,29 @@ def _make_metrics(num_classes: int, device: torch.device, with_miou: bool) -> di
     return metrics
 
 
+def _mode_pool(x: torch.Tensor, factor: int, num_classes: int) -> torch.Tensor:
+    """Majority-pool a (B, H, W) long label tensor by ``factor``, ignoring -1.
+
+    Trailing rows/cols that don't fill a block are dropped; blocks with no
+    valid pixel become -1.
+    """
+    B, H, W = x.shape
+    Hc, Wc = (H // factor) * factor, (W // factor) * factor
+    if Hc == 0 or Wc == 0:
+        return torch.full((B, 0, 0), -1, dtype=x.dtype, device=x.device)
+    blocks = (
+        x[:, :Hc, :Wc]
+        .reshape(B, Hc // factor, factor, Wc // factor, factor)
+        .permute(0, 1, 3, 2, 4)
+        .reshape(B, Hc // factor, Wc // factor, factor * factor)
+    )
+    # Shift -1 → channel 0 so one_hot is valid, then count per class
+    counts = torch.nn.functional.one_hot(blocks + 1, num_classes + 1).sum(dim=-2)
+    pooled = counts[..., 1:].argmax(dim=-1)
+    pooled[counts[..., 1:].sum(dim=-1) == 0] = -1
+    return pooled
+
+
 def _evaluate(
     task,
     test_loader,
@@ -117,8 +170,16 @@ def _evaluate(
     target_key: str,
     segmentation: bool,
     tta: bool = False,
+    coarse_factor: int | None = None,
+    coarse_label: str = "100m",
 ) -> dict[str, float] | None:
-    """Shared evaluation core. Returns the metrics dict or None if no batches."""
+    """Shared evaluation core. Returns the metrics dict or None if no batches.
+
+    coarse_factor (segmentation only): additionally majority-pool predictions
+    and labels by this factor and report the metric suite at that scale under
+    ``test_*_{coarse_label}`` keys — LCZ is a ~100 m concept, so 10× pooling of
+    10 m pixels gives the definition-scale numbers.
+    """
     import wandb
 
     task.eval()
@@ -136,6 +197,11 @@ def _evaluate(
         return logits / 8.0
 
     metrics = _make_metrics(num_classes, device, with_miou=segmentation)
+    coarse_metrics = (
+        _make_metrics(num_classes, device, with_miou=True)
+        if segmentation and coarse_factor else None
+    )
+    n_coarse_batches = 0
     test_loss_total = 0.0
     n_test_batches = 0
     all_preds: list[np.ndarray] = []
@@ -155,6 +221,13 @@ def _evaluate(
             preds = logits.argmax(dim=1)
             for m in metrics.values():
                 m(preds, labels)
+            if coarse_metrics is not None:
+                preds_c = _mode_pool(preds, coarse_factor, num_classes)
+                labels_c = _mode_pool(labels, coarse_factor, num_classes)
+                if (labels_c != -1).any():
+                    for m in coarse_metrics.values():
+                        m(preds_c, labels_c)
+                    n_coarse_batches += 1
             test_loss_total += loss.item()
             n_test_batches += 1
             valid = labels != -1
@@ -175,6 +248,21 @@ def _evaluate(
     }
     if segmentation:
         results["test_miou"] = metrics["miou"].compute().item()
+    if coarse_metrics is not None and n_coarse_batches > 0:
+        results.update({
+            f"test_acc_{coarse_label}":       coarse_metrics["acc"].compute().item(),
+            f"test_acc_macro_{coarse_label}": coarse_metrics["acc_macro"].compute().item(),
+            f"test_f1_{coarse_label}":        coarse_metrics["f1"].compute().item(),
+            f"test_kappa_{coarse_label}":     coarse_metrics["kappa"].compute().item(),
+            f"test_miou_{coarse_label}":      coarse_metrics["miou"].compute().item(),
+        })
+        logger.info(
+            f"Test @{coarse_label} (mode-pooled ×{coarse_factor}) — "
+            f"OA: {results[f'test_acc_{coarse_label}']:.4f}"
+            f"  mIoU: {results[f'test_miou_{coarse_label}']:.4f}"
+            f"  F1_macro: {results[f'test_f1_{coarse_label}']:.4f}"
+            f"  Kappa: {results[f'test_kappa_{coarse_label}']:.4f}"
+        )
     per_cls_acc = metrics["acc_per_class"].compute().cpu().numpy()
     per_cls_f1 = metrics["f1_per_class"].compute().cpu().numpy()
 
@@ -239,9 +327,17 @@ def evaluate_segmentation(
     run_dir: Path,
     run_label: str,
     use_wandb: bool,
+    coarse_factor: int | None = 10,
+    coarse_label: str = "100m",
 ) -> dict[str, float] | None:
-    """Segmentation test evaluation (batch key: "mask", per-pixel metrics)."""
+    """Segmentation test evaluation (batch key: "mask", per-pixel metrics).
+
+    Also reports the metric suite majority-pooled by ``coarse_factor``
+    (default 10 → 100 m at 10 m/px, the scale LCZ is defined at) as
+    ``test_*_{coarse_label}``. Pass ``coarse_factor=None`` to disable.
+    """
     return _evaluate(
         task, test_loader, device, num_classes, run_dir, run_label, use_wandb,
         target_key="mask", segmentation=True,
+        coarse_factor=coarse_factor, coarse_label=coarse_label,
     )

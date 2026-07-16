@@ -85,8 +85,13 @@ def build_city_tile_items(
     year: str,
     label_source: str,
     label_col: str,
+    label_tif_dir: Path | None = None,
 ) -> tuple[list, dict]:
     """Scan npy files for one city and build per-tile item tuples.
+
+    label_tif_dir: with label_source="tif", read the label raster from
+        {label_tif_dir}/pseudo_seg_{city}.tif instead of the So2Sat
+        patches_reference_{city}.tif (dense pseudo-label distillation).
 
     Returns:
         items: list of (npy_path, tile_geom, tile_crs, polys_or_none, tif_path_or_none)
@@ -96,7 +101,10 @@ def build_city_tile_items(
     emb_base = city_dir / output_name / year
     grid_gpkg = city_dir / f"{city}_grid.gpkg"
     split_gpkg = city_dir / f"patches_reference_{city}_split.gpkg"
-    tif_path = city_dir / f"patches_reference_{city}.tif"
+    if label_source == "tif" and label_tif_dir is not None:
+        tif_path = label_tif_dir / f"pseudo_seg_{city}.tif"
+    else:
+        tif_path = city_dir / f"patches_reference_{city}.tif"
 
     if not grid_gpkg.exists():
         logger.warning(f"  {city}: {grid_gpkg.name} missing — skipping")
@@ -162,6 +170,11 @@ class GridSegDataset(Dataset):
 
     Returns {"image": (C, H, W) float32, "mask": (H, W) long}
     Label convention: raw 1-17 → 0-16, raw 0 → -1 (ignore_index=-1).
+
+    Fusion: when an item's npy_path is a tuple (one npy per embedding source,
+    same grid cell), the sources are loaded, resized to source 0's grid if
+    off-by-a-pixel, and concatenated along channels. ``dequantize_fn`` applies
+    to source 0 only.
     """
 
     def __init__(
@@ -177,12 +190,28 @@ class GridSegDataset(Dataset):
     def __len__(self) -> int:
         return len(self.items)
 
+    def _load(self, path: Path, dequantize: bool) -> np.ndarray:
+        arr = np.load(path).astype(np.float32)   # (C, H, W)
+        if dequantize and self.dequantize_fn is not None:
+            arr = self.dequantize_fn(arr)
+        return arr
+
     def __getitem__(self, idx: int) -> dict:
         npy_path, tile_geom, tile_crs, polys, tif_ref = self.items[idx]
 
-        arr = np.load(npy_path).astype(np.float32)   # (C, H, W)
-        if self.dequantize_fn is not None:
-            arr = self.dequantize_fn(arr)
+        if isinstance(npy_path, tuple):
+            arrs = [self._load(p, dequantize=(i == 0))
+                    for i, p in enumerate(npy_path)]
+            base_hw = arrs[0].shape[1:]
+            for i in range(1, len(arrs)):
+                if arrs[i].shape[1:] != base_hw:
+                    arrs[i] = F.interpolate(
+                        torch.from_numpy(arrs[i]).unsqueeze(0),
+                        size=base_hw, mode="nearest",
+                    ).squeeze(0).numpy()
+            arr = np.concatenate(arrs, axis=0)
+        else:
+            arr = self._load(npy_path, dequantize=True)
         _, H, W = arr.shape
         image = torch.from_numpy(arr)
 
@@ -200,16 +229,31 @@ class GridSegDataset(Dataset):
 # ── DataModule ────────────────────────────────────────────────────────────────
 
 class GridSegDataModule:
-    """Minimal DataModule for run_training_loop compatibility."""
+    """Minimal DataModule for run_training_loop compatibility.
+
+    eval_items/eval_label_source: optional separate item list + label source
+    for the val/test splits — used when training on dense pseudo-label rasters
+    so that early stopping and test metrics run against the ground-truth gpkg
+    labels instead of the pseudo labels.
+
+    aux_dropout_p/aux_channel_start: with fused (multi-source) items, zero out
+    channels >= aux_channel_start for a random aux_dropout_p fraction of the
+    TRAIN samples per batch — keeps the model functional without the aux
+    modality and damps OSM-completeness identity learning.
+    """
 
     def __init__(
         self,
         all_items: list,
-        split_map: dict,       # {npy_path: split}
+        split_map: dict,       # {npy_path: split} (source-0 path for fused items)
         label_source: str,
         batch_size: int,
         num_workers: int,
         dequantize_fn=None,
+        eval_items: list | None = None,
+        eval_label_source: str | None = None,
+        aux_dropout_p: float = 0.0,
+        aux_channel_start: int | None = None,
     ) -> None:
         self.all_items = all_items
         self.split_map = split_map
@@ -217,17 +261,26 @@ class GridSegDataModule:
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.dequantize_fn = dequantize_fn
+        self.eval_items = eval_items
+        self.eval_label_source = eval_label_source
+        self.aux_dropout_p = aux_dropout_p
+        self.aux_channel_start = aux_channel_start
 
     def setup(self) -> None:
-        def _for_split(s):
-            return [it for it in self.all_items if self.split_map.get(it[0]) == s]
+        def _key(it):
+            return it[0][0] if isinstance(it[0], tuple) else it[0]
 
-        self._train_ds = GridSegDataset(_for_split("train"), self.label_source, self.dequantize_fn)
-        self._val_ds   = GridSegDataset(_for_split("val"),   self.label_source, self.dequantize_fn)
-        self._test_ds  = GridSegDataset(_for_split("test"),  self.label_source, self.dequantize_fn)
+        def _for_split(items, s):
+            return [it for it in items if self.split_map.get(_key(it)) == s]
+
+        eval_items = self.eval_items if self.eval_items is not None else self.all_items
+        eval_source = self.eval_label_source or self.label_source
+        self._train_ds = GridSegDataset(_for_split(self.all_items, "train"), self.label_source, self.dequantize_fn)
+        self._val_ds   = GridSegDataset(_for_split(eval_items, "val"),  eval_source, self.dequantize_fn)
+        self._test_ds  = GridSegDataset(_for_split(eval_items, "test"), eval_source, self.dequantize_fn)
         logger.info(
-            f"Dataset sizes — train: {len(self._train_ds)}, "
-            f"val: {len(self._val_ds)}, test: {len(self._test_ds)}"
+            f"Dataset sizes — train: {len(self._train_ds)} ({self.label_source}), "
+            f"val: {len(self._val_ds)}, test: {len(self._test_ds)} ({eval_source})"
         )
 
     @staticmethod
@@ -260,10 +313,12 @@ class GridSegDataModule:
         images, masks = GridSegDataModule._pad_batch(batch)
         return {"image": images, "mask": masks}
 
-    @staticmethod
-    def _train_collate(batch: list) -> dict:
+    def _train_collate(self, batch: list) -> dict:
         images, masks = GridSegDataModule._pad_batch(batch)
         images, masks = augment_batch(images, masks)
+        if self.aux_dropout_p > 0 and self.aux_channel_start is not None:
+            drop = torch.rand(images.shape[0]) < self.aux_dropout_p
+            images[drop, self.aux_channel_start:] = 0.0
         return {"image": images, "mask": masks}
 
     def train_dataloader(self) -> DataLoader:

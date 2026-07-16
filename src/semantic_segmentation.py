@@ -72,6 +72,24 @@ from utils.runtime import (
 )
 
 
+def _fuse_items(items: list, output_names: list[str], year: str) -> tuple[list, int]:
+    """Turn item npy_paths into per-source tuples by swapping the output-name
+    path component ({city}/{name}/{year}/{split}/{file}). Items missing the
+    npy in any extra source are dropped. Returns (fused_items, n_dropped)."""
+    fused, dropped = [], 0
+    for it in items:
+        p0 = it[0]
+        paths = [p0] + [
+            p0.parents[3] / name / year / p0.parents[0].name / p0.name
+            for name in output_names[1:]
+        ]
+        if all(p.exists() for p in paths[1:]):
+            fused.append((tuple(paths), *it[1:]))
+        else:
+            dropped += 1
+    return fused, dropped
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Train a segmentation model on grid tile embeddings."
@@ -83,13 +101,25 @@ def main() -> None:
                    help="Root directory with one subfolder per city.")
     g.add_argument("--cities", nargs="+", default=None,
                    help="City names to include (default: all with grid GDF).")
-    g.add_argument("--output-name", required=True,
-                   help="Embedding folder name inside each city dir (e.g. AlphaEarth).")
+    g.add_argument("--output-name", required=True, nargs="+",
+                   help="Embedding folder name(s) inside each city dir (e.g. AlphaEarth). "
+                        "Multiple names = channel fusion: per grid cell the sources' npys "
+                        "are concatenated along channels (source 0 defines the grid; "
+                        "cells missing in any source are dropped).")
+    g.add_argument("--aux-channel-dropout", type=float, default=None,
+                   help="With fused sources: per-sample probability of zeroing all "
+                        "non-source-0 channels during training (default 0.3 when fused; "
+                        "guards against OSM-completeness identity learning).")
     g.add_argument("--year", required=True,
                    help="Year subfolder (e.g. 2017).")
     g.add_argument("--label-source", choices=["gpkg", "tif"], default="gpkg",
                    help="Label source: 'gpkg' (rasterise polygon GeoPackage) or "
                         "'tif' (clip raster TIF). Default: gpkg.")
+    g.add_argument("--label-tif-dir", type=Path, default=None,
+                   help="Train on dense pseudo-label rasters "
+                        "({dir}/pseudo_seg_{city}.tif from generate_seg_pseudo_rasters.py). "
+                        "Implies --label-source tif for the train split; val/test labels "
+                        "always come from the ground-truth gpkg.")
     g.add_argument("--label-col", default="LCZ_class",
                    help="Column name in the GeoPackage for LCZ class (default: LCZ_class).")
 
@@ -172,25 +202,54 @@ def main() -> None:
             raise SystemExit(1)
 
     # ── Build item lists ──────────────────────────────────────────────────────
+    if args.label_tif_dir is not None:
+        args.label_source = "tif"   # pseudo rasters are tifs
+
     all_items: list = []
     split_map: dict = {}
+    eval_items: list | None = [] if args.label_tif_dir is not None else None
     for city_dir in city_dirs:
         items, sm = build_city_tile_items(
-            city_dir, args.output_name, args.year,
+            city_dir, args.output_name[0], args.year,
             args.label_source, args.label_col,
+            label_tif_dir=args.label_tif_dir,
         )
         all_items.extend(items)
         split_map.update(sm)
+        if eval_items is not None:
+            # val/test evaluated against ground-truth gpkg labels, not pseudo
+            gt_items, _ = build_city_tile_items(
+                city_dir, args.output_name[0], args.year, "gpkg", args.label_col,
+            )
+            eval_items.extend(gt_items)
 
     if not all_items:
         logger.error("No items found. Check --cities-dir, --output-name, --year.")
         raise SystemExit(1)
+
+    fused = len(args.output_name) > 1
+    if fused:
+        all_items, n_drop = _fuse_items(all_items, args.output_name, args.year)
+        logger.info(f"Fusion {' + '.join(args.output_name)}: "
+                    f"{len(all_items)} tiles ({n_drop} dropped, missing a source)")
+        if eval_items is not None:
+            eval_items, _ = _fuse_items(eval_items, args.output_name, args.year)
     logger.info(f"Total tiles: {len(all_items)}")
 
     dequantize_fn, in_channels_override = resolve_dequantize(
         args.embedding_name, force=args.dequantize
     )
-    in_channels = detect_in_channels(all_items[0][0], in_channels_override)
+    first = all_items[0][0]
+    if fused:
+        base_channels = detect_in_channels(first[0], in_channels_override)
+        in_channels = base_channels + sum(detect_in_channels(p) for p in first[1:])
+        aux_dropout = 0.3 if args.aux_channel_dropout is None else args.aux_channel_dropout
+        logger.info(f"Fused in_channels = {in_channels} "
+                    f"(aux dropout {aux_dropout} on channels {base_channels}:)")
+    else:
+        base_channels = None
+        aux_dropout = 0.0
+        in_channels = detect_in_channels(first, in_channels_override)
 
     # ── Model ─────────────────────────────────────────────────────────────────
     arch = resolve_arch(args.family, args.preset)
@@ -213,16 +272,22 @@ def main() -> None:
         all_items, split_map, args.label_source,
         args.batch_size, args.num_workers,
         dequantize_fn=dequantize_fn,
+        eval_items=eval_items,
+        eval_label_source="gpkg" if eval_items is not None else None,
+        aux_dropout_p=aux_dropout,
+        aux_channel_start=base_channels,
     )
 
     # ── WandB ─────────────────────────────────────────────────────────────────
     city_names = [d.name for d in city_dirs]
     run_cfg = dict(
         task="segmentation",
-        embedding=args.output_name,
+        embedding="+".join(args.output_name),
         cities=city_names,
         year=args.year,
         label_source=args.label_source,
+        label_tif_dir=str(args.label_tif_dir) if args.label_tif_dir else None,
+        aux_channel_dropout=aux_dropout,
         family=args.family,
         preset=args.preset,
         in_channels=in_channels,
@@ -245,7 +310,7 @@ def main() -> None:
         wandb_entity=args.wandb_entity,
         no_wandb=args.no_wandb,
     )
-    model_name = f"{args.family}_{args.preset}_{args.output_name}_{_run_label}"
+    model_name = f"{args.family}_{args.preset}_{'+'.join(args.output_name)}_{_run_label}"
 
     # ── Train (or load checkpoint) ────────────────────────────────────────────
     if args.checkpoint is not None:
@@ -277,6 +342,11 @@ def main() -> None:
         wandb.finish()
 
     # ── Per-city inference raster + map ───────────────────────────────────────
+    if fused:
+        logger.warning("Fused multi-source model: full-ROI inference from raw "
+                       "tiles is not supported yet — skipping city maps.")
+        logger.info(f"Run complete. Outputs in {run_dir}")
+        return
     logger.info("Running full-ROI inference …")
     run_city_inference(
         task.model, args.family, "segmentation", args.preset,

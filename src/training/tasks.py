@@ -43,6 +43,11 @@ class LCZResNetModule(nn.Module):
         mixup_alpha: Beta(alpha, alpha) mixup on training batches (0 = off).
         monitor: Validation metric for checkpointing/early stopping
             ("val_f1" or "val_kappa").
+        logit_adjustment_tau: Logit-adjusted CE (Menon et al. 2021): the
+            training loss sees logits + tau*log(prior); val/test use raw
+            logits, which shifts decisions toward rare classes (0 = off).
+        class_priors: (num_classes,) train-frequency priors; required when
+            logit_adjustment_tau > 0.
     """
 
     def __init__(
@@ -56,6 +61,8 @@ class LCZResNetModule(nn.Module):
         label_smoothing: float = 0.0,
         mixup_alpha: float = 0.0,
         monitor: str = "val_f1",
+        logit_adjustment_tau: float = 0.0,
+        class_priors: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.model = model
@@ -65,9 +72,28 @@ class LCZResNetModule(nn.Module):
         self.max_epochs = max_epochs
         self.mixup_alpha = mixup_alpha
         self.monitor = monitor
+        self.logit_adjustment_tau = logit_adjustment_tau
+        if logit_adjustment_tau > 0:
+            if class_priors is None:
+                raise ValueError("logit_adjustment_tau > 0 requires class_priors")
+            self.register_buffer(
+                "log_prior", torch.log(class_priors.clamp_min(1e-12))
+            )
 
         self.ce_loss = nn.CrossEntropyLoss(
             ignore_index=-1, weight=class_weights, label_smoothing=label_smoothing
+        )
+        # Per-sample variant for weighted (pseudo-labeled) batches. Normalizing
+        # by Σ sample_w · class_w[target] makes an all-weights-1 batch match
+        # ce_loss's "mean" reduction exactly.
+        self.ce_loss_none = nn.CrossEntropyLoss(
+            ignore_index=-1, weight=class_weights,
+            label_smoothing=label_smoothing, reduction="none",
+        )
+        self.register_buffer(
+            "_ce_class_w",
+            class_weights.clone() if class_weights is not None
+            else torch.ones(num_classes),
         )
 
         metric_kw = dict(task="multiclass", num_classes=num_classes, ignore_index=-1)
@@ -93,6 +119,25 @@ class LCZResNetModule(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x.float())
 
+    def _adjust_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        """Train-time logit adjustment; identity when disabled."""
+        if self.logit_adjustment_tau > 0:
+            return logits + self.logit_adjustment_tau * self.log_prior
+        return logits
+
+    def _weighted_ce(
+        self, logits: torch.Tensor, labels: torch.Tensor, sample_w: torch.Tensor
+    ) -> torch.Tensor:
+        """Per-sample weighted CE (ignore_index=-1 samples contribute nothing)."""
+        per_sample = self.ce_loss_none(logits, labels)   # includes class weight
+        valid = labels != -1
+        cw = torch.where(
+            valid, self._ce_class_w[labels.clamp_min(0)],
+            torch.zeros_like(sample_w),
+        )
+        denom = (sample_w * cw).sum().clamp_min(1e-8)
+        return (sample_w * per_sample).sum() / denom
+
     # ── Loop interface ────────────────────────────────────────────────────────
 
     def reset_train_metrics(self) -> None:
@@ -107,18 +152,30 @@ class LCZResNetModule(nn.Module):
         for skipped batches (all-nodata labels or NaN loss)."""
         images = batch["image"].to(device).float()
         labels = batch["label"].to(device)
+        sample_w = batch.get("weight")
+        if sample_w is not None:
+            sample_w = sample_w.to(device).float()
         if (labels != -1).sum() == 0:
             return None
+
+        def _ce(logits: torch.Tensor, targets: torch.Tensor,
+                w: torch.Tensor | None) -> torch.Tensor:
+            if w is None:
+                return self.ce_loss(logits, targets)
+            return self._weighted_ce(logits, targets, w)
+
         if self.mixup_alpha > 0 and self.training:
             lam = float(torch.distributions.Beta(
                 self.mixup_alpha, self.mixup_alpha).sample())
             perm = torch.randperm(images.size(0), device=device)
             logits = self.model(lam * images + (1 - lam) * images[perm])
-            loss = lam * self.ce_loss(logits, labels) + \
-                (1 - lam) * self.ce_loss(logits, labels[perm])
+            loss_logits = self._adjust_logits(logits)
+            loss = lam * _ce(loss_logits, labels, sample_w) + \
+                (1 - lam) * _ce(loss_logits, labels[perm],
+                                sample_w[perm] if sample_w is not None else None)
         else:
             logits = self.model(images)
-            loss = self.ce_loss(logits, labels)
+            loss = _ce(self._adjust_logits(logits), labels, sample_w)
         if torch.isnan(loss):
             return None
         # Train metrics are computed against the dominant (unpermuted) labels;
