@@ -16,7 +16,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import geopandas as gpd
 import pandas as pd
 from loguru import logger
 from shapely.geometry import box
@@ -25,10 +24,10 @@ from shapely.strtree import STRtree
 sys.path.insert(0, str(Path(__file__).parent))
 
 from datasets.downloaders import download_alpha_earth_coop_tiles
+from datasets.tiles import coop_wgs84_boxes, load_coop_index
 from utils.paths import INPUT_DIR
 
 COOP_DIR = INPUT_DIR / "Google" / "AlphaEarth" / "coop"
-_S3_PREFIX = "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/"
 
 
 def main() -> None:
@@ -50,24 +49,17 @@ def main() -> None:
         raise SystemExit(f"SMOD_IDs not found in {args.bounds_csv}: {sorted(missing_ids)}")
     logger.info(f"{len(sel)} cities: {', '.join(sel['JRC_NAME_MAIN'])}")
 
-    index_path = COOP_DIR / "aef_index.gpkg"
-    logger.info(f"Loading COOP tile index from {index_path} (year={args.year}) …")
-    coop_idx = gpd.read_file(index_path, where=f"year = {args.year}")
+    logger.info(f"Loading COOP tile index from {COOP_DIR} (year={args.year}) …")
+    coop_idx = load_coop_index(COOP_DIR, args.year)
     logger.info(f"  {len(coop_idx)} tiles in index")
-
-    geoms = [
-        box(r.wgs84_west, r.wgs84_south, r.wgs84_east, r.wgs84_north)
-        for _, r in coop_idx.iterrows()
-    ]
-    tree = STRtree(geoms)
+    tree = STRtree(coop_wgs84_boxes(coop_idx))
 
     needed: set[str] = set()
     for city in sel.itertuples(index=False):
         city_needed, city_have = set(), 0
         for i in tree.query(box(city.minx, city.miny, city.maxx, city.maxy)):
             tile_row = coop_idx.iloc[i]
-            local = COOP_DIR / tile_row["path"].removeprefix(_S3_PREFIX)
-            if local.exists():
+            if tile_row["is_local"]:
                 city_have += 1
             else:
                 city_needed.add(tile_row["path"])

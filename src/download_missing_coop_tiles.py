@@ -16,7 +16,6 @@ from pathlib import Path
 
 import geopandas as gpd
 from loguru import logger
-from shapely.geometry import box
 from shapely.strtree import STRtree
 from tqdm import tqdm
 
@@ -24,11 +23,11 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent))
 
 from datasets.downloaders import download_alpha_earth_coop_tiles
+from datasets.tiles import coop_wgs84_boxes, load_coop_index
 from utils.paths import INPUT_DIR
 
 SO2SAT_DIR = INPUT_DIR / "So2Sat-LCZ42" / "v4"
 COOP_DIR = INPUT_DIR / "Google" / "AlphaEarth" / "coop"
-_S3_PREFIX = "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/"
 
 
 def main() -> None:
@@ -57,24 +56,17 @@ def main() -> None:
         return
 
     # 3. Build COOP tile spatial index
-    index_path = COOP_DIR / "aef_index.gpkg"
-    logger.info(f"Loading COOP tile index from {index_path} (year={args.year}) …")
-    coop_idx = gpd.read_file(index_path, where=f"year = {args.year}")
+    logger.info(f"Loading COOP tile index from {COOP_DIR} (year={args.year}) …")
+    coop_idx = load_coop_index(COOP_DIR, args.year)
     logger.info(f"  {len(coop_idx)} tiles in index")
-
-    geoms = [
-        box(r.wgs84_west, r.wgs84_south, r.wgs84_east, r.wgs84_north)
-        for _, r in coop_idx.iterrows()
-    ]
-    tree = STRtree(geoms)
+    tree = STRtree(coop_wgs84_boxes(coop_idx))
 
     # 4. Collect S3 paths of tiles that cover missing patches but aren't local
     needed: set[str] = set()
     for row in tqdm(missing.itertuples(index=False), total=len(missing), desc="scanning tiles"):
         for i in tree.query(row.geometry):
             tile_row = coop_idx.iloc[i]
-            local = COOP_DIR / tile_row["path"].removeprefix(_S3_PREFIX)
-            if not local.exists():
+            if not tile_row["is_local"]:
                 needed.add(tile_row["path"])
 
     logger.info(f"  {len(needed)} unique tiles to download")

@@ -23,6 +23,48 @@ from shapely.strtree import STRtree
 # Tile index
 # ---------------------------------------------------------------------------
 
+def load_coop_index(coop_dir: Path, year: str | int | None = None):
+    """Load ``aef_index.gpkg`` from a coop root directory.
+
+    Single source of truth for coop tile metadata (also used by the coop
+    download scripts). Returns the index GeoDataFrame filtered to *year*
+    (if given), with two derived columns:
+
+        local_path  Path — where the tile lives under *coop_dir*
+                    (the S3 ``path`` column with the prefix stripped)
+        is_local    bool — whether that file exists
+
+    Use ``coop_wgs84_boxes`` to build shapely boxes over the reported
+    valid bounds (``wgs84_*`` columns) for STRtree queries.
+    """
+    import geopandas as gpd
+    from datasets.downloaders import COOP_S3_PREFIX
+
+    index_path = Path(coop_dir) / "aef_index.gpkg"
+    if not index_path.exists():
+        raise FileNotFoundError(
+            f"aef_index.gpkg not found at {index_path}. "
+            "Pass the coop root directory (containing aef_index.gpkg)."
+        )
+    read_kwargs: dict = {}
+    if year is not None:
+        read_kwargs["where"] = f"year = {int(year)}"
+    gdf = gpd.read_file(index_path, **read_kwargs)
+    gdf["local_path"] = [
+        Path(coop_dir) / p.removeprefix(COOP_S3_PREFIX) for p in gdf["path"]
+    ]
+    gdf["is_local"] = [p.exists() for p in gdf["local_path"]]
+    return gdf
+
+
+def coop_wgs84_boxes(coop_index) -> list:
+    """Shapely boxes over a coop index's reported WGS84 valid bounds."""
+    return [
+        box(r.wgs84_west, r.wgs84_south, r.wgs84_east, r.wgs84_north)
+        for r in coop_index.itertuples(index=False)
+    ]
+
+
 @functools.lru_cache(maxsize=4)
 def build_tile_index(
     embedding_dir: Path,
@@ -42,38 +84,15 @@ def build_tile_index(
 
     # ── coop: spatial index from aef_index.gpkg ──────────────────────────────
     if embedding_name == "alpha_earth_coop":
-        import geopandas as gpd
-
-        index_path = embedding_dir / "aef_index.gpkg"
-        if not index_path.exists():
-            raise FileNotFoundError(
-                f"aef_index.gpkg not found at {index_path}. "
-                "Pass the coop root directory (containing aef_index.gpkg) as --embedding-dir."
-            )
-        read_kwargs: dict = {}
-        if year is not None:
-            read_kwargs["where"] = f"year = {int(year)}"
-        gdf = gpd.read_file(index_path, **read_kwargs)
-
-        _s3_prefix = "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/"
-        paths: list[Path] = []
-        geoms = []
-        for _, row in gdf.iterrows():
-            local = embedding_dir / row["path"].removeprefix(_s3_prefix)
-            if not local.exists():
-                continue
-            geoms.append(box(
-                row["wgs84_west"], row["wgs84_south"],
-                row["wgs84_east"], row["wgs84_north"],
-            ))
-            paths.append(local)
-
-        if not paths:
+        gdf = load_coop_index(embedding_dir, year)
+        local = gdf[gdf["is_local"]]
+        if local.empty:
             raise FileNotFoundError(
                 f"No local coop tiles found under {embedding_dir} for year={year}."
             )
-        logger.info(f"Tile index (coop): {len(paths)} local tiles from {index_path}")
-        return paths, STRtree(geoms)
+        paths = list(local["local_path"])
+        logger.info(f"Tile index (coop): {len(paths)} local tiles from {embedding_dir}")
+        return paths, STRtree(coop_wgs84_boxes(local))
 
     # ── tessera v1.1: spatial index from geoinfo tiffs ───────────────────────
     if embedding_name == "tesserav1.1":
@@ -210,12 +229,7 @@ def build_coop_valid_bbox_map(
     discards the contaminated overhang region so adjacent-zone tiles never
     overwrite clean predictions across the boundary.
     """
-    import geopandas as gpd
-
-    idx = gpd.read_file(
-        embedding_dir / "aef_index.gpkg",
-        where=f"year = {int(year)}" if year else "",
-    )
+    idx = load_coop_index(embedding_dir, year)
     name_to_bounds: dict[str, tuple] = {
         Path(r["path"]).name: (
             r["wgs84_west"], r["wgs84_south"],

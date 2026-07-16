@@ -10,7 +10,11 @@ import rioxarray
 import xarray as xr
 from loguru import logger
 
-_COOP_S3_PREFIX = "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/"
+# Single source of truth for the coop S3 prefix — import it rather than
+# re-declaring the literal (tiles.load_coop_index and the download scripts
+# all resolve local paths by stripping this prefix from aef_index 'path').
+COOP_S3_PREFIX = "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/"
+COOP_HTTPS_PREFIX = "https://data.source.coop/tge-labs/aef/v1/annual/"
 
 
 def _stream_download(url: str, dest: Path, retries: int = 5) -> None:
@@ -45,68 +49,81 @@ def _stream_download(url: str, dest: Path, retries: int = 5) -> None:
     raise last_exc
 
 
-def _coop_s3_to_https(s3_path: str) -> str:
-    return s3_path.replace(
-        "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/",
-        "https://data.source.coop/tge-labs/aef/v1/annual/",
-    )
+def _download_coop_pair(
+    s3_path: str,
+    output_dir: Path,
+    overwrite: bool = False,
+) -> tuple[int, int]:
+    """Download one coop tile's ``.tiff`` + ``.vrt`` pair.
+
+    Shared worker behind both public coop download entry points, so the
+    semantics are identical everywhere: existing files are skipped unless
+    *overwrite*, a 404 counts as a skip (some tiles have no .vrt), and any
+    other error propagates to the caller.
+
+    Returns ``(n_downloaded, n_skipped)``.
+    """
+    import requests
+
+    https_url = s3_path.replace(COOP_S3_PREFIX, COOP_HTTPS_PREFIX)
+    tiff_dest = output_dir / s3_path.removeprefix(COOP_S3_PREFIX)
+    pairs = [
+        (https_url, tiff_dest),
+        (https_url.rsplit(".", 1)[0] + ".vrt", tiff_dest.with_suffix(".vrt")),
+    ]
+    downloaded = skipped = 0
+    for url, dest in pairs:
+        if dest.exists() and not overwrite:
+            skipped += 1
+            continue
+        try:
+            _stream_download(url, dest)
+            downloaded += 1
+            logger.debug(f"Downloaded {dest.name}")
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                logger.debug(f"Not found (skipping): {url}")
+                skipped += 1
+            else:
+                raise
+    return downloaded, skipped
 
 
 def download_alpha_earth_coop_tiles(
     s3_paths: list[str],
     output_dir: str | Path,
     workers: int = 8,
+    overwrite: bool = False,
 ) -> tuple[int, int]:
-    """Download specific COOP tiles by S3 path, skipping already-present files.
+    """Download specific COOP tiles by S3 path.
 
     Path-list driven counterpart of ``download_alpha_earth_coop`` (bbox+index
-    driven). Behavioural differences to keep in mind: this variant counts 404s
-    as skips (not errors) and has no ``overwrite`` flag.
+    driven); both delegate to the same per-tile worker, so skip/404/error
+    semantics are identical.
 
     Args:
         s3_paths: S3 paths from ``aef_index.gpkg`` (``path`` column).
         output_dir: Local coop root (the directory that also holds ``aef_index.gpkg``).
         workers: Number of parallel download threads.
+        overwrite: Re-download files that already exist locally.
 
     Returns:
         ``(n_downloaded, n_errors)`` tuple.
     """
-    import requests
-
     output_dir = Path(output_dir)
-
-    def _download_one(s3_path: str) -> tuple[int, int]:
-        """Return (n_downloaded, n_errors) for a single tile's .tiff + .vrt pair."""
-        https_url = _coop_s3_to_https(s3_path)
-        stem = https_url.rsplit(".", 1)[0]
-        tiff_dest = output_dir / s3_path.removeprefix(_COOP_S3_PREFIX)
-        vrt_dest = tiff_dest.with_suffix(".vrt")
-        downloaded = errors = 0
-        for url, dest in [(https_url, tiff_dest), (stem + ".vrt", vrt_dest)]:
-            if dest.exists():
-                continue
-            try:
-                _stream_download(url, dest)
-                downloaded += 1
-                logger.debug(f"Downloaded {dest.name}")
-            except requests.HTTPError as exc:
-                if exc.response is not None and exc.response.status_code == 404:
-                    logger.debug(f"Not found (skipping): {url}")
-                else:
-                    logger.error(f"HTTP error for {url}: {exc}")
-                    errors += 1
-            except Exception as exc:
-                logger.error(f"Failed to download {url}: {exc}")
-                errors += 1
-        return downloaded, errors
-
     total_dl = total_err = 0
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_download_one, p): p for p in s3_paths}
+        futures = {
+            executor.submit(_download_coop_pair, p, output_dir, overwrite): p
+            for p in s3_paths
+        }
         for future in as_completed(futures):
-            dl, err = future.result()
-            total_dl += dl
-            total_err += err
+            try:
+                dl, _ = future.result()
+                total_dl += dl
+            except Exception as exc:
+                logger.error(f"Failed to download {futures[future]}: {exc}")
+                total_err += 1
 
     logger.info(f"Coop tile download: {total_dl} downloaded, {total_err} errors")
     return total_dl, total_err
@@ -126,9 +143,8 @@ def download_alpha_earth_coop(
     then downloads each tile's ``.tiff`` and ``.vrt`` files in parallel from
     the public HTTPS endpoint.  Already-present files are skipped unless
     *overwrite* is set. Bbox+index driven counterpart of
-    ``download_alpha_earth_coop_tiles`` (path-list driven, no overwrite,
-    404s counted as skips); unlike that variant this one re-raises non-404
-    HTTP errors.
+    ``download_alpha_earth_coop_tiles`` (path-list driven); both delegate to
+    the same per-tile worker, so skip/404/error semantics are identical.
 
     Local files are saved at ``output_dir/{year}/{utm_zone}/{filename}`` to
     mirror the S3 directory layout and avoid filename collisions across UTM
@@ -146,7 +162,6 @@ def download_alpha_earth_coop(
     Returns:
         Path to *output_dir*.
     """
-    import requests
     import geopandas as gpd
 
     output_dir = Path(output_dir)
@@ -159,39 +174,12 @@ def download_alpha_earth_coop(
 
     logger.info(f"AlphaEarth coop: {len(gdf)} tiles for year={year}, bbox={bbox}")
 
-    def s3_to_local(s3_path: str) -> Path:
-        return output_dir / s3_path.removeprefix(_COOP_S3_PREFIX)
-
-    def download_tile(s3_path: str) -> tuple[int, int]:
-        """Return (n_downloaded, n_skipped) for one tile's .tiff + .vrt pair."""
-        https_url = _coop_s3_to_https(s3_path)
-        stem = https_url.rsplit(".", 1)[0]
-        pairs = [
-            (https_url, s3_to_local(s3_path)),
-            (stem + ".vrt", s3_to_local(s3_path).with_suffix(".vrt")),
-        ]
-        downloaded = skipped = 0
-        for url, dest in pairs:
-            if dest.exists() and not overwrite:
-                skipped += 1
-                continue
-            try:
-                _stream_download(url, dest)
-                downloaded += 1
-                logger.debug(f"Downloaded {dest.name}")
-            except requests.HTTPError as exc:
-                if exc.response is not None and exc.response.status_code == 404:
-                    logger.debug(f"Not found (skipping): {url}")
-                else:
-                    raise
-        return downloaded, skipped
-
     total_dl = total_skip = 0
     errors: list[str] = []
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(download_tile, row["path"]): row["path"]
+            executor.submit(_download_coop_pair, row["path"], output_dir, overwrite): row["path"]
             for _, row in gdf.iterrows()
         }
         for future in as_completed(futures):
