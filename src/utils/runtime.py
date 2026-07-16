@@ -64,6 +64,12 @@ def resolve_dequantize(
     """
     if not (force or embedding_name in AUTO_DEQUANTIZE):
         return None, None
+    if force and embedding_name not in AUTO_DEQUANTIZE:
+        logger.warning(
+            f"--dequantize forced for '{embedding_name}', which is not a "
+            "quantized source — already-float data (e.g. tesserav1.1) will be "
+            "double-transformed. Drop --dequantize unless you know better."
+        )
     if embedding_name == "seamless":
         from dequantize_embeddings import dequantize_esd
         logger.info("Seamless: dequantize_esd applied (13→72 channels)")
