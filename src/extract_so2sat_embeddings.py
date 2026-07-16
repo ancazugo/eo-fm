@@ -5,9 +5,10 @@ For each patch in patches_reference_rxr.gpkg the script:
   2. Clips the embedding to the patch bounding box.
   3. Saves the result as a float32 .npy file.
 
-Note: unlike infer_roi.py, extraction does NOT clip alpha_earth_coop tiles to
-their valid bbox (aef_index.gpkg wgs84_* bounds), so a patch at a UTM-zone
-boundary can be filled from an adjacent tile's contaminated overhang pixels.
+For alpha_earth_coop, each tile is clipped to its valid bbox (aef_index.gpkg
+wgs84_* bounds) before mosaicking — same as infer_roi — so patches at UTM-zone
+boundaries never contain an adjacent tile's contaminated overhang pixels.
+(Coop patches extracted before 2026-07-16 predate this clip.)
 
 Output layout:
     {so2sat_dir}/{split}/{output_name}/{year}/patch_{patch_id}.npy
@@ -43,10 +44,12 @@ from datasets.tiles import build_tile_index as _build_tile_index, crop_patch as 
 # ---------------------------------------------------------------------------
 
 def _process_patch(args: tuple) -> tuple[str, bool]:
-    patch_id, geom_wkt, patch_crs, tile_paths, output_path, skip_existing, dtype = args
+    (patch_id, geom_wkt, patch_crs, tile_paths, output_path,
+     skip_existing, dtype, valid_bboxes) = args
     from shapely import from_wkt
     patch_geom = from_wkt(geom_wkt)
-    ok = _crop_patch(patch_geom, patch_crs, tile_paths, output_path, skip_existing, dtype)
+    ok = _crop_patch(patch_geom, patch_crs, tile_paths, output_path,
+                     skip_existing, dtype, valid_bboxes=valid_bboxes)
     return patch_id, ok
 
 
@@ -148,6 +151,14 @@ def main() -> None:
 
     # --- Build tile spatial index (once for all splits) ---
     tile_paths, tree = _build_tile_index(args.embedding_dir, args.embedding_name, year=args.year)
+
+    # Coop tiles overshoot their UTM zone; clip each to its reported valid
+    # bbox during extraction (same rule as infer_roi).
+    valid_bbox_map: dict = {}
+    if args.embedding_name == "alpha_earth_coop":
+        from datasets.tiles import build_coop_valid_bbox_map
+        valid_bbox_map = build_coop_valid_bbox_map(args.embedding_dir, args.year, list(tile_paths))
+        logger.info(f"Coop valid-bbox clipping active for {len(valid_bbox_map)} tiles")
     patch_crs = str(all_patches.crs)  # EPSG:4326
 
     # --- Process each split ---
@@ -195,6 +206,7 @@ def main() -> None:
                     output_path,
                     args.skip_existing,
                     args.dtype,
+                    {p: valid_bbox_map[p] for p in matched_paths if p in valid_bbox_map} or None,
                 ))
 
             with ProcessPoolExecutor(max_workers=args.workers) as pool:
@@ -227,7 +239,8 @@ def main() -> None:
                 matched_paths = [tile_paths[i] for i in idxs]
                 output_path = out_dir / f"patch_{row.patch_id}.npy"
                 ok = _crop_patch(patch_geom, patch_crs, matched_paths, output_path,
-                                 args.skip_existing, args.dtype)
+                                 args.skip_existing, args.dtype,
+                                 valid_bboxes=valid_bbox_map or None)
                 if ok:
                     n_saved += 1
                 else:

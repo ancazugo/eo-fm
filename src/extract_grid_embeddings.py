@@ -54,12 +54,15 @@ from datasets.tiles import build_tile_index as _build_tile_index, crop_patch as 
 def _process_tile(args: tuple) -> tuple[str, bool]:
     """Worker: crop one grid tile and save as .npy.
 
-    args = (city, grid_id, geom_wkt, geom_crs, tile_paths, output_path, skip_existing)
+    args = (city, grid_id, geom_wkt, geom_crs, tile_paths, output_path,
+            skip_existing, valid_bboxes)
     """
-    city, grid_id, geom_wkt, geom_crs, tile_paths, output_path, skip_existing = args
+    (city, grid_id, geom_wkt, geom_crs, tile_paths, output_path,
+     skip_existing, valid_bboxes) = args
     from shapely import from_wkt
     geom = from_wkt(geom_wkt)
-    ok = _crop_patch(geom, geom_crs, tile_paths, output_path, skip_existing)
+    ok = _crop_patch(geom, geom_crs, tile_paths, output_path, skip_existing,
+                     valid_bboxes=valid_bboxes)
     label = f"{city}/{grid_id:02d}"
     return label, ok
 
@@ -76,6 +79,7 @@ def _iter_city_tasks(
     year: str,
     only_valid: bool,
     skip_existing: bool,
+    valid_bbox_map: dict | None = None,
 ) -> list[tuple]:
     """Build the list of (args) tuples for all grid tiles in one city."""
     from shapely.strtree import STRtree  # noqa: F401 — ensure import in workers
@@ -119,6 +123,8 @@ def _iter_city_tasks(
             matched,
             out_path,
             skip_existing,
+            ({p: valid_bbox_map[p] for p in matched if p in valid_bbox_map} or None)
+            if valid_bbox_map else None,
         ))
 
     return tasks
@@ -205,6 +211,14 @@ def main() -> None:
     # Build tile spatial index once for all cities
     tile_paths, strtree = _build_tile_index(args.embedding_dir, args.embedding_name, year=args.year)
 
+    # Coop tiles overshoot their UTM zone; clip each to its reported valid
+    # bbox during extraction (same rule as infer_roi).
+    valid_bbox_map: dict = {}
+    if args.embedding_name == "alpha_earth_coop":
+        from datasets.tiles import build_coop_valid_bbox_map
+        valid_bbox_map = build_coop_valid_bbox_map(args.embedding_dir, args.year, list(tile_paths))
+        logger.info(f"Coop valid-bbox clipping active for {len(valid_bbox_map)} tiles")
+
     # Gather all tasks across cities
     logger.info(f"Building task list for {len(city_dirs)} cities …")
     all_tasks: list[tuple] = []
@@ -217,6 +231,7 @@ def main() -> None:
             args.year,
             args.only_valid,
             args.skip_existing,
+            valid_bbox_map or None,
         )
         all_tasks.extend(tasks)
 

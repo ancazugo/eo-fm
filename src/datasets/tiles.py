@@ -428,6 +428,7 @@ def crop_patch(
     output_path: Path,
     skip_existing: bool = False,
     dtype: str = "float32",
+    valid_bboxes: dict[Path, tuple[float, float, float, float]] | None = None,
 ) -> bool:
     """Clip *tile_paths* to *patch_geom*, mosaic if needed, save as .npy
     (``dtype``: float32 default, or float16 to halve disk use).
@@ -437,14 +438,23 @@ def crop_patch(
     Uses a numpy coordinate mosaic instead of rasterio.merge to support
     south-up (AlphaEarth) tiles.
 
+    ``valid_bboxes`` maps a tile path to its reported WGS84 valid bounds
+    (see ``build_coop_valid_bbox_map``): the patch is intersected with them
+    per tile, so coop pixels overshooting the tile's UTM zone never enter
+    the mosaic — matching what infer_roi does at inference time.
+
     Returns True on success, False if the clip yields no data.
     """
     if skip_existing and output_path.exists():
         return True
 
-    tile_crs_str: str | None = None
-    patch_in_tile = patch_geom
+    # Patch geometry in WGS84, for intersecting with the (WGS84) valid bboxes.
+    patch_4326 = patch_geom
+    if valid_bboxes and patch_crs.upper() not in ("EPSG:4326", "OGC:CRS84"):
+        to_4326 = Transformer.from_crs(patch_crs, "EPSG:4326", always_xy=True)
+        patch_4326 = shapely_transform(to_4326.transform, patch_geom)
 
+    to_tile_crs: dict[str, Transformer] = {}
     arrays: list[xr.DataArray] = []
     for path in tile_paths:
         try:
@@ -455,15 +465,28 @@ def crop_patch(
         if da.rio.crs is None:
             continue
 
-        # Compute patch bounds in tile CRS once (all tiles share the same CRS
-        # within a geographic region for a given embedding type).
-        if tile_crs_str is None:
-            tile_crs_str = da.rio.crs.to_string()
-            if tile_crs_str != patch_crs:
-                t = Transformer.from_crs(patch_crs, tile_crs_str, always_xy=True)
-                patch_in_tile = shapely_transform(t.transform, patch_geom)
+        clip_geom = patch_geom
+        vb = (valid_bboxes or {}).get(path)
+        if vb is not None:
+            inter = patch_4326.intersection(box(*vb))
+            if inter.is_empty:
+                continue  # patch lies entirely in this tile's zone overhang
+            if patch_4326 is not patch_geom:
+                back = Transformer.from_crs("EPSG:4326", patch_crs, always_xy=True)
+                inter = shapely_transform(back.transform, inter)
+            clip_geom = inter
 
-        minx, miny, maxx, maxy = patch_in_tile.bounds
+        # Patch bounds in tile CRS (transformer cached per CRS — coop tiles at
+        # a zone boundary legitimately mix UTM zones within one patch).
+        tile_crs_str = da.rio.crs.to_string()
+        if tile_crs_str != patch_crs:
+            t = to_tile_crs.get(tile_crs_str)
+            if t is None:
+                t = Transformer.from_crs(patch_crs, tile_crs_str, always_xy=True)
+                to_tile_crs[tile_crs_str] = t
+            clip_geom = shapely_transform(t.transform, clip_geom)
+
+        minx, miny, maxx, maxy = clip_geom.bounds
         try:
             clipped = da.rio.clip_box(minx, miny, maxx, maxy)
         except Exception:
