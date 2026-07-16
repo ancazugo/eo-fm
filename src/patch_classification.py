@@ -58,15 +58,23 @@ if str(_src) not in sys.path:
 
 from datasets.registry import EMBEDDING_REGISTRY
 from datasets.so2sat import PatchDataModule, build_so2sat_items
-from models import build_model, families_for, resolve_arch
+from models import build_model, resolve_arch
 from training import (
     LCZResNetModule,
     evaluate_classification,
     run_training_loop,
 )
+from utils.cli import (
+    add_inference_args,
+    add_logging_args,
+    add_model_args,
+    add_training_args,
+    resolve_overlap,
+)
 from utils.runtime import (
     detect_in_channels,
     init_run,
+    load_checkpoint_weights,
     resolve_dequantize,
     resolve_device,
     run_city_inference,
@@ -115,15 +123,9 @@ def main() -> None:
                    help="Column name for LCZ class in the split GDF (default: LCZ_class).")
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    g = parser.add_argument_group("Model")
-    g.add_argument("--family", choices=families_for("classification"), default="resnet",
-                   help="Model family (default: resnet).")
-    g.add_argument("--preset", choices=["nano", "small", "base", "medium", "large"], default="large",
-                   help="Size preset (default: large).")
+    g = add_model_args(parser, "classification", default_family="resnet")
     g.add_argument("--arch", default=None,
                    help="Override: any timm model name.")
-    g.add_argument("--num-classes", type=int, default=17,
-                   help="Number of output classes (default: 17).")
     g.add_argument("--patch-size", type=int, default=32,
                    help="Resize patches to this square size before feeding the model (default: 32).")
     g.add_argument("--sub-patch-size", type=int, default=None,
@@ -136,11 +138,7 @@ def main() -> None:
                    help="Dropout before the final FC layer (default: 0.0).")
 
     # ── Training ──────────────────────────────────────────────────────────────
-    g = parser.add_argument_group("Training")
-    g.add_argument("--batch-size", type=int, default=64)
-    g.add_argument("--num-workers", type=int, default=4)
-    g.add_argument("--lr", type=float, default=1e-3)
-    g.add_argument("--weight-decay", type=float, default=1e-4)
+    g = add_training_args(parser, batch_size=64)
     g.add_argument("--class-weights", choices=["none", "inv_freq", "sqrt_inv_freq"],
                    default="none",
                    help="Per-class CE weights from train-split frequencies (default: none).")
@@ -169,44 +167,19 @@ def main() -> None:
                    help="Test-time augmentation: average logits over flips/90° rotations.")
     g.add_argument("--warmup-epochs", type=int, default=0,
                    help="Linear LR warmup epochs before cosine decay (0 = off).")
-    g.add_argument("--max-epochs", type=int, default=50)
-    g.add_argument("--early-stopping-patience", type=int, default=10)
-    g.add_argument("--seed", type=int, default=42)
-    g.add_argument("--accelerator", choices=["auto", "cpu", "cuda", "mps"], default="auto")
 
     # ── Logging ───────────────────────────────────────────────────────────────
-    g = parser.add_argument_group("Logging")
-    g.add_argument("--output-dir", required=True, type=Path,
-                   help="Directory for checkpoints and WandB run folders.")
-    g.add_argument("--wandb-project", default="lcz-classification-dl")
-    g.add_argument("--wandb-entity", default="phd-thesis-team")
-    g.add_argument("--no-wandb", action="store_true",
-                   help="Disable WandB logging.")
-    g.add_argument("--run-name", default=None,
-                   help="Optional WandB run name override.")
-    g.add_argument("--dequantize", action="store_true",
-                   help="Force dequantize when loading npy patches "
-                        "(auto-applied for alpha_earth_coop and seamless).")
-    g.add_argument("--checkpoint", type=Path, default=None,
-                   help="Load model weights from this .pt file and skip training (inference only).")
+    add_logging_args(parser)
 
     # ── Inference ─────────────────────────────────────────────────────────────
-    g = parser.add_argument_group("Inference")
+    g = add_inference_args(parser)
     g.add_argument("--embedding-name", required=True, nargs="+",
                    choices=sorted(EMBEDDING_REGISTRY),
                    help="Embedding registry key(s), one per --output-name. "
                         "Also used for infer_roi (single-embedding runs only).")
-    g.add_argument("--embedding-dir", required=True, type=Path,
-                   help="Directory containing raw source embedding tiles (.zarr or .tif).")
-    g.add_argument("--overlap", type=int, default=None,
-                   help="Overlap between adjacent patches in pixels for inference "
-                        "(default: patch_size // 2).")
-    g.add_argument("--margin-m", type=float, default=200.0,
-                   help="Extra metres clipped around city bbox per tile for edge context (default: 200).")
 
     args = parser.parse_args()
-    if args.overlap is None:
-        args.overlap = args.patch_size // 2
+    resolve_overlap(args)
     if len(args.output_name) != len(args.embedding_name):
         parser.error("--output-name and --embedding-name must have the same length")
     fused = len(args.output_name) > 1
@@ -350,6 +323,7 @@ def main() -> None:
         warmup_epochs=args.warmup_epochs,
         max_epochs=args.max_epochs,
         early_stopping_patience=args.early_stopping_patience,
+        seed=args.seed,
         n_params=n_params,
         data_source="so2sat_patches",
         split_source=("grid_orig_test" if args.orig_test
@@ -369,11 +343,7 @@ def main() -> None:
 
     # ── Train (or load checkpoint) ────────────────────────────────────────────
     if args.checkpoint is not None:
-        logger.info(f"Loading checkpoint: {args.checkpoint}")
-        ckpt = torch.load(args.checkpoint, map_location=device)
-        task.model.load_state_dict(ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt)
-        task = task.to(device)
-        ckpt_path = args.checkpoint
+        ckpt_path = load_checkpoint_weights(task, args.checkpoint, device)
     else:
         task, ckpt_path = run_training_loop(
             task_module=task,

@@ -698,8 +698,8 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    if args.overlap is None:
-        args.overlap = args.patch_size // 2
+    from utils.cli import resolve_overlap
+    resolve_overlap(args)
 
     # ── Resolve bbox (from --bbox, --city, or --smod-id) ─────────────────────
     n_sources = sum(x is not None for x in [args.bbox, args.city, args.smod_id])

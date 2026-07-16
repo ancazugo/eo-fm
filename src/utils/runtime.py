@@ -34,6 +34,20 @@ def resolve_device(accelerator: str = "auto") -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def load_checkpoint_weights(task, checkpoint: Path, device: torch.device) -> Path:
+    """Load model weights from a training checkpoint into a task module.
+
+    Accepts both the training-loop checkpoint format
+    ``{"model_state_dict", "epoch", <monitor>}`` and a bare state dict.
+    Returns the checkpoint path (mirrors run_training_loop's return).
+    """
+    logger.info(f"Loading checkpoint: {checkpoint}")
+    ckpt = torch.load(checkpoint, map_location=device)
+    task.model.load_state_dict(ckpt.get("model_state_dict", ckpt))
+    task.to(device)
+    return checkpoint
+
+
 def resolve_dequantize(
     embedding_name: str,
     force: bool = False,
