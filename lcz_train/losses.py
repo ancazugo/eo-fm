@@ -79,6 +79,18 @@ def marginalized_ce(
     nonempty = target.sum(dim=1) > 0
     valid = nonempty if valid is None else (valid.bool() & nonempty)
 
+    if not bool(nonempty.all()):
+        # An all-empty target row (padded/invalid pixels) makes every class's
+        # logw = -inf, so logsumexp sees an all -inf row. Its backward needs
+        # x - max(x), and max(x) is ALSO -inf there, giving -inf-(-inf) = nan
+        # — this poisons the gradient inside logsumexp itself, before the
+        # `valid` masking below ever runs, so masking the forward value can't
+        # undo it. Substitute a harmless one-hot placeholder (class 0) for
+        # empty rows; `valid` still zeroes their contribution to the loss.
+        dummy = torch.zeros_like(target)
+        dummy.select(1, 0).fill_(1.0)
+        target = torch.where(nonempty.unsqueeze(1), target, dummy)
+
     weights_shape = [1, N_LCZ] + [1] * (logits.dim() - 2)
     w = target
     if smoothing_eps > 0.0:

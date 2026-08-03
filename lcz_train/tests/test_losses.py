@@ -116,6 +116,35 @@ def test_smoothing_rewards_adjacent_mass_only():
     assert (smooth_adj - plain_adj) < (smooth_far - plain_far)
 
 
+def test_dense_empty_rows_produce_finite_gradients():
+    # Regression: an all-empty target row (padded/invalid dense pixels) made
+    # every class's logw = -inf, and logsumexp's backward on an all -inf row
+    # computes -inf - (-inf) = nan internally — before the `valid` mask ever
+    # runs, so masking the forward value alone could not fix it.
+    logits = torch.randn(2, 17, 3, 3, requires_grad=True)
+    bm = torch.zeros(2, 3, 3, dtype=torch.long)
+    bm[0] = 1 << 2                    # sample 0: fully labelled hard-3
+    bm[1, 0] = 1 << 2                 # sample 1: only one pixel labelled
+    target = bitmask_to_target(bm).permute(0, 3, 1, 2)
+    valid = target.sum(dim=1) > 0     # matches the empty rows exactly
+    loss = marginalized_ce(logits, target, valid=valid)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert torch.isfinite(logits.grad).all()
+
+
+def test_block_empty_rows_produce_finite_gradients():
+    logits = torch.randn(4, 17, requires_grad=True)
+    target = torch.zeros(4, 17, dtype=torch.bool)
+    target[0, 2] = True
+    target[2, [3, 7]] = True
+    # rows 1 and 3 are fully empty (e.g. unlabelled blocks in a batch)
+    loss = marginalized_ce(logits, target)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert torch.isfinite(logits.grad).all()
+
+
 def test_confidence_gamma_weighting():
     logits = torch.randn(2, 17)
     target = _one_hot_sets([4, 9])
