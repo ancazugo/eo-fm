@@ -265,8 +265,8 @@ rare-class F1 bump, not for headline kappa.
 | Other members | `dl/student-coop-v1/resnet_small_AlphaEarthCoop_global-best.pt`, `dl/good-flower-268/resnet_small_EmbeddedSeamless_global-best.pt` |
 | Ensemble probs + all combiner results | `dl/ensemble_coopv1/ensemble_3models_{val,test}/` (+ `stacking_results*.json`) |
 | TTA outputs | `dl/tta_{adabn,tent}_val/` |
-| Pseudo-label pools | `data/pseudo_labels{,_v2,_v3,_coop}/`, unlabeled gpkg `data/patches_reference_unlabeled.gpkg` |
-| Run scripts | `run_phase0_experiments.sh`, `run_phase1_*.sh`, `run_phase2_tta.sh` |
+| Pseudo-label pools | `data/pseudo_labels{,_v2,_v3,_coop,_seamless}/`, unlabeled gpkg `data/patches_reference_unlabeled.gpkg` |
+| Run scripts | `run_phase0_experiments.sh`, `run_phase1_*.sh`, `run_phase2_tta.sh`, `run_phase3_aux_fusion.sh`, `run_paper_*.sh` |
 | Logs | `dl/_experiment_logs/` |
 | WandB | project `lcz-classification-dl`, entity `phd-thesis-team` (e.g. v1 = `k4ka3wjs`) |
 

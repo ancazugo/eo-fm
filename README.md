@@ -74,6 +74,10 @@ src/
     grid_tiles.py            #   grid-tile items + GridSegDataset/DataModule (segmentation)
   utils/
     runtime.py               #   device/dequantize/wandb-run/city-inference helpers
+lcz_labels/                  # Overture/OSM LCZ pseudo-labelling package (own README + tests)
+                             #   python -m lcz_labels all --aoi Nairobi
+paper/                       # arXiv draft sources + verify_numbers.py (run_paper_*.sh reproduce)
+R/                           # R figure scripts (reads data/wandb_export_*.csv)
 ```
 
 ### Model families

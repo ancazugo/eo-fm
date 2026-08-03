@@ -1,4 +1,4 @@
-"""Rasterize OSM evidence layers into 14-band 10 m tiles for input fusion.
+"""Rasterize OSM evidence layers into 15-band 10 m tiles for input fusion.
 
 For each city (bbox from {city}_grid.gpkg) this enumerates the 0.5-degree
 WGS84 tiles intersecting the bbox and writes osm_{lon}_{lat}.tif (uint8,
