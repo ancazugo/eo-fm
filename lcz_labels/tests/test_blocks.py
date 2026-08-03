@@ -8,18 +8,19 @@ from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 import pytest
 import shapely
 from shapely.geometry import LineString, box
 
 from lcz_labels.blocks import (
     _fallback_cells,
+    _merge_small_blocks,
     assemble_barriers,
     block_id_hash,
     build_adjacency,
     build_blocks,
     delineate,
-    _merge_slivers,
 )
 from lcz_labels.config import AOI, LczLabelConfig
 from lcz_labels.overture import OvertureExtract
@@ -97,13 +98,18 @@ def test_mega_block_grid_fallback(cfg):
 
 
 def test_water_barrier_subdivides(cfg):
-    cfg.blocks.barrier_water_min_m2 = 1000.0  # pond must fit inside one 100 m cell
-    water = _gdf([box(120, 120, 180, 180)], **{
+    # 200 m cells so the ring around the pond stays wider than the corridor bar.
+    cfg.blocks.barrier_water_min_m2 = 1000.0  # pond must fit inside one cell
+    limit = box(0, 0, 600, 600)
+    water = _gdf([box(270, 270, 330, 330)], **{
         "class": ["water"], "base_type": ["water"],
     })
-    blocks = delineate(_extract(roads=_road_grid(), landcover=water), LIMIT, cfg, utm=UTM)
+    blocks = delineate(
+        _extract(roads=_road_grid(step=200, extent=600), landcover=water),
+        limit, cfg, utm=UTM,
+    )
     assert len(blocks) == 10  # the middle cell splits into pond + remainder
-    assert abs(blocks.geometry.area.sum() - LIMIT.area) < 1.0
+    assert abs(blocks.geometry.area.sum() - limit.area) < 1.0
 
 
 def test_small_water_is_not_a_barrier(cfg):
@@ -139,10 +145,40 @@ def test_fallback_cells_snapped():
     assert abs(sum(shapely.area(c) for c in cells) - 640 * 320) < 1.0
 
 
-def test_merge_slivers_drops_isolated():
+def test_merge_small_drops_isolated():
     blocks = _gdf([box(0, 0, 100, 100), box(500, 500, 505, 505)])
-    out = _merge_slivers(blocks, min_area=200.0)
+    out = _merge_small_blocks(blocks, min_area=200.0, corridor_width=20.0, drop_area=200.0)
     assert len(out) == 1
+
+
+def test_dual_carriageway_median_is_merged(cfg):
+    # Paired centerlines 15 m apart create a 300 x 15 m median: 4500 m2 (above
+    # min_block_area) but thinner than the corridor bar -> merged, not kept.
+    roads = _road_grid()
+    extra = gpd.GeoDataFrame(
+        {"class": ["primary"]}, geometry=[LineString([(0, 115), (300, 115)])], crs=UTM,
+    )
+    roads = gpd.GeoDataFrame(pd.concat([roads, extra], ignore_index=True), crs=UTM)
+    blocks = delineate(_extract(roads=roads), LIMIT, cfg, utm=UTM)
+    assert len(blocks) == 9  # median absorbed into an adjacent cell
+    assert abs(blocks.geometry.area.sum() - LIMIT.area) < 1.0
+    # nothing thinner than the corridor bar survives
+    assert not shapely.is_empty(shapely.buffer(blocks.geometry.values, -10.0)).any()
+
+
+def test_small_block_above_sliver_floor_is_merged(cfg):
+    # A 40 x 40 m pocket (1600 m2: > sliver floor, < min_block_area) merges.
+    roads = _road_grid()
+    extra = gpd.GeoDataFrame(
+        {"class": ["primary", "primary"]},
+        geometry=[LineString([(0, 40), (40, 40), (40, 0)])] * 1
+        + [LineString([(40, 40), (40, 0)])],
+        crs=UTM,
+    )
+    roads = gpd.GeoDataFrame(pd.concat([roads, extra], ignore_index=True), crs=UTM)
+    blocks = delineate(_extract(roads=roads), LIMIT, cfg, utm=UTM)
+    assert len(blocks) == 9
+    assert abs(blocks.geometry.area.sum() - LIMIT.area) < 1.0
 
 
 def test_block_id_stable_and_per_aoi():

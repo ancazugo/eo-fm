@@ -110,38 +110,78 @@ def assemble_barriers(
     return primary, additional
 
 
-def _merge_slivers(blocks: gpd.GeoDataFrame, min_area: float) -> gpd.GeoDataFrame:
-    """Merge sub-``min_area`` polygons into the neighbour sharing the longest edge.
+def _flag_small_or_thin(geoms: np.ndarray, min_area: float, corridor_width: float) -> np.ndarray:
+    """Blocks below the viable-block bar: tiny area OR no interior at width.
 
-    Slivers with no edge-sharing neighbour are dropped. ``block_kind`` (when
-    present) is inherited from the absorbing neighbour.
+    A polygon that vanishes under a ``-corridor_width/2`` buffer is a road
+    corridor (median, traffic island, interchange pocket) regardless of its
+    area — a 20 m x 1 km median is 20 000 m² but still has no interior at the
+    10 m raster + 1 px erosion scale.
     """
-    areas = blocks.geometry.area.to_numpy()
-    sliver = areas < min_area
-    if not sliver.any():
-        return blocks.reset_index(drop=True)
-    keep = blocks[~sliver].reset_index(drop=True)
-    dropped = 0
-    if keep.empty:
-        logger.warning(f"all {len(blocks)} blocks below sliver threshold — dropping all")
-        return keep
-    geoms = keep.geometry.values.copy()
-    tree = shapely.STRtree(geoms)
-    for g in blocks.geometry.values[sliver]:
-        idx = tree.query(g, predicate="intersects")
-        if len(idx) == 0:
-            dropped += 1
-            continue
-        shared = shapely.length(shapely.intersection(np.repeat(g, len(idx)), geoms[idx]))
-        if shared.max() <= 0:
-            dropped += 1
-            continue
-        j = idx[int(np.argmax(shared))]
-        geoms[j] = shapely.make_valid(shapely.union(geoms[j], g))
-    keep = keep.set_geometry(gpd.GeoSeries(geoms, crs=blocks.crs))
-    if dropped:
-        logger.debug(f"dropped {dropped} isolated slivers (< {min_area} m²)")
-    return keep
+    small = shapely.area(geoms) < min_area
+    thin = shapely.is_empty(shapely.buffer(geoms, -corridor_width / 2.0))
+    return small | thin
+
+
+def _merge_small_blocks(
+    blocks: gpd.GeoDataFrame, min_area: float, corridor_width: float, drop_area: float
+) -> gpd.GeoDataFrame:
+    """Merge small/thin blocks into the neighbour sharing the longest edge.
+
+    Iterates a few passes (a median may only touch other medians until those
+    merge); whatever remains flagged and unmergeable afterwards is dropped
+    (logged; by construction it is junk surrounded by junk, ~0.1% of area).
+    ``block_kind`` (when present) is inherited from the absorbing neighbour.
+    ``drop_area`` is the hard sliver floor used only for logging granularity.
+    """
+    for _ in range(3):
+        geoms_all = blocks.geometry.values
+        flag = _flag_small_or_thin(geoms_all, min_area, corridor_width)
+        if not flag.any():
+            return blocks.reset_index(drop=True)
+        if flag.all():
+            logger.warning(
+                f"all {len(blocks)} blocks below the viable-block bar — keeping as-is"
+            )
+            return blocks.reset_index(drop=True)
+        keep = blocks[~flag].reset_index(drop=True)
+        geoms = keep.geometry.values.copy()
+        tree = shapely.STRtree(geoms)
+        unmerged_mask = np.zeros(int(flag.sum()), dtype=bool)
+        n_merged = 0
+        for k, g in enumerate(blocks.geometry.values[flag]):
+            idx = tree.query(g, predicate="intersects")
+            if len(idx):
+                shared = shapely.length(
+                    shapely.intersection(np.repeat(g, len(idx)), geoms[idx])
+                )
+                if shared.max() > 0:
+                    j = idx[int(np.argmax(shared))]
+                    geoms[j] = shapely.make_valid(shapely.union(geoms[j], g))
+                    n_merged += 1
+                    continue
+            unmerged_mask[k] = True
+        keep = keep.set_geometry(gpd.GeoSeries(geoms, crs=blocks.crs))
+        leftovers = blocks[flag][unmerged_mask]
+        blocks = (
+            gpd.GeoDataFrame(
+                pd.concat([keep, leftovers], ignore_index=True), crs=blocks.crs
+            )
+            if len(leftovers)
+            else keep
+        )
+        if n_merged == 0:
+            break
+    geoms_all = blocks.geometry.values
+    flag = _flag_small_or_thin(geoms_all, min_area, corridor_width)
+    if flag.any():
+        lost = float(shapely.area(geoms_all[flag]).sum())
+        logger.debug(
+            f"dropped {int(flag.sum())} unmergeable small/thin blocks "
+            f"({lost / 1e4:.2f} ha; sliver floor {drop_area} m²)"
+        )
+        blocks = blocks[~flag]
+    return blocks.reset_index(drop=True)
 
 
 def _fallback_cells(geom, cell_m: float) -> np.ndarray:
@@ -214,7 +254,8 @@ def delineate(
     enc = enc.explode(ignore_index=True)
     enc = enc[enc.geom_type == "Polygon"]
     enc = enc[enc.geometry.area > 0].reset_index(drop=True)[["geometry"]]
-    enc = _merge_slivers(enc, bp.sliver_area_m2)
+    enc = _merge_small_blocks(enc, bp.min_block_area_m2, bp.corridor_min_width_m,
+                              bp.sliver_area_m2)
 
     areas = enc.geometry.area.to_numpy()
     mega = areas > bp.max_block_area_km2 * 1.0e6
@@ -226,7 +267,8 @@ def delineate(
         kinds.extend(sub_kinds)
 
     blocks = gpd.GeoDataFrame({"block_kind": kinds}, geometry=geoms, crs=utm)
-    return _merge_slivers(blocks, bp.sliver_area_m2)
+    return _merge_small_blocks(blocks, bp.min_block_area_m2, bp.corridor_min_width_m,
+                               bp.sliver_area_m2)
 
 
 def build_blocks(

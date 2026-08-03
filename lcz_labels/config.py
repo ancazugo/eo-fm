@@ -179,7 +179,14 @@ class BlockParams(BaseModel):
     """
 
     max_block_area_km2: float = 0.5
-    sliver_area_m2: float = 200.0          # drop enclosure slivers below this
+    sliver_area_m2: float = 200.0          # hard floor: unmergeable fragments below this drop
+    # Minimum viable block: smaller OR thinner blocks (traffic islands, dual-
+    # carriageway medians, interchange pockets — ~1/3 of block count but <1% of
+    # area in a well-mapped city) merge into the neighbour sharing the longest
+    # edge. A block narrower than corridor_min_width_m has no interior at the
+    # 10 m raster + 1 px erosion scale, so it could never be supervised anyway.
+    min_block_area_m2: float = 2500.0
+    corridor_min_width_m: float = 20.0
     barrier_simplify_m: float = 1.0        # simplify barrier lines before enclosures
     # Land-cover polygons at least this large contribute their boundaries as
     # barriers (spec: >= 5 ha contiguous forest / farmland; water separately).
