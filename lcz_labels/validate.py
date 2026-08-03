@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import geopandas as gpd
 import numpy as np
 import pandas as pd
 from loguru import logger
@@ -140,6 +141,87 @@ def lcz7_audit(m: pd.DataFrame) -> dict:
     }
 
 
+def validate_patch_transfer(
+    patch_labels: pd.DataFrame, aoi_name: str, *, min_dominant: float = 0.75
+) -> dict:
+    """Stage 9 agreement via the 320 m patch transfer.
+
+    Uses patches whose dominant label category covers >= ``min_dominant`` of
+    the patch, then scores exactly like the block-era ``validate_labels`` (set
+    membership for coarse; conf>=0.8 subset; monotone sweep; LCZ-7 audit) by
+    projecting the transfer onto the same frame schema.
+    """
+    if "so2sat_lcz" not in patch_labels.columns:
+        logger.warning(f"[{aoi_name}] patch transfer has no so2sat_lcz — skipping")
+        return {}
+    df = patch_labels[patch_labels["dominant_frac"] >= min_dominant].copy()
+    dom_sets = df["dominant_set"].map(_as_set)
+    frame = pd.DataFrame({
+        "label_type": ["hard" if len(s) == 1 else ("coarse" if s else "unlabelled")
+                       for s in dom_sets],
+        "lcz": [next(iter(s)) if len(s) == 1 else None for s in dom_sets],
+        "lcz_set": [sorted(s) for s in dom_sets],
+        "confidence": df["mean_confidence"].to_numpy(),
+        "so2sat_lcz": df["so2sat_lcz"].to_numpy(),
+    })
+    frame["lcz"] = frame["lcz"].astype("Int64")
+    result = validate_labels(frame, aoi_name)
+    if result:
+        result["n_patches_total"] = len(patch_labels)
+        result["n_dominant"] = len(df)
+    return result
+
+
+def block_homogeneity(labels_gdf, grid) -> dict:
+    """Within-block vs matched-neighbourhood So2Sat label entropy.
+
+    Assigns each So2Sat patch (centroid) to its containing block. For every
+    block holding k >= 2 patches, computes the Shannon entropy of their labels
+    and compares it against the entropy of the k nearest patches around the
+    same location — a same-size compact neighbourhood that ignores block
+    geometry. Blocks should be measurably MORE homogeneous (ratio < 1); if not,
+    barrier construction is wrong.
+    """
+    from scipy.spatial import cKDTree
+
+    g = grid[grid["LCZ_class"].notna()]
+    if g.empty:
+        return {}
+    pts = g.geometry.to_crs(labels_gdf.crs).centroid
+    labels_arr = g["LCZ_class"].astype(int).to_numpy()
+    xy = np.c_[pts.x.to_numpy(), pts.y.to_numpy()]
+    joined = gpd.sjoin(
+        gpd.GeoDataFrame({"lab": labels_arr}, geometry=pts, crs=labels_gdf.crs),
+        labels_gdf[["block_id", "geometry"]], predicate="within", how="inner",
+    )
+    tree = cKDTree(xy)
+
+    def entropy(vals: np.ndarray) -> float:
+        _, counts = np.unique(vals, return_counts=True)
+        p = counts / counts.sum()
+        return float(-(p * np.log2(p)).sum())
+
+    block_ent, hood_ent = [], []
+    for _, sub in joined.groupby("block_id"):
+        k = len(sub)
+        if k < 2:
+            continue
+        block_ent.append(entropy(sub["lab"].to_numpy()))
+        centre = xy[sub.index.to_numpy()].mean(axis=0)
+        _, nn = tree.query(centre, k=k)
+        hood_ent.append(entropy(labels_arr[np.atleast_1d(nn)]))
+    if not block_ent:
+        return {}
+    be, he = np.array(block_ent), np.array(hood_ent)
+    return {
+        "n_blocks": len(be),
+        "mean_block_entropy": float(be.mean()),
+        "mean_neighbourhood_entropy": float(he.mean()),
+        "entropy_ratio": float(be.mean() / he.mean()) if he.mean() > 0 else float("nan"),
+        "frac_blocks_leq": float((be <= he).mean()),
+    }
+
+
 def _name(code: int) -> str:
     return lcz_dict.get(int(code), {}).get("name", f"LCZ{code}")
 
@@ -173,6 +255,17 @@ def write_report(results: list[dict], out_path: Path) -> Path:
         lines += ["", "Top confusions (GT → hard pred) at conf≥0.8:", ""]
         for (gt, pr), n in r["top_confusions"]:
             lines.append(f"- {_name(gt)} → {_name(pr)}: {n}")
+
+        hom = r.get("homogeneity", {})
+        if hom.get("n_blocks"):
+            lines += ["", "### Block homogeneity (within-block vs same-size neighbourhood)", "",
+                      f"- blocks with >=2 So2Sat patches: {hom['n_blocks']}",
+                      f"- mean entropy: block {hom['mean_block_entropy']:.3f} vs "
+                      f"neighbourhood {hom['mean_neighbourhood_entropy']:.3f} "
+                      f"(ratio {hom['entropy_ratio']:.2f})",
+                      f"- blocks at least as homogeneous: {hom['frac_blocks_leq']:.0%}",
+                      ("✅ blocks more homogeneous than patches" if hom["entropy_ratio"] < 1.0
+                       else "⚠️ blocks NOT more homogeneous — check barrier construction")]
 
         a = r.get("lcz7_audit", {})
         if a.get("n_gt7"):

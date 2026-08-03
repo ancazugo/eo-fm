@@ -29,5 +29,5 @@ _SRC = _REPO_ROOT / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-__all__ = ["config", "grid", "overture", "heights", "ucp", "classify",
-           "change_mask", "validate", "cli"]
+__all__ = ["config", "grid", "overture", "heights", "blocks", "ucp", "classify",
+           "change_mask", "export", "validate", "cli"]

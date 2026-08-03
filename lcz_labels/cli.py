@@ -1,42 +1,46 @@
-"""Stage 8 — Typer CLI orchestrating the pipeline, with per-stage caching.
+"""Typer CLI orchestrating the block-based pipeline, with per-stage caching.
 
     python -m lcz_labels extract  --aoi Nairobi
+    python -m lcz_labels blocks   --aoi Nairobi
     python -m lcz_labels ucp      --aoi Nairobi
     python -m lcz_labels label    --aoi Nairobi
     python -m lcz_labels mask     --aoi Nairobi
-    python -m lcz_labels validate --aoi Nairobi --aoi London --aoi Milan
+    python -m lcz_labels export   --aoi Nairobi
+    python -m lcz_labels validate --aoi Nairobi --aoi Paris
     python -m lcz_labels all      --all-aois
 
-Every stage caches per AOI keyed on the config hash; ``--force`` rebuilds. Pass
-``--config path.yaml`` to override defaults (thresholds, Overture release, paths).
+Stage graph per AOI: extract -> blocks (+adjacency) -> ucp -> classify ->
+zones -> mask -> export (block parquet + 3 rasters + patch transfer) ->
+validate. Every derivation stage caches per AOI keyed on the config hash
+(``--force`` rebuilds); the Overture extraction keys on the extraction hash so
+threshold changes never re-download. All joins are keyed on ``block_id`` with
+``validate="1:1"`` — misalignment raises instead of silently scrambling rows.
 """
 
 from __future__ import annotations
 
 import time
 from contextlib import contextmanager
-from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
 import typer
 from loguru import logger
 
+from .blocks import build_adjacency, build_blocks
 from .change_mask import compute_change_mask
-from .classify import classify_patches
+from .classify import classify_blocks, form_zones
 from .config import LczLabelConfig
+from .export import patch_transfer, to_training_pairs, write_blocks_parquet, write_rasters
 from .grid import load_grid
 from .overture import extract_overture
 from .ucp import compute_ucp
-from .validate import validate_labels, write_report
+from .validate import block_homogeneity, validate_patch_transfer, write_report
+
+__all__ = ["app", "build_block_labels", "load_config", "to_training_pairs"]
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False,
-                  help="Overture/OSM-fused LCZ pseudo-labelling.")
-
-# Output column order (task Stage 8) followed by UCP/diagnostic columns.
-_LEAD_COLS = ["patch_id", "aoi", "label_type", "lcz", "lcz_set", "lcz_name", "confidence",
-              "stable_2017_to_label_year", "change_score", "label_year",
-              "overture_release", "config_hash", "so2sat_lcz"]
+                  help="Overture/OSM-fused block-based LCZ pseudo-labelling.")
 
 
 @contextmanager
@@ -64,82 +68,80 @@ def _resolve_aois(config: LczLabelConfig, aoi: list[str] | None, all_aois: bool)
     return list(aoi)
 
 
-def build_labels(
+def build_block_labels(
     aoi_name: str, config: LczLabelConfig, *, force: bool = False, run_mask: bool = True
 ) -> gpd.GeoDataFrame:
-    """Run grid → overture → ucp → classify (→ mask) and assemble the label GDF."""
-    with _stage(f"[{aoi_name}] grid"):
-        grid = load_grid(aoi_name, config, force=force)
+    """extract -> blocks -> ucp -> classify -> zones (-> mask) -> labelled blocks."""
     with _stage(f"[{aoi_name}] overture extract"):
         extract = extract_overture(aoi_name, config, force=force)
+    with _stage(f"[{aoi_name}] blocks"):
+        blocks = build_blocks(aoi_name, extract, config, force=force)
+        adjacency = build_adjacency(blocks, config, aoi_name, force=force)
     with _stage(f"[{aoi_name}] ucp"):
-        ucp = compute_ucp(grid, extract, config, aoi_name, force=force)
+        ucp = compute_ucp(blocks, extract, config, aoi_name, force=force)
     with _stage(f"[{aoi_name}] classify"):
-        cls = classify_patches(ucp, config)
+        cls = classify_blocks(ucp, config)
+        cls.insert(0, "block_id", ucp["block_id"].to_numpy())
+    with _stage(f"[{aoi_name}] zones"):
+        zones = form_zones(cls, blocks, adjacency, config)
 
-    # Assemble: grid geometry + ucp + classification
-    gdf = grid.reset_index(drop=True).copy()
-    gdf = gdf.rename(columns={"LCZ_class": "so2sat_lcz"})
-    ucp_cols = [c for c in ucp.columns if c not in ("patch_id", "dataset")]
-    for c in ucp_cols:
-        gdf[c] = ucp[c].to_numpy()
-    for c in cls.columns:
-        gdf[c] = cls[c].to_numpy()
+    gdf = (
+        blocks.merge(ucp, on="block_id", validate="1:1")
+        .merge(cls, on="block_id", validate="1:1")
+        .merge(zones, on="block_id", validate="1:1")
+    )
+    # Stage 6 zone-grade penalty: labelled but not zone-grade -> x penalty.
+    labelled = gdf["label_type"].isin(["hard", "coarse"])
+    penalty = labelled & ~gdf["zone_grade"]
+    gdf.loc[penalty, "confidence"] *= config.zones.zone_conf_penalty
 
     if run_mask:
         with _stage(f"[{aoi_name}] change mask"):
-            change = compute_change_mask(grid, config, aoi_name, force=force)
-        gdf["stable_2017_to_label_year"] = change["stable_2017_to_label_year"].to_numpy()
-        gdf["change_score"] = change["change_score"].to_numpy()
+            change = compute_change_mask(blocks, config, aoi_name, force=force)
+        gdf = gdf.merge(change, on="block_id", validate="1:1")
     else:
         gdf["stable_2017_to_label_year"] = False
         gdf["change_score"] = float("nan")
 
     gdf["label_year"] = config.label_year
-    gdf["overture_release"] = config.overture_release
-    gdf["config_hash"] = config.config_hash
-
-    lead = [c for c in _LEAD_COLS if c in gdf.columns]
-    rest = [c for c in gdf.columns if c not in lead and c != "geometry"]
-    gdf = gdf[lead + rest + ["geometry"]]
-
-    out = config.cache_dir / aoi_name / f"labels_{aoi_name}.parquet"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    gdf.to_parquet(out)
-    n_hard = int((gdf["label_type"] == "hard").sum())
-    n_coarse = int((gdf["label_type"] == "coarse").sum())
-    logger.info(f"[{aoi_name}] wrote {out} ({len(gdf)} rows, "
-                f"{n_hard} hard incl. {int((gdf['lcz'] == 7).sum())} LCZ-7, {n_coarse} coarse)")
+    write_blocks_parquet(gdf, aoi_name, config)
     return gdf
 
 
-def to_training_pairs(labels: pd.DataFrame, years: list[int]) -> pd.DataFrame:
-    """Expand labels into (patch_id, dataset, label_type, lcz, lcz_set, year) pairs.
+def _load_labels(aoi_name: str, config: LczLabelConfig, *, force: bool = False,
+                 run_mask: bool = True) -> gpd.GeoDataFrame:
+    path = config.cache_dir / aoi_name / f"blocks_labelled_{aoi_name}.parquet"
+    if path.exists() and not force:
+        gdf = gpd.read_parquet(path)
+        if (gdf.get("config_hash") == config.config_hash).all():
+            logger.info(f"[{aoi_name}] labelled blocks cache hit: {path.name}")
+            return gdf
+        logger.info(f"[{aoi_name}] labelled blocks stale (config changed) — rebuilding")
+    return build_block_labels(aoi_name, config, force=force, run_mask=run_mask)
 
-    Stable patches (``stable_2017_to_label_year``) are paired with every requested
-    embedding year; unstable ones only with their own ``label_year`` (epoch-locked
-    — labels must not travel across years where the built environment changed).
 
-    CONSUMPTION CONTRACT (do not collapse a coarse label to one member!):
-      * ``label_type == "hard"``  -> standard cross-entropy on the single ``lcz``.
-      * ``label_type == "coarse"`` -> marginalised cross-entropy over ``lcz_set``,
-        i.e. loss = ``-log Σ_{c ∈ lcz_set} p_c`` (the true class is known to be one
-        of the set members, e.g. {3,7} or {8,10}, but not which).
-    ``lcz_set`` is passed through untouched; ``lcz`` is null for coarse rows.
-    """
-    lab = labels[labels["label_type"].isin(["hard", "coarse"])].copy()
-    rows = []
-    for r in lab.to_dict("records"):
-        yrs = years if r.get("stable_2017_to_label_year") else [int(r["label_year"])]
-        for y in yrs:
-            rows.append({
-                "patch_id": r["patch_id"], "dataset": r.get("dataset"),
-                "label_type": r["label_type"],
-                "lcz": (int(r["lcz"]) if pd.notna(r["lcz"]) else None),
-                "lcz_set": list(r["lcz_set"]),
-                "confidence": r.get("confidence"), "year": y,
-            })
-    return pd.DataFrame(rows)
+def _export_aoi(aoi_name: str, config: LczLabelConfig, *, force: bool = False) -> pd.DataFrame:
+    labels = _load_labels(aoi_name, config, force=force)
+    with _stage(f"[{aoi_name}] rasters"):
+        write_rasters(labels, aoi_name, config)
+    with _stage(f"[{aoi_name}] patch transfer"):
+        grid = load_grid(aoi_name, config, force=force)
+        patches = patch_transfer(labels, grid, aoi_name, config)
+    return patches
+
+
+def _validate_aoi(aoi_name: str, config: LczLabelConfig, *, force: bool = False) -> dict:
+    ppath = config.cache_dir / aoi_name / f"patch_labels_{aoi_name}.parquet"
+    if ppath.exists() and not force:
+        patches = pd.read_parquet(ppath)
+    else:
+        patches = _export_aoi(aoi_name, config, force=force)
+    result = validate_patch_transfer(patches, aoi_name)
+    if result:
+        labels = _load_labels(aoi_name, config)
+        grid = load_grid(aoi_name, config)
+        result["homogeneity"] = block_homogeneity(labels, grid)
+    return result
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -153,33 +155,43 @@ _FORCE_OPT = typer.Option(False, "--force", help="Rebuild caches")
 @app.command()
 def extract(aoi: list[str] = _AOI_OPT, all_aois: bool = _ALL_OPT,
             config: str = _CFG_OPT, force: bool = _FORCE_OPT):
-    """Stage 2: extract Overture features (and grid) per AOI."""
+    """Stage 2: extract Overture features per AOI."""
     cfg = load_config(config)
     for name in _resolve_aois(cfg, aoi, all_aois):
-        with _stage(f"[{name}] grid"):
-            load_grid(name, cfg, force=force)
         with _stage(f"[{name}] overture extract"):
             extract_overture(name, cfg, force=force)
 
 
 @app.command()
-def ucp(aoi: list[str] = _AOI_OPT, all_aois: bool = _ALL_OPT,
-        config: str = _CFG_OPT, force: bool = _FORCE_OPT):
-    """Stage 4: compute UCP table per AOI."""
+def blocks(aoi: list[str] = _AOI_OPT, all_aois: bool = _ALL_OPT,
+           config: str = _CFG_OPT, force: bool = _FORCE_OPT):
+    """Stage 4a: delineate blocks + adjacency per AOI."""
     cfg = load_config(config)
     for name in _resolve_aois(cfg, aoi, all_aois):
-        grid = load_grid(name, cfg, force=force)
         ex = extract_overture(name, cfg, force=force)
-        compute_ucp(grid, ex, cfg, name, force=force)
+        with _stage(f"[{name}] blocks"):
+            b = build_blocks(name, ex, cfg, force=force)
+            build_adjacency(b, cfg, name, force=force)
+
+
+@app.command()
+def ucp(aoi: list[str] = _AOI_OPT, all_aois: bool = _ALL_OPT,
+        config: str = _CFG_OPT, force: bool = _FORCE_OPT):
+    """Stage 4b: compute the per-block UCP table per AOI."""
+    cfg = load_config(config)
+    for name in _resolve_aois(cfg, aoi, all_aois):
+        ex = extract_overture(name, cfg, force=force)
+        b = build_blocks(name, ex, cfg, force=force)
+        compute_ucp(b, ex, cfg, name, force=force)
 
 
 @app.command()
 def label(aoi: list[str] = _AOI_OPT, all_aois: bool = _ALL_OPT,
           config: str = _CFG_OPT, force: bool = _FORCE_OPT):
-    """Stages 5-6: classify to LCZ + confidence (no temporal mask)."""
+    """Stages 5-6: classify blocks + zones + confidence (no temporal mask)."""
     cfg = load_config(config)
     for name in _resolve_aois(cfg, aoi, all_aois):
-        build_labels(name, cfg, force=force, run_mask=False)
+        build_block_labels(name, cfg, force=force, run_mask=False)
 
 
 @app.command()
@@ -188,49 +200,56 @@ def mask(aoi: list[str] = _AOI_OPT, all_aois: bool = _ALL_OPT,
     """Stage 7: temporal stability mask per AOI."""
     cfg = load_config(config)
     for name in _resolve_aois(cfg, aoi, all_aois):
-        grid = load_grid(name, cfg, force=force)
-        compute_change_mask(grid, cfg, name, force=force)
+        ex = extract_overture(name, cfg, force=force)
+        b = build_blocks(name, ex, cfg, force=force)
+        compute_change_mask(b, cfg, name, force=force)
+
+
+@app.command()
+def export(aoi: list[str] = _AOI_OPT, all_aois: bool = _ALL_OPT,
+           config: str = _CFG_OPT, force: bool = _FORCE_OPT):
+    """Stage 8: block parquet + bitmask/confidence/block_id rasters + patch transfer."""
+    cfg = load_config(config)
+    for name in _resolve_aois(cfg, aoi, all_aois):
+        _export_aoi(name, cfg, force=force)
 
 
 @app.command()
 def validate(aoi: list[str] = _AOI_OPT, all_aois: bool = _ALL_OPT,
              config: str = _CFG_OPT, force: bool = _FORCE_OPT):
-    """Stage 9: agreement vs So2Sat; writes a markdown report."""
+    """Stage 9: agreement vs So2Sat via the patch transfer + homogeneity check."""
     cfg = load_config(config)
     names = _resolve_aois(cfg, aoi, all_aois)
-    results = []
-    for name in names:
-        lab_path = cfg.cache_dir / name / f"labels_{name}.parquet"
-        gdf = gpd.read_parquet(lab_path) if lab_path.exists() else build_labels(name, cfg, force=force)
-        results.append(validate_labels(pd.DataFrame(gdf.drop(columns="geometry")), name))
+    results = [_validate_aoi(name, cfg, force=force) for name in names]
     report = cfg.cache_dir / f"validation_{'_'.join(names[:3])}.md"
-    write_report(results, report)
+    write_report([r for r in results if r], report)
 
 
 @app.command(name="all")
 def run_all(aoi: list[str] = _AOI_OPT, all_aois: bool = _ALL_OPT,
             config: str = _CFG_OPT, force: bool = _FORCE_OPT):
-    """Run the full pipeline for each AOI, then merge + validate."""
+    """Full pipeline per AOI, then merge labels + one validation report."""
     cfg = load_config(config)
     names = _resolve_aois(cfg, aoi, all_aois)
     all_gdfs, results, failed = [], [], []
     for i, name in enumerate(names, 1):
         logger.info(f"══ AOI {i}/{len(names)}: {name} ══")
         try:
-            gdf = build_labels(name, cfg, force=force, run_mask=True)
+            gdf = build_block_labels(name, cfg, force=force, run_mask=True)
+            _export_aoi(name, cfg)
+            results.append(_validate_aoi(name, cfg))
         except Exception as e:  # noqa: BLE001 — one bad AOI must not abort the batch
-            logger.error(f"[{name}] FAILED: {e}")
+            logger.exception(f"[{name}] FAILED: {e}")
             failed.append(name)
             continue
-        all_gdfs.append(gdf)
-        results.append(validate_labels(pd.DataFrame(gdf.drop(columns="geometry")), name))
+        all_gdfs.append(gdf.to_crs("EPSG:4326"))
     if all_gdfs:
         merged = pd.concat(all_gdfs, ignore_index=True)
         merged_path = cfg.cache_dir / "labels_all.parquet"
         gpd.GeoDataFrame(merged, geometry="geometry", crs="EPSG:4326").to_parquet(merged_path)
-        logger.info(f"Merged {len(merged)} rows from {len(all_gdfs)} AOIs -> {merged_path}")
+        logger.info(f"Merged {len(merged)} blocks from {len(all_gdfs)} AOIs -> {merged_path}")
     if any(results):
-        write_report(results, cfg.cache_dir / "validation_all.md")
+        write_report([r for r in results if r], cfg.cache_dir / "validation_all.md")
     logger.info(f"Batch done: {len(all_gdfs)} ok, {len(failed)} failed"
                 + (f" ({', '.join(failed)})" if failed else ""))
 

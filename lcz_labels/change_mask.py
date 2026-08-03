@@ -128,8 +128,16 @@ def stability(built0, h0, built1, h1, config) -> tuple[bool, float]:
 def compute_change_mask(
     grid: gpd.GeoDataFrame, config: LczLabelConfig, aoi_name: str, *, force: bool = False
 ) -> pd.DataFrame:
-    """Per-patch stability table (cached parquet)."""
-    cache = config.cache_dir / aoi_name / f"change_{config.config_hash}.parquet"
+    """Per-zone stability table (cached parquet).
+
+    ``grid`` is the block table (``block_id`` column, keyed on it) or the
+    legacy 320 m patch grid (``patch_id``/``dataset``). Sampling is a bounds-
+    window mean per zone — adequate for the ~4 m temporal product and the
+    100 m GHS fallback statistics this thresholding consumes.
+    """
+    block_mode = "block_id" in grid.columns
+    stem = "change_blocks" if block_mode else "change"
+    cache = config.cache_dir / aoi_name / f"{stem}_{config.config_hash}.parquet"
     if cache.exists() and not force:
         logger.info(f"[{aoi_name}] change-mask cache hit: {cache.name}")
         return pd.read_parquet(cache)
@@ -150,12 +158,14 @@ def compute_change_mask(
     for i in range(len(grid)):
         stable[i], score[i] = stability(built0[i], height0[i], built1[i], height1[i], config)
 
-    out = pd.DataFrame({
-        "patch_id": grid["patch_id"].astype(str).to_numpy(),
-        "dataset": grid.get("dataset", pd.Series(["unlabeled"] * len(grid))).to_numpy(),
-        "stable_2017_to_label_year": stable,
-        "change_score": score,
-    })
+    if block_mode:
+        ids = {"block_id": grid["block_id"].to_numpy()}
+    else:
+        ids = {"patch_id": grid["patch_id"].astype(str).to_numpy(),
+               "dataset": grid.get("dataset", pd.Series(["unlabeled"] * len(grid))).to_numpy()}
+    out = pd.DataFrame({**ids,
+                        "stable_2017_to_label_year": stable,
+                        "change_score": score})
     cache.parent.mkdir(parents=True, exist_ok=True)
     out.to_parquet(cache, index=False)
     logger.info(f"[{aoi_name}] change-mask: {int(stable.sum())}/{len(out)} stable")

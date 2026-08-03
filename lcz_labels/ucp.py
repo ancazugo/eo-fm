@@ -1,6 +1,12 @@
-"""Stage 4 — zonal Urban Canopy Parameters (UCPs) per 320 m patch.
+"""Stage 4b — zonal Urban Canopy Parameters (UCPs) per zone (block or patch).
 
-Turns the Overture extract + per-building heights into one feature row per patch:
+The zone geometry is whatever GeoDataFrame is passed in: urban blocks (the
+canonical pipeline; detected by a ``block_id`` column, keyed on it, cached as
+``ucp_blocks_{hash}.parquet``, plus geometric descriptors) or the legacy 320 m
+patch grid (``patch_id``/``dataset`` keying). All zonal internals take plain
+polygon arrays and are geometry-agnostic.
+
+Turns the Overture extract + per-building heights into one feature row per zone:
 
   bsf                  building surface fraction (ALL sources, clipped to patch)
   h_mean, h_max        footprint-area-weighted mean / max building height
@@ -283,8 +289,14 @@ def compute_ucp(
     *,
     force: bool = False,
 ) -> pd.DataFrame:
-    """Compute the per-patch UCP table for one AOI (cached parquet)."""
-    cache = config.cache_dir / aoi_name / f"ucp_{config.config_hash}.parquet"
+    """Compute the per-zone UCP table for one AOI (cached parquet).
+
+    ``grid`` may be the block table (``block_id`` column -> block mode, adds
+    geometric descriptors) or the legacy 320 m patch grid.
+    """
+    block_mode = "block_id" in grid.columns
+    stem = "ucp_blocks" if block_mode else "ucp"
+    cache = config.cache_dir / aoi_name / f"{stem}_{config.config_hash}.parquet"
     if cache.exists() and not force:
         logger.info(f"[{aoi_name}] UCP cache hit: {cache.name}")
         return pd.read_parquet(cache)
@@ -298,8 +310,11 @@ def compute_ucp(
     lc = extract.landcover
     infra = extract.infrastructure
 
-    df = pd.DataFrame({"patch_id": grid["patch_id"].astype(str).to_numpy(),
-                       "dataset": grid.get("dataset", pd.Series(["unlabeled"] * len(grid))).to_numpy()})
+    if block_mode:
+        df = pd.DataFrame({"block_id": grid["block_id"].to_numpy()})
+    else:
+        df = pd.DataFrame({"patch_id": grid["patch_id"].astype(str).to_numpy(),
+                           "dataset": grid.get("dataset", pd.Series(["unlabeled"] * len(grid))).to_numpy()})
 
     # Building aggregates
     bstats = _building_stats(pgeom, pareas, buildings)
@@ -343,10 +358,34 @@ def compute_ucp(
     else:
         df["mn_informal_frac"] = np.nan
 
-    # GHS-BUILT-S cross-check (raster)
-    df["ghs_built_s"] = ghs_built_s_fraction(grid, config)
+    # GHS-BUILT-S cross-check (raster; tile lookup needs EPSG:4326 geometries)
+    grid_ll = grid if (grid.crs and grid.crs.to_epsg() == 4326) else grid.to_crs("EPSG:4326")
+    df["ghs_built_s"] = ghs_built_s_fraction(grid_ll, config)
+
+    # Geometric descriptors (block mode): diagnostics + B3 GNN node features.
+    # area_m2 stays on the block table (single source of truth).
+    if block_mode:
+        peri = shapely.length(pgeom)
+        df["compactness"] = np.divide(4.0 * np.pi * pareas, peri**2,
+                                      out=np.zeros(len(pgeom)), where=peri > 0)
+        df["elongation"] = _elongation(pgeom)
 
     cache.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(cache, index=False)
-    logger.info(f"[{aoi_name}] UCP: {len(df)} patches, {df.shape[1]} columns")
+    logger.info(f"[{aoi_name}] UCP: {len(df)} zones, {df.shape[1]} columns")
     return df
+
+
+def _elongation(geoms: np.ndarray) -> np.ndarray:
+    """1 - short/long side of the minimum rotated rectangle (0 = square-ish)."""
+    out = np.zeros(len(geoms))
+    rects = shapely.oriented_envelope(geoms)
+    for i, r in enumerate(rects):
+        coords = shapely.get_coordinates(r)
+        if len(coords) < 4:
+            continue
+        e1 = float(np.hypot(*(coords[1] - coords[0])))
+        e2 = float(np.hypot(*(coords[2] - coords[1])))
+        lo, hi = min(e1, e2), max(e1, e2)
+        out[i] = 1.0 - lo / hi if hi > 0 else 0.0
+    return out

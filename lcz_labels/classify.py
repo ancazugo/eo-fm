@@ -332,3 +332,104 @@ def classify_patches(ucp_df: pd.DataFrame, config: LczLabelConfig) -> pd.DataFra
     logger.info(f"Classified: {n_hard} hard ({n7} LCZ-7), {n_coarse} coarse, "
                 f"{len(out) - n_hard - n_coarse} unlabelled / {len(out)}")
     return out
+
+
+# Blocks classify through the identical rules — the row dict doesn't care what
+# geometry produced its UCPs.
+classify_blocks = classify_patches
+
+
+# ── Stage 5c — zone formation ─────────────────────────────────────────────────
+
+def _label_key(label_type: str, lcz, lcz_set) -> str | None:
+    """Dissolve key: identical hard class, or identical coarse set."""
+    if label_type == "hard":
+        return f"h{int(lcz)}"
+    if label_type == "coarse":
+        return "c" + ",".join(str(int(c)) for c in sorted(lcz_set))
+    return None
+
+
+def form_zones(
+    labels: pd.DataFrame,
+    blocks: pd.DataFrame,
+    adjacency: pd.DataFrame,
+    config: LczLabelConfig,
+) -> pd.DataFrame:
+    """Dissolve adjacent same-label blocks into zones; grade them by area.
+
+    A block is smaller than an LCZ ("zone of uniform structure", hundreds of m
+    to km): adjacent blocks with an identical hard ``lcz`` (or identical coarse
+    ``lcz_set``) form a candidate zone, and a block is **zone-grade** iff its
+    zone's contiguous area >= ``zones.min_zone_area_ha``. Smaller islands keep
+    their block label with ``zone_grade=False`` — a single tower block inside
+    lowrise fabric is an anomaly flag, not "an LCZ 1 zone". The Stage 6
+    confidence penalty for non-zone-grade labels is applied by the caller.
+
+    Args:
+        labels: per-block classification with ``block_id, label_type, lcz,
+            lcz_set`` (unlabelled rows get null zone columns).
+        blocks: block table with ``block_id, area_m2``.
+        adjacency: shared-edge edge list ``block_a, block_b``.
+
+    Returns columns ``block_id, zone_id, zone_area_ha, zone_grade``.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    lab = labels[["block_id", "label_type", "lcz", "lcz_set"]].merge(
+        blocks[["block_id", "area_m2"]], on="block_id", validate="1:1"
+    )
+    lab["_key"] = [
+        _label_key(t, c, s)
+        for t, c, s in zip(lab["label_type"], lab["lcz"], lab["lcz_set"])
+    ]
+    labelled = lab[lab["_key"].notna()].reset_index(drop=True)
+    out = pd.DataFrame({
+        "block_id": lab["block_id"],
+        "zone_id": pd.Series([None] * len(lab), dtype=object),
+        "zone_area_ha": np.nan,
+        "zone_grade": False,
+    })
+    if labelled.empty:
+        return out
+
+    pos = {b: i for i, b in enumerate(labelled["block_id"])}
+    key_of = dict(zip(labelled["block_id"], labelled["_key"]))
+    edges = adjacency[
+        adjacency["block_a"].isin(pos) & adjacency["block_b"].isin(pos)
+    ]
+    same = edges[
+        edges["block_a"].map(key_of).to_numpy() == edges["block_b"].map(key_of).to_numpy()
+    ]
+    n = len(labelled)
+    ii = same["block_a"].map(pos).to_numpy()
+    jj = same["block_b"].map(pos).to_numpy()
+    graph = coo_matrix((np.ones(len(same)), (ii, jj)), shape=(n, n))
+    _, comp = connected_components(graph, directed=False)
+
+    comp_df = pd.DataFrame({
+        "block_id": labelled["block_id"], "area_m2": labelled["area_m2"], "comp": comp,
+    })
+    agg = comp_df.groupby("comp").agg(
+        zone_area_m2=("area_m2", "sum"), zone_id=("block_id", "min")
+    )
+    comp_df = comp_df.merge(agg, left_on="comp", right_index=True)
+    comp_df["zone_area_ha"] = comp_df["zone_area_m2"] / 1.0e4
+    comp_df["zone_grade"] = comp_df["zone_area_ha"] >= config.zones.min_zone_area_ha
+
+    zoned = out.drop(columns=["zone_id", "zone_area_ha", "zone_grade"]).merge(
+        comp_df[["block_id", "zone_id", "zone_area_ha", "zone_grade"]],
+        on="block_id", how="left",
+    )
+    zoned["zone_grade"] = zoned["zone_grade"].fillna(False).astype(bool)
+    # zone_id/zone_area_ha are NA (not necessarily Python None — pandas' string
+    # dtype uses its own NA marker) for unlabelled blocks; use pd.isna(), not
+    # `is None`, downstream.
+    n_zones = int(agg.shape[0])
+    n_graded = int(comp_df["zone_grade"].sum())
+    logger.info(
+        f"Zones: {n_zones} from {n} labelled blocks; "
+        f"{n_graded} blocks zone-grade ({n_graded / max(n, 1):.0%})"
+    )
+    return zoned
