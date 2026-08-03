@@ -188,6 +188,11 @@ class BlockParams(BaseModel):
     barrier_landcover_classes: list[str] = Field(default_factory=lambda: [
         "forest", "wood", "farmland",
     ])
+    # Rail classes acting as barriers: surface heavy rail only. Subways are
+    # underground and trams street-running — neither separates urban fabric.
+    rail_barrier_classes: list[str] = Field(default_factory=lambda: [
+        "rail", "light_rail", "narrow_gauge", "monorail", "funicular",
+    ])
     # Prefer Million Neighborhoods block polygons over grid fallback where the
     # MN layer covers a mega-block (requires rasters.million_neighborhoods_path).
     use_mn_blocks: bool = False

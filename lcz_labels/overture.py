@@ -47,6 +47,7 @@ class OvertureExtract:
     utm_crs: str
     roads: gpd.GeoDataFrame | None = None       # transportation/segment subtype=road
     mn_blocks: gpd.GeoDataFrame | None = None   # optional Million Neighborhoods blocks
+    rail: gpd.GeoDataFrame | None = None        # transportation/segment subtype=rail
 
 
 def connect() -> duckdb.DuckDBPyConnection:
@@ -131,8 +132,19 @@ def extract_overture(
         "infrastructure": cache_dir / f"infrastructure_{h}.parquet",
         "roads": cache_dir / f"roads_{h}.parquet",
     }
+    rail_path = cache_dir / f"rail_{h}.parquet"
     if all(p.exists() for p in paths.values()) and not force:
         logger.info(f"[{aoi_name}] Overture cache hit ({h})")
+        if rail_path.exists():
+            rail = gpd.read_parquet(rail_path)
+        else:
+            # Pre-rail cache (the grid-era extraction discarded rail): fetch the
+            # segment theme only, without invalidating the big cached layers.
+            logger.info(f"[{aoi_name}] cache lacks rail — fetching segments only")
+            con = connect()
+            _, rail = _fetch_segments(con, config, bbox, utm)
+            con.close()
+            rail.to_parquet(rail_path)
         return OvertureExtract(
             buildings=gpd.read_parquet(paths["buildings"]),
             landcover=gpd.read_parquet(paths["landcover"]),
@@ -140,6 +152,7 @@ def extract_overture(
             utm_crs=utm,
             roads=gpd.read_parquet(paths["roads"]),
             mn_blocks=load_million_neighborhoods(bbox, config, utm),
+            rail=rail,
         )
 
     con = connect()
@@ -179,10 +192,9 @@ def extract_overture(
         utm,
     )
 
-    # Roads: transportation/segment centerlines (road-deficit signal for LCZ 7).
-    road_cols = "CAST(subtype AS VARCHAR) AS subtype, CAST(class AS VARCHAR) AS class"
-    roads = _read_theme(con, config.overture_release, "transportation", "segment", bbox, road_cols)
-    roads = _finalise(roads[roads["subtype"] == "road"].copy() if not roads.empty else roads, utm)
+    # Roads + rail: transportation/segment centerlines (road-deficit signal for
+    # the LCZ 7 router; both are block barriers in Stage 4a).
+    roads, rail = _fetch_segments(con, config, bbox, utm)
     con.close()
 
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -190,12 +202,30 @@ def extract_overture(
     landcover.to_parquet(paths["landcover"])
     infrastructure.to_parquet(paths["infrastructure"])
     roads.to_parquet(paths["roads"])
+    rail.to_parquet(rail_path)
     logger.info(
         f"[{aoi_name}] Overture: {len(buildings)} buildings, {len(landcover)} land-cover, "
-        f"{len(infrastructure)} infrastructure, {len(roads)} roads"
+        f"{len(infrastructure)} infrastructure, {len(roads)} roads, {len(rail)} rail"
     )
     return OvertureExtract(buildings, landcover, infrastructure, utm, roads,
-                           load_million_neighborhoods(bbox, config, utm))
+                           load_million_neighborhoods(bbox, config, utm), rail)
+
+
+def _fetch_segments(
+    con: duckdb.DuckDBPyConnection,
+    config: LczLabelConfig,
+    bbox: tuple[float, float, float, float],
+    utm: str,
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    """(roads, rail) from transportation/segment, finalised to local UTM."""
+    cols = "CAST(subtype AS VARCHAR) AS subtype, CAST(class AS VARCHAR) AS class"
+    seg = _read_theme(con, config.overture_release, "transportation", "segment", bbox, cols)
+    if seg.empty:
+        empty = _finalise(seg, utm)
+        return empty, empty.copy()
+    roads = _finalise(seg[seg["subtype"] == "road"].copy(), utm)
+    rail = _finalise(seg[seg["subtype"] == "rail"].copy(), utm)
+    return roads, rail
 
 
 def load_million_neighborhoods(
