@@ -4,8 +4,10 @@ Queries the pinned Overture GeoParquet release directly from
 ``s3://overturemaps-us-west-2/release/{release}/...`` with DuckDB (spatial +
 httpfs), pushing bbox filters down onto Overture's ``bbox`` struct columns so
 only the relevant row groups are scanned. Results are cached per AOI as local
-GeoParquet and reprojected to the AOI's local UTM; extraction is idempotent
-(cache is keyed on the config hash).
+GeoParquet and reprojected to the AOI's local UTM; extraction is idempotent.
+The cache keys on ``config.extraction_hash(aoi)`` — only the Overture release,
+the source-trust lists and the AOI bbox — so tweaking classification thresholds
+never re-downloads hundreds of MB per city.
 
 Provenance handling (design principle 2): every Overture feature carries a
 ``sources`` array of ``{dataset, ...}`` structs fusing OSM + Microsoft + Google
@@ -122,7 +124,7 @@ def extract_overture(
     bbox = resolve_aoi_bbox(config.aoi(aoi_name), config)
     utm = local_utm_crs(bbox, config.aoi(aoi_name).equal_area_crs)
     cache_dir = config.cache_dir / aoi_name / "overture"
-    h = config.config_hash
+    h = config.extraction_hash(aoi_name)
     paths = {
         "buildings": cache_dir / f"buildings_{h}.parquet",
         "landcover": cache_dir / f"landcover_{h}.parquet",

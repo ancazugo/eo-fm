@@ -13,8 +13,10 @@ dependencies = [
     "geopandas>=1.1.2",
     "geotessera==0.8.0",
     "ipywidgets>=8.1.8",
+    "libpysal>=4.9",
     "loguru>=0.7.3",
     "matplotlib>=3.10.8",
+    "momepy>=1.0.0",
     "numpy>=2.4.6",
     "osm-rasterizer>=0.3.0",
     "osmnx>=2.1",
@@ -28,6 +30,7 @@ dependencies = [
     "rasterio>=1.5.0",
     "rioxarray>=0.21.0",
     "scikit-learn>=1.4",
+    "scipy>=1.18.0",
     "seaborn>=0.13.2",
     "shapely>=2",
     "timm>=1.0.24",
@@ -40,6 +43,11 @@ dependencies = [
     "wandb>=0.24.1",
     "xee>=0.0.24",
     "zarr>=3.1.5",
+]
+
+[project.optional-dependencies]
+gnn = [
+    "torch-geometric>=2.8.0.post1",
 ]
 
 [dependency-groups]

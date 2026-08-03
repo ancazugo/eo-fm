@@ -33,8 +33,6 @@ from loguru import logger
 
 from .config import LczLabelConfig
 
-BUILT_DELTA_MAX = 0.10   # |Δ built fraction| threshold for "stable"
-
 
 def export_google_temporal_ee(aoi_bbox, out_dir, years) -> str:
     """Documentation helper: the Earth Engine export for the temporal product.
@@ -123,7 +121,7 @@ def stability(built0, h0, built1, h1, config) -> tuple[bool, float]:
         return False, float("nan")   # no coverage -> conservative
     change_score = abs(built1 - built0)
     hclass_same = _height_class(h0, config) == _height_class(h1, config)
-    stable = (change_score < BUILT_DELTA_MAX) and hclass_same
+    stable = (change_score < config.change.built_delta_max) and hclass_same
     return bool(stable), float(change_score)
 
 

@@ -25,9 +25,11 @@ from pydantic import BaseModel, Field
 # Mirror src/utils/constants.py: pick up DATA_DIR (and friends) from the repo .env.
 load_dotenv()
 
-# Pinned Overture monthly release. Overture only retains ~60 days of releases,
-# so this tag will eventually 404 on S3 — override it in the YAML config (or set
-# a newer one here) when that happens. See docs.overturemaps.org/release-calendar.
+# Pinned Overture monthly release. Kept at 2026-06-17.0 (still on S3 as of
+# 2026-08-03; the current release is 2026-07-22.0) because the extraction cache
+# for all 51 So2Sat cities is keyed to it — repinning forces a full re-download
+# per AOI for no material label change vs the 2017/18 So2Sat ground truth.
+# Override in the YAML config if the tag 404s. See docs.overturemaps.org.
 DEFAULT_OVERTURE_RELEASE = "2026-06-17.0"
 DEFAULT_LABEL_YEAR = 2025
 
@@ -167,6 +169,51 @@ class RasterPaths(BaseModel):
     tile_size_deg: float = 0.5
 
 
+class BlockParams(BaseModel):
+    """Stage 4a — block delineation parameters.
+
+    Blocks are enclosures of the barrier network (motorized roads + rail +
+    water boundaries + large land-cover boundaries). Enclosures larger than
+    ``max_block_area_km2`` are rural / unmapped-road regimes: they fall back to
+    an intersection with the 320 m grid (``block_kind="grid_fallback"``).
+    """
+
+    max_block_area_km2: float = 0.5
+    sliver_area_m2: float = 200.0          # drop enclosure slivers below this
+    barrier_simplify_m: float = 1.0        # simplify barrier lines before enclosures
+    # Land-cover polygons at least this large contribute their boundaries as
+    # barriers (spec: >= 5 ha contiguous forest / farmland; water separately).
+    barrier_landcover_min_m2: float = 50_000.0
+    barrier_water_min_m2: float = 10_000.0
+    barrier_landcover_classes: list[str] = Field(default_factory=lambda: [
+        "forest", "wood", "farmland",
+    ])
+    # Prefer Million Neighborhoods block polygons over grid fallback where the
+    # MN layer covers a mega-block (requires rasters.million_neighborhoods_path).
+    use_mn_blocks: bool = False
+
+
+class ZoneParams(BaseModel):
+    """Stage 5c — zone formation (dissolving same-label adjacent blocks)."""
+
+    min_zone_area_ha: float = 15.0         # zone-grade iff contiguous area >= this
+    zone_conf_penalty: float = 0.70        # confidence multiplier when not zone-grade
+
+
+class ExportParams(BaseModel):
+    """Stage 8 — raster / patch-transfer export parameters."""
+
+    raster_res_m: float = 10.0             # label raster resolution (embedding-native)
+    erosion_px: int = 1                    # training-time block-edge erosion (Part 2)
+    boundary_frac: float = 0.75            # patch boundary_flag iff dominant_frac < this
+
+
+class ChangeMaskParams(BaseModel):
+    """Stage 7 — temporal stability thresholds."""
+
+    built_delta_max: float = 0.10          # stable iff |built fraction delta| < this
+
+
 # ── Top-level config ──────────────────────────────────────────────────────────
 
 class LczLabelConfig(BaseModel):
@@ -193,6 +240,10 @@ class LczLabelConfig(BaseModel):
     classification: ClassificationThresholds = Field(default_factory=ClassificationThresholds)
     confidence: ConfidenceThresholds = Field(default_factory=ConfidenceThresholds)
     router: Lcz7RouterThresholds = Field(default_factory=Lcz7RouterThresholds)
+    blocks: BlockParams = Field(default_factory=BlockParams)
+    zones: ZoneParams = Field(default_factory=ZoneParams)
+    export: ExportParams = Field(default_factory=ExportParams)
+    change: ChangeMaskParams = Field(default_factory=ChangeMaskParams)
 
     # Height model
     metres_per_floor: float = 3.2
@@ -228,6 +279,24 @@ class LczLabelConfig(BaseModel):
     def config_hash(self) -> str:
         """Stable 12-char hash of the full config (stamped into every output)."""
         blob = json.dumps(self._canonical(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(blob.encode()).hexdigest()[:12]
+
+    def extraction_hash(self, aoi_name: str) -> str:
+        """Per-AOI hash of ONLY the inputs that shape the Overture download.
+
+        The Overture cache (hundreds of MB per city) keys on this instead of
+        ``config_hash``, so changing a classification/confidence/block threshold
+        never forces a re-download; only the release, the source-trust lists or
+        the AOI's own bbox do.
+        """
+        a = self.aoi(aoi_name)
+        payload = {
+            "overture_release": self.overture_release,
+            "trusted_source_datasets": sorted(self.trusted_source_datasets),
+            "google_source_dataset": self.google_source_dataset,
+            "aoi": {"name": a.name, "bbox": list(a.bbox) if a.bbox else None},
+        }
+        blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()[:12]
 
     def to_yaml(self, path: str | Path) -> Path:
