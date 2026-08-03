@@ -64,6 +64,26 @@ def test_warp_tile_onto_larger_grid_partial_coverage():
     assert (out == 0).any()          # some of the canvas is outside the tile
 
 
+def test_warp_accumulates_disjoint_tiles_without_erasing_earlier_ones():
+    # Regression: rasterio.warp.reproject recomputes the WHOLE destination
+    # from the current source alone, writing dst_nodata everywhere outside
+    # its footprint — passing the same array as `destination` across calls
+    # used to silently erase every earlier tile once a later, non-overlapping
+    # tile was warped onto the same accumulator (only the last tile survived).
+    # Two tiles at disjoint UTM locations must BOTH show up in a shared dst.
+    da_left = _synthetic_da(3.0, origin=(500000.0, 5500000.0), size=10)
+    da_right = _synthetic_da(7.0, origin=(500200.0, 5500000.0), size=10)
+    a1, t1, c1 = _tile_to_northup_array(da_left)
+    a2, t2, c2 = _tile_to_northup_array(da_right)
+    dst_transform = from_origin(500000.0, 5500000.0, 10.0, 10.0)
+    dst = np.zeros((1, 10, 30), dtype=np.float32)
+    warp_tile_onto_grid(a1, t1, c1, dst_transform, c1, (10, 30), dst=dst)
+    warp_tile_onto_grid(a2, t2, c2, dst_transform, c1, (10, 30), dst=dst)
+    np.testing.assert_allclose(dst[0, :, :10], 3.0)     # left tile still present
+    np.testing.assert_allclose(dst[0, :, 20:], 7.0)     # right tile placed correctly
+    assert (dst[0, :, 10:20] == 0).all()                # untouched gap stays zero
+
+
 def test_warp_last_writer_wins_on_shared_dst():
     da1 = _synthetic_da(1.0, size=10)
     da2 = _synthetic_da(9.0, size=10)

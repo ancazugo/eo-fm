@@ -52,20 +52,33 @@ def warp_tile_onto_grid(
 ) -> np.ndarray:
     """Reproject one (C, H, W) tile array onto the destination grid (nearest).
 
-    Writes into ``dst`` in place when given (accumulate across tiles with
-    last-writer-wins semantics identical to ``infer_roi``'s mosaic), else
-    allocates a fresh ``(C, *dst_shape)`` array. Zero (never written) marks
-    no-coverage — embeddings are never exactly all-zero in practice, but the
-    dataset layer must additionally check the label rasters' own validity.
+    ``rasterio.warp.reproject`` recomputes EVERY pixel of ``destination`` from
+    the current source alone — pixels outside the source's footprint are
+    overwritten with ``dst_nodata``, not left untouched. So accumulating tiles
+    by passing the same array as ``destination`` across calls silently erases
+    every earlier tile outside the current one's footprint (only the last
+    tile processed would ever survive). Instead we always warp into a fresh
+    per-tile buffer and merge only its covered pixels into ``dst`` via
+    ``np.copyto(..., where=...)`` — the same last-writer-wins merge pattern
+    ``infer_roi.py`` uses for its own multi-tile mosaic.
+
+    Writes the merge into ``dst`` in place when given, else allocates a fresh
+    ``(C, *dst_shape)`` array. Zero (never covered) marks no-coverage —
+    embeddings are never exactly all-zero in practice, but the dataset layer
+    must additionally check the label rasters' own validity.
     """
     c = arr.shape[0]
     out = dst if dst is not None else np.zeros((c, *dst_shape), dtype=np.float32)
+    tmp = np.zeros((c, *dst_shape), dtype=np.float32)
     reproject(
-        source=arr, destination=out,
+        source=arr, destination=tmp,
         src_transform=src_transform, src_crs=src_crs,
         dst_transform=dst_transform, dst_crs=dst_crs,
         resampling=Resampling.nearest, src_nodata=None, dst_nodata=0.0,
     )
+    covered = np.any(tmp != 0, axis=0)   # matches datasets.pool_blocks_mean's convention
+    for band in range(c):
+        np.copyto(out[band], tmp[band], where=covered)
     return out
 
 
