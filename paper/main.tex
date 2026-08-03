@@ -1,0 +1,439 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{xcolor}
+\usepackage[round]{natbib}
+\usepackage[hidelinks]{hyperref}
+\IfFileExists{microtype.sty}{\usepackage{microtype}}{}
+
+% ---------------------------------------------------------------------------
+% Draft machinery: every number copied from campaign notes is wrapped in \uv{}
+% (unverified) and renders red. During the B4 audit, once a number is
+% re-derived from cached probs/JSONs/wandb, replace \uv{x} with x.
+% Set \verifiedtrue to silence all remaining markers for a clean preview only.
+\newif\ifverified
+\verifiedfalse
+\newcommand{\uv}[1]{\ifverified#1\else\textcolor{red}{#1}\fi}
+\newcommand{\todo}[1]{\textcolor{orange}{[TODO: #1]}}
+% ---------------------------------------------------------------------------
+
+\title{Which Earth-Observation Embedding Is Best for Global Local Climate
+Zone Mapping?\\ A Large-Scale Comparison with Honest Cross-City Evaluation}
+
+\author{Andr\'es Camilo Z\'u\~niga-Gonz\'alez\\
+  Department of Computer Science and Technology, University of Cambridge\\
+  \texttt{acz25@cam.ac.uk}
+  \and
+  \todo{co-authors / supervisors}
+}
+\date{July 2026 --- preprint}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Precomputed Earth-observation (EO) embedding products promise
+plug-and-play features for geospatial prediction, but their relative
+merits for demanding, globally distributed tasks remain unclear. We
+present the first large-scale comparison of three embedding products
+--- TESSERA v1.1, Google AlphaEarth, and Embedded Seamless Data ---
+on 17-class Local Climate Zone (LCZ) classification over the So2Sat
+LCZ42 \emph{culture-10} benchmark: 400{,}673 patches, 42 training
+cities, and 10 held-out evaluation cities spanning all inhabited
+continents. Under an identical training recipe, TESSERA leads by
+$\sim$0.10 Cohen's kappa (0.619 vs.\ 0.520/0.513), and the kNN and
+linear probes agree. Intrinsic representation diagnostics do \emph{not} predict
+this ranking: TESSERA is the most geography-entangled embedding by
+silhouette and domain-classifier analysis yet wins downstream, and
+the one probe that follows the diagnostics --- a generative GMM
+density on pooled features, where Seamless leads --- is also the one
+that discards spatial patch structure. The
+embeddings are strongly complementary --- cross-embedding ensembling
+gains +2--4 kappa points at every stage of our campaign, and much of
+the optimal (lopsided) ensemble weighting is implicit calibration.
+Because validation and test share the same 10 cities, learned
+combiners silently exploit city identity: a stacked
+logistic-regression combiner scores 0.776 fit on validation but
+collapses to 0.612 under leave-one-city-out (LOCO) refitting,
+below plain averaging. We therefore report all combiners under a LOCO
+protocol. Finally, 13 structural scalars (GHSL built height/surface,
+canopy height, OSM land use) alone beat an entire embedding model
+LOCO (0.579 vs.\ 0.506), and a confidence-gated offset
+corrector using them lifts the honest benchmark state of the art to
+kappa 0.706--0.708 (OA 0.732--0.734) --- far above the best
+published culture-10 results. We release code, per-city results, and
+a catalogue of documented negative results (capacity scaling,
+test-time adaptation, stacking, redundant-embedding fusion).
+\end{abstract}
+
+\section{Introduction}\label{sec:intro}
+
+\todo{Full intro pass. Skeleton below.}
+
+Local Climate Zones \citep{stewart2012lcz} provide a
+culture-neutral typology of urban form used across urban climatology.
+Global LCZ mapping remains hard: the canonical So2Sat LCZ42
+benchmark's cross-city (\emph{culture-10}) split has resisted
+progress, with published overall accuracies around
+0.61 \citep{zhu2020so2sat,qiu2020sen2lcz}.
+
+Meanwhile, a new class of \emph{precomputed EO embedding products}
+--- TESSERA \citep{tessera2025}, Google AlphaEarth
+\citep{alphaearth2025}, Embedded Seamless Data \todo{cite} --- offers
+dense, annual, 10--30\,m feature maps intended to replace raw imagery
+in downstream models. Early comparisons are small-scale: five Swiss
+cities for LCZ \citep{swiss_lcz2026}, or task suites without LCZ
+\citep{bettertogether2026}. Whether these products transfer to unseen
+cities globally --- the operationally relevant setting --- is open.
+
+Contributions:
+\begin{enumerate}
+  \item \textbf{Large-scale honest comparison} of three embedding
+    products on culture-10 under one recipe and across probe families
+    (Sec.~\ref{sec:results-solo}).
+  \item \textbf{Diagnostics--performance disconnect}: intrinsic
+    embedding diagnostics (class/geography silhouettes,
+    domain-classifier AUC) mispredict the downstream ranking
+    (Sec.~\ref{sec:results-diag}).
+  \item \textbf{Complementarity and calibration}: cross-embedding
+    ensembles dominate all within-model levers; optimal weights
+    largely re-derive per-model temperature scaling
+    (Sec.~\ref{sec:results-ens}).
+  \item \textbf{Honest-evaluation methodology}: a leave-one-city-out
+    audit that exposes city-identity leakage in learned combiners on
+    shared-city val/test benchmarks (Sec.~\ref{sec:results-ens}).
+  \item \textbf{Structural auxiliary data}: 13 zonal scalars beat a
+    full embedding model; a confidence-gated corrector sets a new
+    honest benchmark SOTA, kappa 0.706--0.708
+    (Sec.~\ref{sec:results-aux}).
+  \item \textbf{Documented negatives}: capacity, BN-based test-time
+    adaptation (with a label-shift diagnosis), stacked combiners, and
+    redundant-embedding fusion all fail here (Sec.~\ref{sec:negatives}).
+\end{enumerate}
+
+\section{Related work}\label{sec:related}
+
+\todo{Expand each to a paragraph.}
+\begin{itemize}
+  \item \textbf{LCZ mapping and So2Sat LCZ42}: \citep{stewart2012lcz,
+    zhu2020so2sat, qiu2020sen2lcz, demuzere2022lcz}. Published
+    culture-10 results; within-city vs.\ cross-city evaluation gap.
+  \item \textbf{EO foundation models and embedding products}:
+    \citep{tessera2025, tesserav2_2026, alphaearth2025}; benchmark
+    suites GEO-Bench \citep{lacoste2023geobench}, PANGAEA
+    \todo{cite}; none evaluate cross-city LCZ at scale.
+  \item \textbf{Embedding comparisons for LCZ}: the five-city Swiss
+    study \citep{swiss_lcz2026} (TESSERA $>$ AlphaEarth, consistent
+    with our global result); complementarity of Earth embeddings
+    \citep{bettertogether2026}.
+  \item \textbf{Honest evaluation / leakage}: spatial autocorrelation
+    in EO benchmarks \todo{cite ploton2020 or similar}; our LOCO
+    combiner audit is complementary (leakage through the
+    \emph{combiner}, not the backbone).
+  \item \textbf{Methods used}: noisy student \citep{xie2020noisy},
+    AdaBN \citep{li2016adabn}, TENT \citep{wang2021tent}, temperature
+    scaling \citep{guo2017calibration}, mixup \citep{zhang2018mixup},
+    label-shift estimation \citep{lipton2018bbse} (future work).
+\end{itemize}
+
+\section{Data and embeddings}\label{sec:data}
+
+\subsection{Benchmark and split}
+So2Sat LCZ42 v4 \citep{zhu2020so2sat}: 400{,}673 geolocated
+320\,m patches labelled with 17 LCZ classes across 52 cities. We use
+the original \emph{culture-10} split: 42 training cities
+(352{,}366 patches); validation (24{,}119) and testing
+(24{,}188) drawn from the western/eastern halves of 10 held-out
+cities on different continents (Guangzhou, Jakarta, Moscow, Mumbai,
+Munich, Nairobi, San Jos\'e, Santiago, Sydney, Tehran). Ensemble
+tables use the 23{,}878/23{,}858 val/test patches covered
+by all three embedding sources (98.6\% of the original test
+set). Two properties matter for evaluation honesty
+(Sec.~\ref{sec:methods-loco}): training cities are disjoint from
+evaluation cities, but \emph{validation and test share the same 10
+cities} (median test-patch to nearest-val-patch distance
+\uv{2.55}\,km).
+
+\subsection{Embedding products}
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lccccc}
+\toprule
+Product & Channels & Resolution & Year used & Access & Source data\\
+\midrule
+TESSERA v1.1 & 128 (int8+scale) & 10 m & 2017 & open & S1+S2 time series\\
+AlphaEarth & 64 & 10 m & 2017 & \todo{terms} & multi-source\\
+Embedded Seamless & 13$\to$72 & 30 m & 2017 & \todo{terms} & \todo{fill}\\
+\bottomrule
+\end{tabular}
+\caption{Embedding products compared. \todo{complete columns; add
+dequantization notes (AlphaEarth coop int8; Seamless 13-band index
+expansion to 72 channels).}}
+\label{tab:embeddings}
+\end{table}
+
+\todo{Paragraph per product: provenance, quantization, tiling; note
+AlphaEarth = source.coop int8 release (``coop''), cf.\ GEE version.}
+
+\subsection{Auxiliary structural data}
+GHS-BUILT-H ANBH 2018 (100\,m), GHS-BUILT-S 2020 (100\,m, incl.\
+non-residential share), ETH global canopy height 2020 (10\,m)
+\citep{lang2023canopy}, OSM land-use fractions. Thirteen zonal
+scalars per patch (Sec.~\ref{sec:results-aux}); OSM is used on the
+combiner side only, since completeness correlates with city identity.
+
+\section{Methods}\label{sec:methods}
+
+\subsection{Classifiers and recipe}\label{sec:methods-recipe}
+All embeddings train with an identical recipe on 32$\times$32-pixel
+patch crops: timm ResNet-34 with a 3$\times$3 stem, batch 256, lr
+$5{\times}10^{-4}$ with 3-epoch warmup and cosine decay, weight decay
+$10^{-3}$, mixup $\alpha{=}0.4$, label smoothing 0.1,
+$\sqrt{\text{inv-freq}}$ class weights, early stopping on validation
+kappa, dihedral test-time augmentation. The recipe was tuned on
+TESSERA (the eventual winner) --- a conservative bias we quantify
+with \todo{note per-embedding sanity sweeps if run}. Probe families
+for ranking robustness: cosine-kNN ($k{=}20$) and a BatchNorm+linear
+probe on GAP-pooled features, trained identically.
+
+Capacity was tested and rejected: ResNet-101/152 do not beat
+ResNet-34 (0.603/0.591 vs.\ 0.619) --- the bottleneck
+is representation and shift, not model size.
+
+\subsection{Semi-supervised noisy student}\label{sec:methods-ssl}
+For the system-level results we add three noisy-student rounds
+\citep{xie2020noisy} on \uv{286{,}207} unlabeled patches sampled
+inside the training-tile footprints, weakly labelled by the Demuzere
+et al.\ global 100\,m LCZ map \citep{demuzere2022lcz}
+(agreement-gated: teacher top-1 = weak label $\wedge$ confidence
+$\geq 0.7$). Kappa: 0.619 $\to$ 0.6419 $\to$ 0.6497;
+gains saturate as students converge toward the ensemble consensus.
+Matching self-teacher rounds for the weaker embeddings confirm SSL
+needs a strong teacher: AlphaEarth 0.5195 $\to$ 0.5218 (keep-rate
+11.4\%) and Seamless 0.5125 $\to$ 0.5135 (keep-rate 5.1\% --- the
+weak teacher rarely agrees with the weak-label map; 48.9\% of the
+pool has Seamless coverage).
+
+\subsection{Ensembling, calibration, and the LOCO protocol}
+\label{sec:methods-loco}
+Softmax averaging (equal or weighted), per-model temperature scaling
+fit on validation NLL, and learned stacking are compared. Because
+val/test share cities, any combiner fit on validation can encode
+city-conditional structure. Our audit: refit the combiner on 9 of the
+10 evaluation cities' validation patches, evaluate on the held-out
+city's test patches, pool over the 10 folds (LOCO). Base models never
+see evaluation cities, so only combiners need this treatment.
+
+\subsection{Confidence-gated structural offset corrector}
+\label{sec:methods-aux}
+Per LOCO fold: $\text{logits} = \log p_{\text{weighted}} + A \cdot
+\text{aux} + b$, applied only where the ensemble max-probability is
+below a gate $\tau$; $A \in \mathbb{R}^{17\times 13}$, ridge
+$\lambda$, and $\tau$ are selected city-grouped inside the fold's
+nine fit cities. Freezing the probability pathway at coefficient~1 is
+essential: free logistic regression on $[\log p \oplus \text{aux}]$
+collapses under LOCO like the stacker.
+
+\subsection{Intrinsic diagnostics}\label{sec:methods-diag}
+On GAP-pooled features (PCA-50): silhouette scores by class /
+city / country / continent; kNN label agreement; train-vs-test
+domain-classifier AUC; per-class centroid drift. UMAP visualizations
+for qualitative structure.
+
+\section{Results}\label{sec:results}
+
+\subsection{Solo comparison across probe families}
+\label{sec:results-solo}
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lccc}
+\toprule
+Test kappa & TESSERA v1.1 & AlphaEarth & Seamless\\
+\midrule
+cosine-kNN (GAP, $k{=}20$) & 0.499 & 0.464 & 0.458\\
+GMM density (GAP, 3 comp.\ diag) & 0.421 & 0.375 & \textbf{0.460}\\
+linear probe (GAP) & 0.596 & 0.534 & 0.471\\
+ResNet-34 (opt3, 3 seeds) & \textbf{0.621}$\pm$0.005 & 0.522$\pm$0.006 & 0.506$\pm$0.011\\
+\quad + noisy-student SSL & 0.6497 & 0.5218 & 0.5135\\
+\bottomrule
+\end{tabular}
+\caption{Solo results, culture-10 test kappa. ResNet row:
+mean$\pm$sd over 3 seeds; the campaign teacher checkpoints used
+downstream are the first seed (0.619/0.520/0.513). SSL rows are
+system-level (Sec.~\ref{sec:methods-ssl}), separated from the
+like-for-like comparison.}
+\label{tab:solo}
+\end{table}
+
+TESSERA leads by $\sim$0.10 kappa at the CNN level (stable across
+seeds: sd $\leq$ 0.011 per embedding), $\sim$0.06 at the linear-probe
+level, and $\sim$0.04 at the kNN level, but the ranking is \emph{not}
+universal across
+probe families: under a generative per-class GMM density on the same
+pooled features, Seamless comes first (0.460 vs.\ 0.421).
+Pooled-feature probes track the intrinsic diagnostics of
+Sec.~\ref{sec:results-diag}, where Seamless is the most
+class-organized; the discriminative CNN, which exploits spatial patch
+structure, inverts them. Per-class breakdown:
+\todo{table/figure; weakest classes LCZ 7/10/15 across all
+embeddings}.
+
+\subsection{Intrinsic diagnostics do not predict the ranking}
+\label{sec:results-diag}
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lcccc}
+\toprule
+& \multicolumn{2}{c}{silhouette} & domain & \% test in sparse\\
+Embedding & continent & LCZ class & AUC & train regions\\
+\midrule
+TESSERA v1.1 & $+$0.039 & $-$0.006 & 0.885 & 55.4\\
+AlphaEarth & $+$0.153 & $+$0.075 & 0.958 & 76.6\\
+Seamless & $-$0.012 & $+$0.091 & 0.786 & 37.5\\
+\bottomrule
+\end{tabular}
+\caption{Intrinsic diagnostics (GAP-pooled, PCA-50). Seamless looks
+best on \emph{both} axes --- highest class silhouette \emph{and}
+lowest train/test shift --- yet ranks last downstream; TESSERA is the
+most geography-entangled with near-zero class structure, yet wins;
+AlphaEarth clusters most strongly by geography and shifts most.}
+\label{tab:diag}
+\end{table}
+
+Pooled-feature diagnostics invert the downstream ranking ---
+a caution for embedding-probing methodology: patch-level spatial
+structure, which pooling destroys, appears to carry the
+discriminative signal. \todo{expand discussion; UMAP figure}
+
+\subsection{Complementarity, calibration, and the leakage autopsy}
+\label{sec:results-ens}
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lccc}
+\toprule
+Method (3 members: v3/coop-v1/seamless) & Kappa & OA & Macro-F1\\
+\midrule
+best solo & 0.6497 & 0.6794 & 0.5656\\
+equal-weight average & 0.6691 & 0.6983 & 0.5978\\
+equal-weight, temperature-calibrated & 0.6824 & 0.7109 & 0.6056\\
+weighted [.20/.70/.10] (2 DoF on val) & \textbf{0.6923} & 0.7202 & 0.6065\\
+weighted, LOCO (fully honest) & \textbf{0.6871} & 0.7154 & 0.6038\\
+stacked LR, fit on val & 0.7756 & --- & (leaked)\\
+stacked LR, LOCO & 0.6121 & 0.6461 & 0.5167\\
+\bottomrule
+\end{tabular}
+\caption{Ensembles and the stacking autopsy.}
+\label{tab:ens}
+\end{table}
+
+Key observations: (i) ensembling beats every within-model lever
+tried; (ii) the lopsided optimal weights are mostly implicit
+calibration --- fitted temperatures 0.92/0.46/0.98
+(models are \emph{under}-confident from mixup + label smoothing);
+after calibration the optimum is balanced [.35/.40/.25] at
+0.6903; (iii) the stacker's +8.3-point advantage on the
+standard protocol is almost entirely city-identity leakage,
+collapsing below equal-weight under LOCO. Per-city LOCO kappa spans
+0.47 (Nairobi, Santiago) to 0.90 (Munich).
+
+\subsection{Structural auxiliary data}\label{sec:results-aux}
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lccc}
+\toprule
+Method (all LOCO) & Kappa & OA & Macro-F1\\
+\midrule
+weighted ensemble (baseline) & 0.6871 & 0.7154 & 0.6038\\
+aux-only LR (13 scalars) & 0.5785 & 0.6166 & 0.4521\\
+free LR on $[\log p \oplus \text{aux}]$ & 0.6584 & --- & ---\\
+gated offset corrector & \textbf{0.7055--0.7081} & 0.732--0.734 & 0.613--0.623\\
+\bottomrule
+\end{tabular}
+\caption{Structural aux data under LOCO. The 13 scalars alone beat
+the full Seamless model (0.506).}
+\label{tab:aux}
+\end{table}
+
+Motivation: \uv{50--58}\% of residual ensemble errors lie on
+structurally defined class pairs (3$\leftrightarrow$6,
+8$\leftrightarrow$10, 6$\leftrightarrow$9, C$\leftrightarrow$D,
+height tiers). The corrector helps exactly where embeddings fail
+(Nairobi \uv{+8.0}, Tehran \uv{+5}); canopy height resolves
+C$\leftrightarrow$D nearly purely; 4$\leftrightarrow$5 and
+3$\leftrightarrow$6 do not yield to 100\,m zonal statistics.
+Training aux as input channels (132-channel fusion,
+0.6310 solo, +1.2 over the like-for-like baseline) is \emph{redundant} with
+the corrector at the ensemble level (+0.05 kappa on top) ---
+two routes to the same $\sim$0.702; the zero-training corrector
+banks it. \todo{cite stacking\_results\_auxgate JSONs in repro
+appendix}
+
+\subsection{Context: published culture-10 results}
+\label{sec:results-context}
+\todo{Short table: So2Sat ResNeXt OA $\approx$ 0.61; Sen2LCZ; ours.
+State caveats: input modality differs (embeddings vs raw S1/S2);
+98.6\% coverage subset; v4 geolocated patch reconstruction.}
+
+\section{Negative results}\label{sec:negatives}
+\begin{itemize}
+  \item \textbf{Capacity}: ResNet-101/152 $\leq$ ResNet-34
+    consistently.
+  \item \textbf{Per-city BN test-time adaptation}: AdaBN/TENT lose
+    4--8 pooled kappa points (LOCO ensemble 0.6871 $\to$
+    0.609/0.616; solo TESSERA 0.6497 $\to$ 0.598/0.608) despite
+    helping covariate-shifted cities (Tehran \uv{+11.6}); per-city BN statistics absorb the
+    city's class mix --- the shift is \emph{label}-shift-shaped, and
+    statistics matching mis-corrects it.
+  \item \textbf{Stacked combiners}: leakage autopsy above.
+  \item \textbf{Redundant-embedding input fusion}: TESSERA$\oplus$
+    AlphaEarth channels 0.5974 $<$ TESSERA alone 0.619
+    (contrast: orthogonal \emph{physical} aux channels help,
+    Sec.~\ref{sec:results-aux}).
+  \item \textbf{SSL saturation}: iteration gains +2.3, +0.8,
+    then vetoed; students converge toward ensemble consensus and a
+    weak teacher gains little from self-training (AlphaEarth +0.2,
+    Seamless +0.1 kappa points solo).
+    Confidence thresholds must be set relative to teacher calibration
+    (a mixup/label-smoothed teacher has a $\sim$\uv{0.9} softmax
+    ceiling).
+\end{itemize}
+
+\section{Discussion}\label{sec:discussion}
+\todo{Draft. Points: (1) embedding choice matters more than any
+training lever, but complementarity matters more than choice; (2)
+honest evaluation is fragile on shared-city benchmarks --- LOCO
+combiner audits should be standard; (3) physical structure (height,
+built fraction, canopy) is the missing information, pointing to what
+the next generation of EO FMs should encode; (4) remaining failure
+modes are label shift and rare classes (LCZ 7/1/10/15) --- data
+problems, not optimization problems.}
+
+\paragraph{Limitations.} Three seeds for the solo comparison but
+single-seed SSL/ensemble results; 2017 embeddings only; TESSERA
+v2 not yet globally available over the benchmark at submission time
+(coverage 43.5\% of patches as of 2026-07-14); OA/kappa on a
+98.6\% coverage subset of the original test set; the shared
+recipe was tuned on the winning embedding.
+
+\paragraph{Future work.} Label-shift-aware correction (EM/BBSE);
+rare-class supervision via structural-consistency-gated
+pseudo-labels; TESSERA v2 once coverage completes; honest stacking
+via out-of-fold predictions over training cities.
+
+\section*{Reproducibility}
+Code at \todo{repo URL}; all runs logged to WandB; cached ensemble
+probabilities and result JSONs enumerated in
+Appendix~\todo{appendix}. Every number in this paper is re-derived
+from those artifacts by \texttt{paper/verify\_numbers.py}
+\todo{write during B4 audit}.
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}

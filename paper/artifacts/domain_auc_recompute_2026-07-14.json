@@ -1,0 +1,14 @@
+{
+ "GeoTessera_v1.1_global": {
+  "domain_auc": 0.8845,
+  "frac_sparse": 0.5537
+ },
+ "AlphaEarthCoop": {
+  "domain_auc": 0.9575,
+  "frac_sparse": 0.7659
+ },
+ "EmbeddedSeamless": {
+  "domain_auc": 0.7856,
+  "frac_sparse": 0.375
+ }
+}
