@@ -74,8 +74,14 @@ src/
     grid_tiles.py            #   grid-tile items + GridSegDataset/DataModule (segmentation)
   utils/
     runtime.py               #   device/dequantize/wandb-run/city-inference helpers
-lcz_labels/                  # Overture/OSM LCZ pseudo-labelling package (own README + tests)
+lcz_labels/                  # Overture/OSM LCZ pseudo-labelling package (own README + tests);
+                             #   block-based (momepy enclosures on roads/rail/water, not the
+                             #   320 m So2Sat grid, which survives only as a compat export)
                              #   python -m lcz_labels all --aoi Nairobi
+lcz_train/                   # Training harness on the lcz_labels block export: dense (A) and
+                             #   block-as-sample (B) heads under one masked marginalised-CE
+                             #   loss, city-held-out region-stratified splits, block-level eval
+                             #   python -m lcz_train run --exp A1|ladder
 paper/                       # arXiv draft sources + verify_numbers.py (run_paper_*.sh reproduce)
 R/                           # R figure scripts (reads data/wandb_export_*.csv)
 ```
