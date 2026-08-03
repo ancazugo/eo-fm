@@ -46,8 +46,19 @@ def dense_forward_and_loss(model, batch, cfg: TrainConfig) -> torch.Tensor:
 
 
 def block_forward_and_loss(model, batch, cfg: TrainConfig) -> torch.Tensor:
-    """B-family step: pooled-embedding logits -> marginalised CE over the bitmask."""
-    logits = model(batch["embedding"])
+    """B1-family step: concat(pooled embedding, extra) -> marginalised CE.
+
+    Matches ``B1MeanPoolMLP``'s flat ``in_features = in_channels +
+    extra_features`` contract. B2 (attention pooling over a raw per-block
+    pixel set) and B3 (graph batches) need different batch shapes than
+    ``BlockDataset`` produces here and are wired directly in
+    ``experiments.py`` rather than through this helper.
+    """
+    x = batch["embedding"]
+    extra = batch.get("extra")
+    if extra is not None and extra.numel() > 0:
+        x = torch.cat([x, extra], dim=-1)
+    logits = model(x)
     target = bitmask_to_target(batch["bitmask"])
     weights = torch.tensor(cfg.class_weights) if cfg.class_weights else None
     conf = batch.get("confidence")
