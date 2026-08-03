@@ -13,3 +13,24 @@ CLAUDE.md
 wandb/
 /cache
 .Renviron
+# Tooling / editor state
+.claude/
+.pytest_cache/
+logs/
+# Generated experiment data (small reference inputs in data/ stay tracked)
+/data/patches_reference_unlabeled*.gpkg
+/data/pseudo_labels*/
+/data/so2sat_grid_tiles_0_1deg.gpkg
+/data/so2sat_city_mgrs_codes.json
+# Exploratory notebooks (embedded outputs, tens of MB)
+notebooks/
+# LaTeX build artifacts
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.fdb_latexmk
+paper/*.fls
+paper/*.log
+paper/*.out
+paper/*.pdf
+paper/build.log
