@@ -244,11 +244,22 @@ def delineate(
         logger.warning("no primary barriers — whole AOI is one mega-block")
         enc = gpd.GeoDataFrame(geometry=[limit_poly], crs=utm)
     else:
+        # momepy polygonizes primary+additional barriers together with
+        # limit's own boundary line — real road/rail segments extend beyond
+        # the AOI bbox, so this naturally produces enclosed faces OUTSIDE
+        # limit_poly too (unbounded on the far side of whatever barrier
+        # happens to close them off, occasionally a country-scale "leak").
+        # clip=True drops faces whose representative point falls outside
+        # limit; the explicit intersection below additionally trims any kept
+        # face back to the true AOI extent (representative-point containment
+        # doesn't guarantee the whole polygon is inside).
         enc = momepy.enclosures(
             primary,
             limit=gpd.GeoSeries([limit_poly], crs=utm),
             additional_barriers=additional or None,
+            clip=True,
         )
+        enc["geometry"] = shapely.intersection(enc.geometry.values, limit_poly)
 
     enc = enc.set_geometry(enc.geometry.make_valid())
     enc = enc.explode(ignore_index=True)

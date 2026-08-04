@@ -253,6 +253,30 @@ def test_build_blocks_nairobi_fixture(cfg):
     assert (adj["shared_len_m"] > 0).all()
 
 
+def test_leaked_barrier_does_not_produce_enclosure_outside_limit(cfg):
+    # Regression: momepy.enclosures polygonizes primary+additional barriers
+    # together with `limit`'s own boundary line. Real road/rail segments
+    # extend beyond the AOI bbox, so a barrier that starts on the limit
+    # boundary, loops far outside, and closes back on the boundary forms one
+    # huge enclosed face OUTSIDE the true AOI — momepy returns it unfiltered
+    # unless called with clip=True (and even then only filters by
+    # representative-point containment, not a geometric clip). Without both
+    # clip=True and the explicit intersection, this "leak" becomes a single
+    # ~100 km2 grid_fallback mega-block far outside Manchester's real extent
+    # (observed on real data: 4.79M leaked cells spanning ~914,000 km2).
+    roads = _road_grid()
+    leak = LineString([(150, 300), (150, 10300), (10450, 10300), (10450, 300), (250, 300)])
+    roads = gpd.GeoDataFrame(
+        {"class": list(roads["class"]) + ["residential"]},
+        geometry=list(roads.geometry) + [leak], crs=UTM,
+    )
+    blocks = delineate(_extract(roads=roads), LIMIT, cfg, utm=UTM)
+    minx, miny, maxx, maxy = blocks.total_bounds
+    assert minx >= -1e-6 and miny >= -1e-6
+    assert maxx <= 300 + 1e-6 and maxy <= 300 + 1e-6
+    assert blocks.geometry.area.sum() <= LIMIT.area + 1e-6
+
+
 def test_assemble_barriers_prefers_config_classes(cfg):
     roads = _road_grid()
     rail = _gdf([LineString([(50, 0), (50, 300)])], **{"class": ["subway"]})
