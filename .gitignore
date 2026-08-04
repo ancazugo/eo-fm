@@ -34,3 +34,6 @@ paper/*.log
 paper/*.out
 paper/*.pdf
 paper/build.log
+# M4 pilot run artifacts (regenerable; run_pilot_m4.py itself is tracked)
+run_pilot_m4.log
+run_pilot_m4.out

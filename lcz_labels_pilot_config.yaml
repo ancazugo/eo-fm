@@ -1,0 +1,171 @@
+overture_release: 2026-06-17.0
+label_year: 2025
+change_baseline_year: 2017
+patch_size_m: 320.0
+aoi_list:
+- name: Auckland
+  bbox:
+  - 174.5817787620001
+  - -37.08463193699998
+  - 174.98911423000004
+  - -36.81165976199998
+  equal_area_crs: null
+- name: Manchester
+  bbox:
+  - -2.5021236629999635
+  - 53.31425070300003
+  - -2.02882997699993
+  - 53.64826470000003
+  equal_area_crs: null
+- name: "Medell\xEDn"
+  bbox:
+  - -75.66467733799993
+  - 6.110637619000045
+  - -75.49745066299994
+  - 6.361926395000069
+  equal_area_crs: null
+- name: Busan
+  bbox:
+  - 128.7821667930001
+  - 35.041683128000045
+  - 129.22051349800006
+  - 35.303617564000035
+  equal_area_crs: null
+- name: Accra
+  bbox:
+  - -0.4903227289999563
+  - 5.462354594000033
+  - 0.0500397810000663
+  - 5.762150159000044
+  equal_area_crs: null
+- name: Toronto
+  bbox:
+  - -80.00135722599998
+  - 43.17405652600007
+  - -78.97046071699998
+  - 43.96877551400007
+  equal_area_crs: null
+- name: Bangkok
+  bbox:
+  - 100.16191834300008
+  - 13.505899000000056
+  - 100.88386221300004
+  - 14.168426428000032
+  equal_area_crs: null
+so2sat_dir: /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4
+cities_subdir: cities
+city_bounds_csv: data/so2sat_guppd_bounds.csv
+cache_dir: /maps/acz25/phd-thesis-data/output/lcz_labels_blocks_pilot
+rasters:
+  ghs_built_h_dir: /maps/acz25/phd-thesis-data/input/aux_struct/ghs_built_h
+  ghs_built_s_dir: /maps/acz25/phd-thesis-data/input/aux_struct/ghs_built_s
+  google_temporal_dir: null
+  million_neighborhoods_path: null
+  tile_size_deg: 0.5
+classification:
+  natural_bsf_max: 0.05
+  natural_ghs_built_s_max: 0.1
+  water_min: 0.75
+  trees_dense_min: 0.75
+  trees_scatter_min: 0.35
+  trees_scatter_veg_min: 0.75
+  shrub_min: 0.6
+  lowplants_min: 0.75
+  bare_rock_min: 0.6
+  paved_infra_min: 0.6
+  sand_min: 0.6
+  heavy_industry_lu_min: 0.5
+  heavy_industry_poi_min: 1
+  large_lowrise_bsf_min: 0.25
+  large_lowrise_h_max: 10.0
+  large_lowrise_footprint_min: 800.0
+  large_lowrise_type_frac: 0.5
+  height_high_min: 25.0
+  height_mid_min: 10.0
+  tower_count_min: 3
+  bsf_compact_min: 0.4
+  bsf_open_min: 0.2
+  bsf_sparse_min: 0.05
+  lcz9_veg_min: 0.4
+confidence:
+  height_evidence_full: 0.5
+  raster_only_cap: 0.6
+  height_none_max_area: 0.5
+  completeness_ghs_min: 0.15
+  boundary_band: 0.03
+  boundary_penalty: 0.7
+  suspect_ml_ghs_max: 0.02
+  suspect_ml_penalty: 0.5
+  min_emit: 0.0
+router:
+  median_footprint_informal_max: 60.0
+  count_density_informal_min: 6000.0
+  footprint_cv_informal_min: 0.7
+  buildings_per_road_km_informal_min: 250.0
+  road_density_deficit_max: 5.0
+  median_footprint_formal_min: 100.0
+  formal_height_evidence_min: 0.3
+  mn_informal_frac_min: 0.5
+  blob_google_frac_max: 0.5
+  blob_count_density_max: 2000.0
+  blob_bsf_min: 0.4
+  lcz7_confidence_cap: 0.6
+  lcz7_confidence_cap_mn: 0.75
+  lcz7_strong_bsf: 0.6
+  buildings_per_road_km_sentinel: 10000.0
+blocks:
+  max_block_area_km2: 0.5
+  sliver_area_m2: 200.0
+  min_block_area_m2: 2500.0
+  corridor_min_width_m: 20.0
+  barrier_simplify_m: 1.0
+  barrier_landcover_min_m2: 50000.0
+  barrier_water_min_m2: 10000.0
+  barrier_landcover_classes:
+  - forest
+  - wood
+  - farmland
+  rail_barrier_classes:
+  - rail
+  - light_rail
+  - narrow_gauge
+  - monorail
+  - funicular
+  use_mn_blocks: false
+zones:
+  min_zone_area_ha: 15.0
+  zone_conf_penalty: 0.7
+export:
+  raster_res_m: 10.0
+  erosion_px: 1
+  boundary_frac: 0.75
+change:
+  built_delta_max: 0.1
+metres_per_floor: 3.2
+height_min_sane: 2.0
+height_max_sane: 1000.0
+trusted_source_datasets:
+- OpenStreetMap
+- Esri Community Maps
+google_source_dataset: Google Open Buildings
+road_motorized_classes:
+- motorway
+- trunk
+- primary
+- secondary
+- tertiary
+- unclassified
+- residential
+- living_street
+- service
+- road
+- track
+- unknown
+road_nonmotorized_classes:
+- footway
+- path
+- steps
+- cycleway
+- pedestrian
+- bridleway
+- corridor
