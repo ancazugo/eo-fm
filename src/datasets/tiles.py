@@ -452,6 +452,20 @@ def open_tile(path: Path) -> xr.DataArray:
     """Open a .zarr or .tif tile as a (band, y, x) DataArray with CRS set."""
     import rioxarray as rxr
 
+    # .zarr FIRST: a zarr store is itself a directory, so this must be tested
+    # before the is_dir() branch below — otherwise every zarr tile is misrouted
+    # to the Tessera NPY reader and dies with "NPY files not found".
+    if path.suffix == ".zarr":
+        ds = xr.open_zarr(str(path), chunks=False)
+        da = ds["embedding"]
+        if da.dims != ("band", "y", "x"):
+            da = da.transpose("band", "y", "x")
+        if da.rio.crs is None and "spatial_ref" in ds:
+            crs_wkt = ds["spatial_ref"].attrs.get("crs_wkt")
+            if crs_wkt:
+                da = da.rio.write_crs(crs_wkt)
+        return da
+
     # Tessera global (v1.1 / v2): path is the NPY subdir
     if path.is_dir():
         return _open_tile_tessera_npy_dir(path)
@@ -466,19 +480,7 @@ def open_tile(path: Path) -> xr.DataArray:
         if infer_dir.exists():
             return _open_tile_tessera11(path)
 
-    if path.suffix == ".zarr":
-        ds = xr.open_zarr(str(path), chunks=False)
-        da = ds["embedding"]
-        if da.dims != ("band", "y", "x"):
-            da = da.transpose("band", "y", "x")
-        if da.rio.crs is None and "spatial_ref" in ds:
-            crs_wkt = ds["spatial_ref"].attrs.get("crs_wkt")
-            if crs_wkt:
-                da = da.rio.write_crs(crs_wkt)
-    else:
-        da = rxr.open_rasterio(path)
-
-    return da
+    return rxr.open_rasterio(path)
 
 
 # ---------------------------------------------------------------------------
