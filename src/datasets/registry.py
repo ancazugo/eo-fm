@@ -52,6 +52,11 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "resolution": 10,
         "description": "Tessera v1.1 global tiles (global_0.1_degree_representation + tiff_all), 128-band float32",
     },
+    "tesserav2": {
+        "in_channels": 128,
+        "resolution": 10,
+        "description": "Tessera v2 global tiles (large_student), int8+scales dequantized to 128-band float32",
+    },
     "osm_evidence": {
         "in_channels": 15,
         "resolution": 10,

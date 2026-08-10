@@ -43,6 +43,19 @@ from datasets.tiles import build_tile_index as _build_tile_index, crop_patch as 
 # Worker for parallel execution
 # ---------------------------------------------------------------------------
 
+def _fully_covered(patch_geom, tile_geoms) -> bool:
+    """Whether *patch_geom* lies entirely inside the matched tiles' footprints.
+
+    crop_patch happily returns a truncated array when only part of a patch has
+    tile coverage, and PatchDataset then stretches it to the model's patch size
+    — silently distorted samples.  Callers use this to drop such patches.
+    """
+    from shapely import union_all
+
+    covering = tile_geoms[0] if len(tile_geoms) == 1 else union_all(tile_geoms)
+    return patch_geom.covered_by(covering)
+
+
 def _process_patch(args: tuple) -> tuple[str, bool]:
     (patch_id, geom_wkt, patch_crs, tile_paths, output_path,
      skip_existing, dtype, valid_bboxes) = args
@@ -127,6 +140,14 @@ def main() -> None:
         action="store_true",
         help="Skip patches whose .npy output file already exists (useful for resuming).",
     )
+    parser.add_argument(
+        "--skip-partial-coverage",
+        action="store_true",
+        help="Skip patches only partially covered by the available tiles instead of "
+             "writing a truncated crop (which PatchDataset would stretch to the model's "
+             "patch size). Recommended for embeddings with gappy tile coverage, e.g. "
+             "tesserav2, where ~1.8%% of So2Sat patches straddle a missing tile.",
+    )
     args = parser.parse_args()
     if args.dtype == "float16" and args.embedding_name == "seamless":
         parser.error(
@@ -176,11 +197,14 @@ def main() -> None:
 
         n_saved = 0
         n_skipped = 0
+        n_partial = 0
 
         # Sort patches by centroid so tiles in the OS page cache are shared
         # across workers processing adjacent patches (critical for tesserav1.1
         # where each tile is ~110 MB and loaded fresh from npy each call).
-        if args.embedding_name in ("tesserav1.1", "tesserav1.1_global", "aux_struct"):
+        if args.embedding_name in (
+            "tesserav1.1", "tesserav1.1_global", "tesserav2", "aux_struct"
+        ):
             cx = split_patches.geometry.centroid.x
             cy = split_patches.geometry.centroid.y
             split_patches = split_patches.iloc[
@@ -195,6 +219,11 @@ def main() -> None:
                 idxs = tree.query(patch_geom)
                 if len(idxs) == 0:
                     n_skipped += 1
+                    continue
+                if args.skip_partial_coverage and not _fully_covered(
+                    patch_geom, tree.geometries[idxs]
+                ):
+                    n_partial += 1
                     continue
                 matched_paths = [tile_paths[i] for i in idxs]
                 output_path = out_dir / f"patch_{row.patch_id}.npy"
@@ -235,6 +264,11 @@ def main() -> None:
                 if len(idxs) == 0:
                     n_skipped += 1
                     continue
+                if args.skip_partial_coverage and not _fully_covered(
+                    patch_geom, tree.geometries[idxs]
+                ):
+                    n_partial += 1
+                    continue
 
                 matched_paths = [tile_paths[i] for i in idxs]
                 output_path = out_dir / f"patch_{row.patch_id}.npy"
@@ -247,7 +281,8 @@ def main() -> None:
                     n_skipped += 1
 
         logger.info(
-            f"[{split}] done — {n_saved} saved, {n_skipped} skipped (no coverage)"
+            f"[{split}] done — {n_saved} saved, {n_skipped} skipped (no coverage), "
+            f"{n_partial} skipped (partial coverage)"
         )
 
     logger.info("All splits complete.")

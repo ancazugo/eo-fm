@@ -126,6 +126,9 @@ lcz_train/                   # Training harness consuming ONLY the lcz_labels St
 - Per city labels are available in `${DATA_DIR}/input/So2Sat-LCZ42/v4/cities`, both as vector (.gpkg) and as raster (.tif)
 - AlphaEarth embeddings: `${DATA_DIR}/input/Google/AlphaEarth/{year}` (coop: `.../AlphaEarth/coop`)
 - Geotessera embeddings: `${DATA_DIR}/input/GeoTessera/{year}` (v1.1: `.../GeoTessera/v1.1/{year}`)
+- Geotessera global tiles: `/tessera/v1.1` (`tesserav1.1_global`) and `/tessera/v2/large_student`
+  (`tesserav2`, no geoinfo tiffs — geometry derived from the tile name; covers only ~37% of
+  So2Sat 2017 patches, so extract it with `--skip-partial-coverage`)
 - Embedded Seamless Data embeddings: `${DATA_DIR}/input/EmbeddedSeamlessData/{year}`
 - Demuzere LCZ files: `${DATA_DIR}/input/Demuzere_et_al_2022_LCZ`
 - So2Sat LCZ42 info: `${DATA_DIR}/input/So2Sat-LCZ42`

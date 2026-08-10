@@ -19,6 +19,64 @@ from shapely.ops import transform as shapely_transform
 from shapely.strtree import STRtree
 
 
+TESSERA_GRID_RE = re.compile(r"grid_(?P<lon>-?[\d.]+)_(?P<lat>-?[\d.]+)$")
+
+
+@functools.lru_cache(maxsize=None)
+def tessera_grid_geometry(tile_name: str):
+    """CRS + affine transform of a tessera 0.1° tile, derived from its name.
+
+    Tessera names a tile by the centre of its 0.1° cell (``grid_{lon}_{lat}``)
+    and rasterises it at 10 m in the UTM zone of that centre, so the raster
+    origin is that cell reprojected into the zone.  Pixel counts are not
+    needed here — callers take them from the array they loaded.
+
+    Tessera v2 ships no geoinfo tiff, so this is the only geometry source for
+    it.  Checked against v1.1's global_0.1_degree_tiff_all on 699 tiles — 393
+    random plus 306 in the Norway/Svalbard/polar/dateline bands where UTM has
+    zone exceptions — with zero CRS, origin (<1 mm) or shape mismatches.
+    """
+    import rasterio.warp
+    from rasterio.crs import CRS
+    from rasterio.transform import from_origin
+
+    m = TESSERA_GRID_RE.match(tile_name)
+    if m is None:
+        raise ValueError(f"Cannot parse lon/lat from tessera tile name: {tile_name}")
+    lon, lat = float(m.group("lon")), float(m.group("lat"))
+
+    epsg = (32600 if lat >= 0 else 32700) + int((lon + 180) // 6) + 1
+    crs = CRS.from_epsg(epsg)
+    left, _, _, top = rasterio.warp.transform_bounds(
+        "EPSG:4326", crs, lon - 0.05, lat - 0.05, lon + 0.05, lat + 0.05
+    )
+    return crs, from_origin(left, top, 10, 10)
+
+
+def tessera_grid_bounds_4326(tile_name: str) -> tuple[float, float, float, float]:
+    """WGS84 bounds of a tessera 0.1° tile's raster, from its name alone.
+
+    Same quantity the tesserav1.1_global branch reads out of a geoinfo tiff
+    (raster bounds reprojected to EPSG:4326), so both indexes hold comparable
+    footprints — slightly larger than the nominal cell, since the UTM
+    rectangle circumscribes the lat/lon quadrilateral.  The pixel counts
+    follow from the reprojected cell (validated against the npy shape on 500
+    v2 tiles), so no file has to be opened to index a tile.
+    """
+    import rasterio.warp
+
+    crs, _ = tessera_grid_geometry(tile_name)
+    m = TESSERA_GRID_RE.match(tile_name)
+    lon, lat = float(m.group("lon")), float(m.group("lat"))
+    left, bottom, right, top = rasterio.warp.transform_bounds(
+        "EPSG:4326", crs, lon - 0.05, lat - 0.05, lon + 0.05, lat + 0.05
+    )
+    width, height = round((right - left) / 10), round((top - bottom) / 10)
+    return rasterio.warp.transform_bounds(
+        crs, "EPSG:4326", left, top - height * 10, left + width * 10, top
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tile index
 # ---------------------------------------------------------------------------
@@ -152,6 +210,34 @@ def build_tile_index(
         logger.info(f"Tile index (tesserav1.1_global): {len(paths)} tiles from {npy_root}")
         return paths, STRtree(geoms)
 
+    # ── tessera v2: NPY subdirs, geometry derived from the tile names ────────
+    if embedding_name == "tesserav2":
+        if year is None:
+            raise ValueError("--year is required for tesserav2.")
+
+        root = embedding_dir / "large_student"
+        if not root.exists():
+            root = embedding_dir  # --embedding-dir already points at a variant
+        npy_root = root / str(year)
+        if not npy_root.exists():
+            raise FileNotFoundError(
+                f"{year}/ not found under {root}. Pass the v2 variant root "
+                "(e.g. /tessera/v2/large_student) as --embedding-dir."
+            )
+
+        # v2 has no geoinfo tiffs, so footprints come from the tile names
+        # (tessera_grid_bounds_4326) rather than from opening 40k rasters.
+        paths, geoms = [], []
+        for npy_dir in sorted(npy_root.iterdir()):
+            if not npy_dir.is_dir() or not TESSERA_GRID_RE.match(npy_dir.name):
+                continue
+            geoms.append(box(*tessera_grid_bounds_4326(npy_dir.name)))
+            paths.append(npy_dir)
+        if not paths:
+            raise FileNotFoundError(f"No grid_* tile directories found in {npy_root}")
+        logger.info(f"Tile index (tesserav2): {len(paths)} tiles from {npy_root}")
+        return paths, STRtree(geoms)
+
     # ── seamless (ESD): spatial index from rasterio bounds ───────────────────
     if embedding_name == "seamless":
         import rasterio
@@ -187,7 +273,7 @@ def build_tile_index(
         raise ValueError(
             f"Embedding '{embedding_name}' has no filename-pattern metadata. "
             f"Embeddings with filename-indexed tiles: {supported} "
-            "(tesserav1.1*/seamless are handled by their own branches above)."
+            "(tesserav1.1*/tesserav2/seamless are handled by their own branches above)."
         )
 
     regex = re.compile(pattern)
@@ -293,14 +379,21 @@ def _open_tile_tessera11(path: Path) -> xr.DataArray:
 
 
 @functools.lru_cache(maxsize=2)
-def _open_tile_tessera11_global(npy_dir: Path) -> xr.DataArray:
-    """Open a tessera v1.1 global tile from its NPY subdirectory.
+def _open_tile_tessera_npy_dir(npy_dir: Path) -> xr.DataArray:
+    """Open a tessera global tile (v1.1 or v2) from its NPY subdirectory.
 
     Loads {tile_name}.npy + {tile_name}_scales.npy from npy_dir, dequantizes,
-    and returns a (band, y, x) DataArray with CRS and pixel coordinates from
-    the sibling global_0.1_degree_tiff_all/ TIFF (year-independent geo metadata).
+    and returns a (band, y, x) DataArray with CRS and pixel coordinates.
 
-    npy_dir layout: .../global_0.1_degree_representation/{year}/grid_{lon}_{lat}/
+    Geo metadata comes from the sibling global_0.1_degree_tiff_all/ TIFF when
+    one exists (tesserav1.1_global's year-independent source), else from the
+    tile name via tessera_grid_geometry — which is how tesserav2 tiles, and
+    the v1.1 tiles with no tiff, are georeferenced.  The two agree exactly
+    (see tessera_grid_geometry).
+
+    npy_dir layouts:
+        v1.1  .../global_0.1_degree_representation/{year}/grid_{lon}_{lat}/
+        v2    .../large_student/{year}/grid_{lon}_{lat}/
     """
     import rasterio
     import rioxarray  # noqa: F401
@@ -312,19 +405,19 @@ def _open_tile_tessera11_global(npy_dir: Path) -> xr.DataArray:
     if not int8_path.exists() or not scales_path.exists():
         raise FileNotFoundError(f"NPY files not found in {npy_dir}")
 
-    # .../global_0.1_degree_representation/{year}/grid_*/ → go up 3 levels for v1.1 root
-    tiff_path = npy_dir.parent.parent.parent / "global_0.1_degree_tiff_all" / f"{tile_name}.tiff"
-    if not tiff_path.exists():
-        raise FileNotFoundError(f"Geoinfo TIFF not found: {tiff_path}")
-
     from dequantize_embeddings import load_and_dequantize_tessera_representation
     arr_hwc = load_and_dequantize_tessera_representation(int8_path, scales_path)
     arr_chw = arr_hwc.transpose(2, 0, 1)  # (128, H, W)
+    H, W = arr_chw.shape[1], arr_chw.shape[2]
 
-    with rasterio.open(tiff_path) as ds:
-        crs = ds.crs
-        transform = ds.transform
-        H, W = ds.height, ds.width
+    # .../{representation_root}/{year}/grid_*/ → up 3 levels for the v1.1 root
+    tiff_path = npy_dir.parent.parent.parent / "global_0.1_degree_tiff_all" / f"{tile_name}.tiff"
+    if tiff_path.exists():
+        with rasterio.open(tiff_path) as ds:
+            crs, transform = ds.crs, ds.transform
+            H, W = ds.height, ds.width
+    else:
+        crs, transform = tessera_grid_geometry(tile_name)
 
     x_coords = [transform.c + (i + 0.5) * transform.a for i in range(W)]
     y_coords = [transform.f + (i + 0.5) * transform.e for i in range(H)]
@@ -359,9 +452,9 @@ def open_tile(path: Path) -> xr.DataArray:
     """Open a .zarr or .tif tile as a (band, y, x) DataArray with CRS set."""
     import rioxarray as rxr
 
-    # Tessera v1.1 global: path is the NPY subdir
+    # Tessera global (v1.1 / v2): path is the NPY subdir
     if path.is_dir():
-        return _open_tile_tessera11_global(path)
+        return _open_tile_tessera_npy_dir(path)
 
     # Auxiliary structural bands: precomputed 4-band merged tile
     if path.name.startswith("aux_") and path.parent.name == "merged_aux":
@@ -433,6 +526,61 @@ def numpy_mosaic(arrays: list[xr.DataArray]) -> np.ndarray:
             vals[:, ri[:, None], ci[None, :]]
 
     return out
+
+
+def merge_multi_crs(arrays: list[xr.DataArray], patch_geom, patch_crs: str) -> np.ndarray:
+    """Merge clipped tiles that do not share a CRS onto one grid.
+
+    numpy_mosaic places pixels by raw coordinate value, which is meaningless
+    across CRSs: tessera tiles carry per-tile UTM zones, so a patch straddling
+    a zone boundary (lon 0 for London, ±6° elsewhere) mixed eastings from two
+    zones into an array tens of thousands of pixels wide.
+
+    The grid of the tile contributing the most pixels wins; the patch bounds
+    are snapped to that tile's pixel grid, every array is warped onto it, and
+    holes are filled from the remaining arrays in decreasing size order.
+    """
+    from rasterio.enums import Resampling
+    from rasterio.transform import from_origin
+
+    ordered = sorted(arrays, key=lambda a: a.size, reverse=True)
+    target = ordered[0]
+    dst_crs = target.rio.crs
+    tr = target.rio.transform()
+    res_x, res_y = abs(tr.a), abs(tr.e)
+
+    geom = patch_geom
+    if patch_crs != dst_crs.to_string():
+        t = Transformer.from_crs(patch_crs, dst_crs, always_xy=True)
+        geom = shapely_transform(t.transform, geom)
+    minx, miny, maxx, maxy = geom.bounds
+
+    # Snap the output origin to the target tile's pixel grid so no resampling
+    # shift is introduced for the dominant tile.
+    left = tr.c + np.floor((minx - tr.c) / res_x) * res_x
+    top = tr.f - np.floor((tr.f - maxy) / res_y) * res_y
+    width = max(1, int(np.ceil((maxx - left) / res_x)))
+    height = max(1, int(np.ceil((top - miny) / res_y)))
+    dst_transform = from_origin(left, top, res_x, res_y)
+
+    out = None
+    for a in ordered:
+        warped = a.rio.reproject(
+            dst_crs,
+            transform=dst_transform,
+            shape=(height, width),
+            resampling=Resampling.nearest,
+            nodata=np.nan,
+        ).values.astype(np.float32)
+        if out is None:
+            out = warped
+            continue
+        holes = np.isnan(out) & ~np.isnan(warped)
+        out[holes] = warped[holes]
+        if not np.isnan(out).any():
+            break
+
+    return np.nan_to_num(out, nan=0.0)
 
 
 def crop_patch(
@@ -518,7 +666,12 @@ def crop_patch(
     if not arrays:
         return False
 
-    arr = numpy_mosaic(arrays) if len(arrays) > 1 else arrays[0].values.astype(np.float32)
+    if len(arrays) == 1:
+        arr = arrays[0].values.astype(np.float32)
+    elif len({a.rio.crs.to_string() for a in arrays}) > 1:
+        arr = merge_multi_crs(arrays, patch_geom, patch_crs)
+    else:
+        arr = numpy_mosaic(arrays)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     np.save(output_path, arr.astype(np.float16) if dtype == "float16" else arr)
@@ -526,6 +679,7 @@ def crop_patch(
 
 
 # Backward-compat aliases (older scripts imported the underscore names)
+_open_tile_tessera11_global = _open_tile_tessera_npy_dir
 _build_tile_index = build_tile_index
 _open_tile = open_tile
 _crop_patch = crop_patch

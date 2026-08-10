@@ -116,6 +116,8 @@ in `infer_roi.py --model-type`.
 | `alpha_earth` | Google AlphaEarth | `.zarr` or `.tif` | 64 | 10 m | float32 (int8 range); use `--dequantize` |
 | `alpha_earth_coop` | AlphaEarth COOP | `.tif` + `aef_index.gpkg` | 64 | 10 m | Same dequantize as `alpha_earth` |
 | `tesserav1.1` | GeoTessera v1.1 | `.tiff` (geoinfo) + `.npy` pairs | 128 | 10 m | Auto-dequantized at extraction time |
+| `tesserav1.1_global` | GeoTessera v1.1 global | `grid_*/` npy dirs + `tiff_all` | 128 | 10 m | Covers 97.5% of So2Sat 2017 patches |
+| `tesserav2` | GeoTessera v2 (`large_student`) | `grid_*/` npy dirs (no geoinfo) | 128 | 10 m | Georeferenced from the tile name; covers only 37% of So2Sat 2017 patches |
 | `tessera` | GeoTessera v1.0 | `.zarr` | 128 | 10 m | Already float32 |
 | `seamless` | Embedded Seamless Data | `.tiff` | 13→72 | 30 m | 13 raw bands; use `--dequantize` to expand to 72 ch |
 
@@ -810,6 +812,8 @@ python src/osm_lcz_relabel.py lcz_labels_multiband.tif \
 | GeoTessera v1.0 2017 | `/maps/acz25/phd-thesis-data/input/GeoTessera/2017/` |
 | GeoTessera v1.1 2017 | `/maps/acz25/phd-thesis-data/input/GeoTessera/v1.1/2017/` |
 | Embedded Seamless 2017 | `/maps/acz25/phd-thesis-data/input/EmbeddedSeamlessData/2017/` |
+| GeoTessera v1.1 global | `/tessera/v1.1/` (years 2015–2025) |
+| GeoTessera v2 | `/tessera/v2/large_student/` (years 2017–2025) |
 | DL model outputs | `/maps/acz25/phd-thesis-data/output/lcz-classification/dl/` |
 
 ### GeoTessera v1.1 tile layout
@@ -824,6 +828,33 @@ v1.1/{year}/
 ```
 
 Dequantized as: `arr_int8.astype(float32) * scales` → transposed to `(128, H, W)`.
+
+### GeoTessera v2 tile layout
+
+```
+v2/large_student/{year}/grid_{lon}_{lat}/
+    grid_{lon}_{lat}.npy          ← (H, W, 128) int8
+    grid_{lon}_{lat}_scales.npy   ← (H, W) float32
+```
+
+Same dequantization as v1.1, but **v2 ships no geoinfo tiff**. CRS and transform are derived
+from the tile name (`datasets.tiles.tessera_grid_geometry`): the 0.1° cell centred on
+`(lon, lat)`, reprojected into the UTM zone of that centre at 10 m. Verified identical to the
+v1.1 geoinfo tiffs on 699 tiles, including the Norway/Svalbard/polar/dateline bands.
+
+Coverage is far sparser than v1.1: for 2017, v2 fully covers 148,570 of the 400,673 So2Sat
+patches (37.1%) against v1.1 global's 390,595 (97.5%) — full breakdown in
+`data/tessera_v2_2017_so2sat_coverage.csv`, regenerable with:
+
+```bash
+python src/check_embedding_coverage.py \
+    --so2sat-dir ${DATA_DIR}/input/So2Sat-LCZ42/v4 \
+    --embedding-dir /tessera/v2/large_student --embedding-name tesserav2 --year 2017 \
+    --out data/tessera_v2_2017_so2sat_coverage.csv
+```
+
+Because of those gaps, extract v2 with `--skip-partial-coverage` so patches straddling a
+missing tile are dropped rather than written as truncated (and later stretched) crops.
 
 ---
 
