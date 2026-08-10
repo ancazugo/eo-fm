@@ -764,6 +764,39 @@ npy files quickly.
 Rasterizes OSM evidence layers into 15-band 10 m per-city GeoTIFFs (`osm_evidence`
 registry entry) for use as fusion channels.
 
+### `osm_lcz_relabel.py`
+
+Turns `osm-rasterizer` output (see `docs/osm_lcz_tag_mapping.md`) into a properly
+labelled LCZ raster. Its pixel values are 1-based indices into the *feature order*,
+not LCZ codes — value 8 is `roads_minor`, not LCZ 8 — so this maps them onto the
+So2Sat 1–17 convention and embeds the WUDAPT colour table, giving a GeoTIFF that
+QGIS renders with no styling.
+
+Both output modes are auto-detected: the multi-band raster is composed here in band
+order (same "last feature wins" priority, without inheriting any `--fill-nodata`
+artefact), the single-layer one is read directly. The three height-ambiguous
+building features (3/6, 2/5, 1/4) are split by Building Surface Fraction over a
+100 m window, binned at 0.20/0.40 per Stewart & Oke; `--density fixed` instead maps
+them to the open classes 6/5/4.
+
+A raster written with `--fill-nodata` is detected and reported, and `--density bsf`
+refuses to run on one without `--force` — the fill inflates the building mask badly
+enough to call ~90 % of Nairobi compact. Use `--fill-distance-m` to refill after
+relabelling instead. That fill draws only from *areal* donors (`--fill-from`),
+excluding the six features Command A buffers from lines: a buffered network is
+pervasive, so under nearest-neighbour fill it wins nearly every contest. Filling
+Nairobi from all donors takes LCZ 15 from 16.9 % to 54.3 %, and in Cairo — whose
+Nile Delta irrigation canals are mapped as `waterway=drain`/`ditch` — water goes
+10.1 % to 29.7 %. Buildings stay donors: they are small polygons rather than a
+network, and the zone around a building genuinely is built.
+
+```bash
+python src/osm_lcz_relabel.py lcz_labels_multiband.tif \
+    -o nairobi_lcz.tif --png --dpi 200 \
+    --density bsf --bsf-window-m 100 --fill-distance-m 100 \
+    --title "Nairobi — OSM-derived LCZ proxy (BSF 100 m)"
+```
+
 ---
 
 ## Data Paths

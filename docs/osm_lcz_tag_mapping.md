@@ -1,14 +1,44 @@
 # OSM Tag Mapping to Local Climate Zone (LCZ) Classes
 
-## Comprehensive Reference for Label Generation from OpenStreetMap Data
+## LCZ Label Generation from OpenStreetMap Data with `osm-rasterizer`
 
-This document provides an exhaustive mapping of OpenStreetMap (OSM) tags to the 17 Local Climate Zone classes defined by Stewart and Oke (2012). It includes current, historic, and deprecated tags sourced from the OSM Wiki, TagInfo, and the literature (notably Fonte et al. 2019). The mappings are organized by LCZ class, with tags grouped by OSM key.
+This document selects a **curated, globally applicable set of OSM features** for differentiating the 17 Local Climate Zone classes of Stewart and Oke (2012), and shows the exact `osm-rasterizer` commands that turn them into rasters for any bounding box. The selection is informed by:
+
+- **Fonte et al. (2019)** — *Using OpenStreetMap (OSM) to enhance the classification of Local Climate Zones in the framework of WUDAPT* (`docs/1-s2.0-S221209551930094X-main.pdf`), which established OSM key/value→LCZ correspondences and a Building/Impervious Surface Fraction (BSF/ISF) methodology.
+- **GeoClimate** ([orbisgis/geoclimate](https://github.com/orbisgis/geoclimate); Bocher et al. 2021), an operational toolbox that computes LCZ from OSM worldwide, whose layer definitions (building, road, rail, vegetation, water, impervious) encode a battle-tested global tag selection.
+
+An [appendix](#appendix-exhaustive-tag-reference) preserves the exhaustive per-class tag reference, including historic and deprecated tags.
 
 ---
 
-## Important Notes on OSM-to-LCZ Conversion
+## What the sources teach
 
-**Building height is critical for differentiating built types.** OSM tags alone (without `building:levels` or `height`) cannot distinguish between compact/open high-rise (LCZ 1/4), mid-rise (LCZ 2/5), and low-rise (LCZ 3/6). The building footprint density (Building Surface Fraction, BSF) and impervious surface coverage (Impervious Surface Fraction, ISF) help narrow candidates, but height data is required for final assignment.
+### Fonte et al. (2019): OSM→LCZ conversion in the WUDAPT framework
+
+The paper converts OSM into LCZ evidence in two tracks:
+
+1. **Direct correspondence for land-cover classes** (LCZ A–D, G): polygons matching a key/value list (their Table 2) are merged and intersected with a ~120 m grid; the fraction of each cell covered gives a (fuzzy) membership per class.
+2. **BSF/ISF for built classes** (LCZ 1–10): building footprints give the Building Surface Fraction; roads and railways — *buffered from lines to areas* using per-type widths or the distance to adjacent buildings — give the Impervious Surface Fraction. Trapezoidal membership functions over the Stewart & Oke ranges (table below) then yield candidate built classes per cell.
+
+Key findings that shape the selection here:
+
+- **OSM water is highly reliable** — in their weighted combination tests the OSM water layer was weighted 60% against 40% for satellite classification, and produced a far more detailed water network. → put water at the **highest priority** in a label map.
+- **OSM cannot separate dense from scattered trees** (LCZ A vs B) — tags describe the *presence* of woodland, not canopy density. Function-based tags (`orchard`, `plant_nursery`, `tree_row`) are the only tag-level proxies for scattered trees.
+- **Building height tags are decisive but sparse.** Without `building:levels`/`height`, LCZ 1/4, 2/5, 3/6 cannot be separated; BSF/ISF only narrow the candidates. LCZ 4 (open high-rise) remained poorly classified even after combination.
+- **Compact vs open** (1–3 vs 4–6) and **sparsely built** (LCZ 9) are *density* properties — they require fraction aggregation over a neighbourhood-scale grid, never a per-pixel tag.
+
+### GeoClimate: an operational, worldwide OSM→LCZ chain
+
+GeoClimate extracts thematic input layers from OSM with fixed tag lists, computes Stewart & Oke's indicators per spatial unit, and classifies LCZ by minimum distance to the class prototypes. What transfers to rasterization:
+
+- **Layer-based extraction.** Buildings, roads, rail, vegetation, water and impervious surfaces are separate layers — mirrored below as separate raster features rather than one tag soup.
+- **Indicator weights reveal what matters.** In GeoClimate's LCZ distance the building surface fraction has weight 8 and the height of roughness elements 6 — by far the largest (sky view factor 4, aspect ratio 3, terrain roughness 0.5, ISF/PSF 0). → invest tag effort in **building footprints and height**, exactly what the curated set does.
+- **Rule-based LCZ 8 and 10.** GeoClimate assigns *large low-rise* and *heavy industry* not by distance but by the fraction of large low-rise / industrial buildings — justifying dedicated building-type features for these classes.
+- **Vegetation split high/low**: high = `wood`, `forest`, mangrove, `orchard`, banana plants; low = `grass`, `grassland`, `heath`, `meadow`, `farmland`, `scrub`, `vineyard`, `park`, `garden`, wetlands. This is the LCZ A/B vs C/D axis.
+- **Default building levels per type** when height is untagged: most types 1 (house, education, healthcare, office), commercial/hotel 2, religious/agricultural/sport 0. → an **untagged building is best assumed low-rise**, which is how the label-map command below treats it.
+- **Default road widths per type** (metres): motorway 24, trunk 16, primary/secondary 10, tertiary/residential 8, unclassified/service/pedestrian 3, track 2, cycleway/footway/path 1, aeroway 18. → used as `line_width` fallbacks with `width_from_tags` so per-feature `width`/`lanes` tags win when present.
+
+Indicators that do **not** transfer to a tag-based raster: sky view factor, aspect ratio, terrain roughness — these need 3-D morphology, not tags.
 
 **Stewart & Oke (2012) reference ranges for built types:**
 
@@ -24,6 +54,207 @@ This document provides an exhaustive mapping of OpenStreetMap (OSM) tags to the 
 | 8 – Large low-rise | 30–50 | 40–50 | 3–10 | 1–3 |
 | 9 – Sparsely built | 10–20 | <20 | 3–10 | 1–3 |
 | 10 – Heavy industry | 20–30 | 20–40 | 5–15 | 1–5 |
+
+---
+
+## The curated global feature set
+
+Seventeen raster features, ordered for `--single-layer` mode where **later features overwrite earlier ones** — so the list runs from broad/uncertain context to specific/reliable evidence, ending with water (the most reliable OSM layer per Fonte et al.).
+
+| # | Feature | LCZ | Source tags (osmnx dict) | Options |
+|---|---------|-----|--------------------------|---------|
+| 1 | `low_plants` | D | `landuse`: farmland, meadow, grass, allotments, recreation_ground, village_green, greenfield, flowerbed · `natural`: grassland, fell, wetland · `leisure`: park, garden, golf_course, pitch, common · `landcover`: grass | — |
+| 2 | `scrub` | C | `natural`: scrub, heath, shrubbery · `landuse`: vineyard | — |
+| 3 | `scattered_trees` | B | `landuse`: orchard, plant_nursery · `natural`: tree_row | `line_width: 5` |
+| 4 | `dense_trees` | A | `natural`: wood · `landuse`: forest · `wetland`: mangrove, swamp | — |
+| 5 | `bare_soil` | F | `natural`: sand, beach, dune, mud, shingle · `landuse`: quarry, brownfield, construction, landfill | — |
+| 6 | `bare_rock` | E | `natural`: bare_rock, scree, rock, stone | — |
+| 7 | `rail` | E/ISF | `railway`: rail, light_rail, tram, narrow_gauge, funicular, monorail · `landuse`: railway | `line_width: 6` |
+| 8 | `roads_minor` | E/ISF | `highway`: tertiary(+link), residential, unclassified, service, living_street, track | `line_width: 6`, `width_from_tags` |
+| 9 | `roads_major` | E/ISF | `highway`: motorway(+link), trunk(+link), primary(+link), secondary(+link) | `line_width: 12`, `width_from_tags` |
+| 10 | `paved` | E | `amenity`: parking · `aeroway`: runway, taxiway, apron · `highway`: pedestrian | `line_width: 8`, `width_from_tags` |
+| 11 | `heavy_industry` | 10 | `landuse`: industrial, port · `man_made`: works, wastewater_plant, water_works, chimney, storage_tank, silo, gasometer, kiln, petroleum_well · `power`: plant, substation · `industrial`: * | — |
+| 12 | `buildings_lowrise` | 3/6 | `building`: * (all footprints — untagged height ⇒ low-rise, per GeoClimate defaults) | — |
+| 13 | `large_lowrise` | 8 | `building`: warehouse, industrial, retail, supermarket, hangar, train_station, transportation, stadium, sports_hall, parking, service, manufacture, depot | — |
+| 14 | `lightweight` | 7 | `building`: hut, shed, cabin, ger, yurt, static_caravan, tent, slum, shanty | — |
+| 15 | `buildings_midrise` | 2/5 | `building`: * | `filter`: `building:levels` ∈ 4–9 |
+| 16 | `buildings_highrise` | 1/4 | `building`: * | `filter`: `building:levels` ≥ 10 |
+| 17 | `water` | G | `natural`: water, bay, strait · `waterway`: river, canal, stream, drain, ditch · `landuse`: reservoir, basin, salt_pond · `leisure`: swimming_pool | `line_width: 8`, `width_from_tags` |
+
+Design notes:
+
+- **Priority order is the classifier.** In single-layer mode the last feature wins each pixel, so a warehouse is first painted as a generic low-rise building (12) and then overwritten by `large_lowrise` (13); a 12-storey block ends up `buildings_highrise` (16). If your interest is industrial zones as a whole rather than the buildings inside them, move `heavy_industry` after the building features — the whole `landuse=industrial` polygon will then win. In multi-band fraction workflows, deciding 8 vs 10 by the industrial-building fraction (GeoClimate's rule) is more faithful.
+- **Height classes partition cleanly**: untagged or 1–3 levels ⇒ low-rise, 4–9 ⇒ mid-rise, ≥10 ⇒ high-rise (Stewart & Oke put 3 levels on the low/mid boundary; it is assigned low here so that the sparse-tag default stays conservative).
+- **Compact vs open (1–3 vs 4–6) and LCZ 9 are not in the table** — they are density classes, only decidable from BSF aggregated over ~100 m cells (Command B below). A per-pixel label map cannot express them; treat labels 12/15/16 as "low/mid/high-rise built" proxies.
+- **Lightweight (LCZ 7) is typed by building value, not material.** `building:material=wood` marks LCZ 7 in informal-settlement contexts but ordinary LCZ 6 housing in North America and Scandinavia, so material is *not* used globally. Where you know the regional context, add a material-based variant with the attribute filter (AND semantics), e.g.:
+  `'lightweight_material:{"tags": {"building": true}, "filter": {"building:material": ["corrugated_iron", "metal", "thatch", "bamboo", "mud", "plastic"]}}'`
+- **Buffered lines.** Roads, rail, waterways and tree rows are line geometries; each carries a `line_width` fallback (from GeoClimate's width table) and `width_from_tags: true` so an explicit `width` tag (or `lanes` × 3.5 m) wins per geometry. Footways, paths and cycleways (~1 m) are omitted: sub-pixel at 10 m resolution.
+- **Ambiguous tags are assigned once.** `quarry`/`landfill` sit in `bare_soil` (their surface signature) rather than LCZ 10 (their function); `natural=wetland` sits in `low_plants` (LCZ D-w) with mangrove/swamp pulled out to `dense_trees`. The appendix lists all alternatives.
+
+---
+
+## Command A (primary): single-layer LCZ-proxy label map
+
+Set the bounding box (WGS84 `minx,miny,maxx,maxy`) and run — no other edits needed:
+
+```bash
+BBOX="minx,miny,maxx,maxy"    # e.g. "-0.15,51.48,-0.08,51.52"
+
+osm-rasterizer \
+  --bbox "$BBOX" \
+  --feature 'low_plants:{"landuse": ["farmland", "meadow", "grass", "allotments", "recreation_ground", "village_green", "greenfield", "flowerbed"], "natural": ["grassland", "fell", "wetland"], "leisure": ["park", "garden", "golf_course", "pitch", "common"], "landcover": ["grass"]}' \
+  --feature 'scrub:{"natural": ["scrub", "heath", "shrubbery"], "landuse": ["vineyard"]}' \
+  --feature 'scattered_trees:{"tags": {"landuse": ["orchard", "plant_nursery"], "natural": ["tree_row"]}, "line_width": 5}' \
+  --feature 'dense_trees:{"natural": ["wood"], "landuse": ["forest"], "wetland": ["mangrove", "swamp"]}' \
+  --feature 'bare_soil:{"natural": ["sand", "beach", "dune", "mud", "shingle"], "landuse": ["quarry", "brownfield", "construction", "landfill"]}' \
+  --feature 'bare_rock:{"natural": ["bare_rock", "scree", "rock", "stone"]}' \
+  --feature 'rail:{"tags": {"railway": ["rail", "light_rail", "tram", "narrow_gauge", "funicular", "monorail"], "landuse": ["railway"]}, "line_width": 6}' \
+  --feature 'roads_minor:{"tags": {"highway": ["tertiary", "tertiary_link", "residential", "unclassified", "service", "living_street", "track"]}, "line_width": 6, "width_from_tags": true}' \
+  --feature 'roads_major:{"tags": {"highway": ["motorway", "motorway_link", "trunk", "trunk_link", "primary", "primary_link", "secondary", "secondary_link"]}, "line_width": 12, "width_from_tags": true}' \
+  --feature 'paved:{"tags": {"amenity": ["parking"], "aeroway": ["runway", "taxiway", "apron"], "highway": ["pedestrian"]}, "line_width": 8, "width_from_tags": true}' \
+  --feature 'heavy_industry:{"landuse": ["industrial", "port"], "man_made": ["works", "wastewater_plant", "water_works", "chimney", "storage_tank", "silo", "gasometer", "kiln", "petroleum_well"], "power": ["plant", "substation"], "industrial": true}' \
+  --feature 'buildings_lowrise:{"building": true}' \
+  --feature 'large_lowrise:{"building": ["warehouse", "industrial", "retail", "supermarket", "hangar", "train_station", "transportation", "stadium", "sports_hall", "parking", "service", "manufacture", "depot"]}' \
+  --feature 'lightweight:{"building": ["hut", "shed", "cabin", "ger", "yurt", "static_caravan", "tent", "slum", "shanty"]}' \
+  --feature 'buildings_midrise:{"tags": {"building": true}, "filter": {"building:levels": ["4", "5", "6", "7", "8", "9"]}}' \
+  --feature 'buildings_highrise:{"tags": {"building": true}, "filter": {"building:levels": ["10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60"]}}' \
+  --feature 'water:{"tags": {"natural": ["water", "bay", "strait"], "waterway": ["river", "canal", "stream", "drain", "ditch"], "landuse": ["reservoir", "basin", "salt_pond"], "leisure": ["swimming_pool"]}, "line_width": 8, "width_from_tags": true}' \
+  --output lcz_labels.tif \
+  --resolution 10 \
+  --single-layer \
+  --fill-nodata \
+  --fill-nodata-distance 50
+```
+
+The output is one categorical band; pixel values are 1-based indices into the feature order (0 = no data):
+
+| Value | Feature | LCZ proxy | Value | Feature | LCZ proxy |
+|-------|---------|-----------|-------|---------|-----------|
+| 1 | `low_plants` | D | 10 | `paved` | E |
+| 2 | `scrub` | C | 11 | `heavy_industry` | 10 |
+| 3 | `scattered_trees` | B | 12 | `buildings_lowrise` | 3/6 |
+| 4 | `dense_trees` | A | 13 | `large_lowrise` | 8 |
+| 5 | `bare_soil` | F | 14 | `lightweight` | 7 |
+| 6 | `bare_rock` | E | 15 | `buildings_midrise` | 2/5 |
+| 7 | `rail` | E | 16 | `buildings_highrise` | 1/4 |
+| 8 | `roads_minor` | E | 17 | `water` | G |
+| 9 | `roads_major` | E | | | |
+
+Practical notes:
+
+- `--fill-nodata --fill-nodata-distance 50` fills unmapped pixels from their nearest labelled neighbour up to 500 m (50 px × 10 m), leaving genuinely unmapped border areas as 0. Drop both flags to keep gaps explicit — often preferable for training labels.
+- **The fill is destructive where OSM is sparse, and it is not reversible.** Measured on the Nairobi run (bbox `36.554,-1.443,37.063,-1.065`, 2026-08): only **28.4 %** of the AOI carries any OSM feature at all, so nearest-neighbour fill invents the other ~70 %. Because roads form a pervasive network they win almost every contest: `roads_minor` goes from **4.15 % → 53.4 %** of the raster, and the building union from **3.36 % → 13.8 %**, which in turn drags the BSF "compact" bin (Command B) from **28.5 % → 89.7 %** — i.e. it would call nearly all of Nairobi Compact Low-Rise. Prefer Command B (multi-band, unfilled) as the archival product and fill only at the *end* of a workflow, from areal donors, as `src/osm_lcz_relabel.py --fill-distance-m` does. A single-layer raster can be tested for fill after the fact: buffered lines are 1–2 px wide at 10 m, so `binary_erosion(mask, 3×3).sum() / mask.sum()` on `roads_minor` is 0.000 unfilled and 0.877 filled.
+- `--resolution 10` preserves individual buildings and road corridors. LCZ is defined at neighbourhood scale — aggregate to 100–120 m (majority vote, or the fraction workflow below) before comparing to WUDAPT products.
+- The `building:levels` filter matches strings, so the high-rise spec enumerates "10"–"60"; buildings taller than 60 tagged levels, or tagged only with `height`, are missed. The Python workflow below handles both robustly.
+- Reproducibility: add `--date 2024-01-01` to query OSM as it existed at that date (or `--provider ohm` for OpenHistoricalMap).
+- `{"building": true}` is fetched three times (features 12, 15, 16). The Python workflow fetches it once.
+
+To turn either output into an actual LCZ raster, run `src/osm_lcz_relabel.py` (see the README): it maps the proxy indices onto the So2Sat 1–17 convention, resolves 12/15/16 into compact/open/sparse via the Command B building surface fraction, and embeds the WUDAPT colour table so the file renders in QGIS unstyled.
+
+## Command B (secondary): multi-band masks for BSF/ISF fraction workflows
+
+Dropping `--single-layer` (and the nodata filling) writes one 0/1 band per feature — overlaps preserved — which is what a GeoClimate/WUDAPT-style classification needs:
+
+```bash
+osm-rasterizer \
+  --bbox "$BBOX" \
+  ... same seventeen --feature arguments ... \
+  --output lcz_layers.tif \
+  --resolution 10
+```
+
+Aggregate to 100 m cells (10 × 10 px blocks) and compute the Stewart & Oke fractions:
+
+```python
+import numpy as np
+import rasterio
+
+with rasterio.open("lcz_layers.tif") as src:
+    bands = {name: src.read(i + 1) for i, name in enumerate(src.descriptions)}
+
+BLOCK = 10  # 10 px × 10 m = 100 m cells
+
+def fraction(mask: np.ndarray) -> np.ndarray:
+    h, w = (s // BLOCK * BLOCK for s in mask.shape)
+    blocks = mask[:h, :w].reshape(h // BLOCK, BLOCK, w // BLOCK, BLOCK)
+    return blocks.mean(axis=(1, 3))
+
+building_bands = ["buildings_lowrise", "large_lowrise", "lightweight",
+                  "buildings_midrise", "buildings_highrise"]
+impervious_bands = ["rail", "roads_minor", "roads_major", "paved"]
+
+bsf = fraction(np.maximum.reduce([bands[b] for b in building_bands]) > 0)
+isf = fraction(np.maximum.reduce([bands[b] for b in impervious_bands]) > 0)
+```
+
+`bsf` and `isf` are per-cell fractions in [0, 1]; apply the Stewart & Oke ranges (table above) to score built-class candidates — crisply, or with trapezoidal memberships as in Fonte et al. (2019). This is where compact vs open (BSF 40–70 % vs 20–40 %) and sparsely built (BSF 10–20 %) become decidable, and where LCZ 8 vs 10 can follow GeoClimate's rule (fraction of large low-rise vs industrial buildings per cell).
+
+## Python API: one fetch, robust height splits
+
+The CLI's dict filter compares strings. The Python API accepts **pre-fetched GeoDataFrames** and **callable filters**, so buildings are fetched once and split numerically — parsing `building:levels` *and* `height` (≈3 m per storey), with untagged buildings defaulting to low-rise:
+
+```python
+import numpy as np
+import pandas as pd
+
+from osm_rasterizer import fetch_features, rasterize
+
+bbox = (-0.15, 51.48, -0.08, 51.52)  # minx, miny, maxx, maxy
+buildings = fetch_features(bbox, {"building": True})
+
+def _numeric(gdf, col):
+    if col not in gdf.columns:
+        return pd.Series(np.nan, index=gdf.index)
+    return pd.to_numeric(
+        gdf[col].astype(str).str.extract(r"(\d+(?:\.\d+)?)")[0], errors="coerce"
+    )
+
+def height_class(lo, hi):
+    """Keep buildings whose storey count (levels, else height/3, else 1) is in [lo, hi]."""
+    def _filter(gdf):
+        levels = _numeric(gdf, "building:levels")
+        storeys = levels.fillna(_numeric(gdf, "height") / 3.0).fillna(1.0)
+        return ((storeys >= lo) & (storeys <= hi)).to_numpy()
+    return _filter
+
+LARGE_LOWRISE = ["warehouse", "industrial", "retail", "supermarket", "hangar",
+                 "train_station", "transportation", "stadium", "sports_hall",
+                 "parking", "service", "manufacture", "depot"]
+LIGHTWEIGHT = ["hut", "shed", "cabin", "ger", "yurt", "static_caravan",
+               "tent", "slum", "shanty"]
+
+rasterize(
+    bbox,
+    features=[
+        # ... land-cover, road, rail and industry features as in Command A ...
+        ("buildings_lowrise", buildings, {"filter": height_class(0, 3.99)}),
+        ("large_lowrise", buildings,
+         {"filter": lambda g: g["building"].isin(LARGE_LOWRISE).to_numpy()}),
+        ("lightweight", buildings,
+         {"filter": lambda g: g["building"].isin(LIGHTWEIGHT).to_numpy()}),
+        ("buildings_midrise", buildings, {"filter": height_class(4, 9.99)}),
+        ("buildings_highrise", buildings, {"filter": height_class(10, np.inf)}),
+        ("water", {"natural": ["water", "bay", "strait"],
+                   "waterway": ["river", "canal", "stream", "drain", "ditch"],
+                   "landuse": ["reservoir", "basin", "salt_pond"],
+                   "leisure": ["swimming_pool"]},
+         {"line_width": 8, "width_from_tags": True}),
+    ],
+    resolution=10.0,
+    single_layer=True,
+    fill_nodata=True,
+    fill_nodata_distance=50,
+    output_path="lcz_labels.tif",
+)
+```
+
+Dict filters remain available in Python too, with the same semantics as the CLI: AND across columns, OR within a value list, and `;`-separated OSM multi-values (`"soccer;basketball"`) matched element-wise. See [examples](examples.md) and the [filtering notebook](notebooks/filtering-by-attribute.ipynb).
+
+---
+
+## Appendix: exhaustive tag reference
+
+The remainder of this document is the full per-class OSM tag reference — current, historic, and deprecated tags sourced from the OSM Wiki, TagInfo, and Fonte et al. (2019) — useful when extending the curated set for a specific region or historical snapshot.
 
 ---
 
@@ -929,5 +1160,7 @@ These tags are no longer recommended but appear in older OSM data extracts and h
 
 - Stewart, I.D. and Oke, T.R. (2012). Local Climate Zones for Urban Temperature Studies. *Bulletin of the American Meteorological Society*, 93, 1879–1900.
 - Fonte, C., Lopes, P., See, L. and Bechtel, B. (2019). Using OpenStreetMap (OSM) to enhance the classification of Local Climate Zones in the framework of WUDAPT. *Urban Climate*, 28, 100456.
+- Bocher, E., Bernard, J., Wiederhold, E., Leconte, F., Petit, G., Palominos, S. and Noûs, C. (2021). GeoClimate: a Geospatial processing toolbox for environmental and climate studies. *Journal of Open Source Software*, 6(65), 3541. <https://doi.org/10.21105/joss.03541>
+- GeoClimate documentation — input data layers (building, road, rail, vegetation, water, impervious) and the LCZ classification chain: <https://geoclimate.readthedocs.io/>
 - OpenStreetMap Wiki: Key:landuse, Key:natural, Key:building, Key:surface, Key:waterway, Key:man_made, Buildings, Map features, Deprecated features.
 - Lopes, P., Fonte, C., See, L. and Bechtel, B. (2017). Using OpenStreetMap data to assist in the creation of LCZ maps. *2017 Joint Urban Remote Sensing Event (JURSE)*.
