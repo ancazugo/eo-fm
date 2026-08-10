@@ -9,7 +9,6 @@ lightning_logs/
 # Virtual environments
 .venv
 .env
-CLAUDE.md
 wandb/
 /cache
 .Renviron
