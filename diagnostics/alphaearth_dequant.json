@@ -1,0 +1,125 @@
+{
+  "generated": "2026-08-10T11:39:34+00:00",
+  "so2sat_dir": "/maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4",
+  "split": "training",
+  "year": "2017",
+  "n_sample": 5000,
+  "seed": 0,
+  "norm_test": {
+    "n_patches": 5000,
+    "raw": {
+      "min": -128.0,
+      "max": 93.0,
+      "all_integer_valued": true,
+      "frac_nan": 0.0,
+      "frac_eq_int8_min(-128)": 0.0041195053531673425
+    },
+    "frac_allzero_pixels": 0.0,
+    "candidates": {
+      "current_sq_sign": {
+        "all_pixels": {
+          "n": 5617422,
+          "mean": 1.029191422591889,
+          "std": 0.45238235360802725,
+          "p1": 0.9954605630346774,
+          "p50": 1.000108008562679,
+          "p99": 1.0050901865492008,
+          "frac_within_1pct_of_1": 0.9958804946468327
+        },
+        "nonzero_pixels": {
+          "n": 5617422,
+          "mean": 1.029191422591889,
+          "std": 0.45238235360802725,
+          "p1": 0.9954605630346774,
+          "p50": 1.000108008562679,
+          "p99": 1.0050901865492008,
+          "frac_within_1pct_of_1": 0.9958804946468327
+        }
+      },
+      "linear": {
+        "all_pixels": {
+          "n": 5617422,
+          "mean": 2.5556223491620833,
+          "std": 0.3542687258359106,
+          "p1": 2.4419127008203296,
+          "p50": 2.533903957447619,
+          "p99": 2.6229520266837083,
+          "frac_within_1pct_of_1": 0.0
+        },
+        "nonzero_pixels": {
+          "n": 5617422,
+          "mean": 2.5556223491620833,
+          "std": 0.3542687258359106,
+          "p1": 2.4419127008203296,
+          "p50": 2.533903957447619,
+          "p99": 2.6229520266837083,
+          "frac_within_1pct_of_1": 0.0
+        }
+      },
+      "linear_renorm": {
+        "all_pixels": {
+          "n": 5617422,
+          "mean": 1.0000000000612406,
+          "std": 5.741446426252687e-09,
+          "p1": 0.9999999844478709,
+          "p50": 1.0000000000474198,
+          "p99": 1.00000001568389,
+          "frac_within_1pct_of_1": 1.0
+        },
+        "nonzero_pixels": {
+          "n": 5617422,
+          "mean": 1.0000000000612406,
+          "std": 5.741446426252687e-09,
+          "p1": 0.9999999844478709,
+          "p50": 1.0000000000474198,
+          "p99": 1.00000001568389,
+          "frac_within_1pct_of_1": 1.0
+        }
+      }
+    },
+    "pearson_r_between_candidates": {
+      "current_sq_sign|linear": 0.9305021589828478,
+      "current_sq_sign|linear_renorm": 0.8836229596520923,
+      "linear|linear_renorm": 0.990537029674395
+    }
+  },
+  "gee_cross_check": {
+    "status": "ok",
+    "n_patches_compared": 200,
+    "n_patches_no_gee_cover": 13,
+    "n_grid_shape_mismatch": 200,
+    "n_skipped_nodata_sentinel": 0,
+    "gee_l2_norm": {
+      "n": 202412,
+      "mean": 1.000090986962658,
+      "std": 0.0020030734180302746,
+      "p1": 0.9954623385269474,
+      "p50": 1.0000895008342678,
+      "p99": 1.0047008251983858,
+      "frac_within_1pct_of_1": 1.0
+    },
+    "per_candidate": {
+      "current_sq_sign": {
+        "patchmean_r_median": 0.9990365419678879,
+        "patchmean_r_min": 0.9959255263413379,
+        "patchmean_rmse": 0.004159524105489254,
+        "pixelwise_r": null,
+        "pixelwise_n": 0
+      },
+      "linear": {
+        "patchmean_r_median": 0.9716382422876537,
+        "patchmean_r_min": 0.9318627408178062,
+        "patchmean_rmse": 0.182859867811203,
+        "pixelwise_r": null,
+        "pixelwise_n": 0
+      },
+      "linear_renorm": {
+        "patchmean_r_median": 0.9718808952585958,
+        "patchmean_r_min": 0.9340725993504526,
+        "patchmean_rmse": 0.026611890643835068,
+        "pixelwise_r": null,
+        "pixelwise_n": 0
+      }
+    }
+  }
+}
