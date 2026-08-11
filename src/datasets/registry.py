@@ -8,18 +8,50 @@ registry keys.
 ``nodata_predicate`` marks per-pixel missing data. Each family stores nodata
 differently and none of them uses NaN, so the rule cannot be global — see
 :func:`get_nodata_predicate` for the measurements behind each entry.
+
+**Provenance** (``product``/``version``/``source``/``status``, Task 1.5.2) is
+what makes two entries comparable or not. ``in_channels`` alone does not: Task
+1.5.1 measured ``tesserav1.1`` and ``tesserav1.1_global`` to be *different
+feature bases* — same scene, matched-channel correlation ≈ 0, a linear 128→128
+map recovering 89% of one from the other — while both declare 128 channels, so
+``build_model`` accepts either and nothing would flag a model or normalizer
+built on one and applied to the other. :func:`is_comparable` and
+:func:`check_checkpoint_provenance` are the guards; see RESULTS.md
+"Task 1.5.1 — Tessera product identity".
+
+Keys are never renamed. They appear in extraction paths on disk and in the W&B
+config of every historical run, so a rename orphans both.
 """
 
 import re
 from pathlib import Path
 
 import numpy as np
+from loguru import logger
+
+# Vocabularies. Kept explicit so a typo in an entry is a test failure rather
+# than a silently unique provenance that compares equal to nothing.
+PRODUCTS = {"tessera", "alphaearth", "esd", "sentinel", "osm", "aux"}
+VERSIONS = {"v1", "v1.1", "v2", "coop", None}
+SOURCES = {
+    "percity_geotessera", "global_0.1deg", "source_coop", "gee_zarr", "local_tif",
+}
+STATUSES = {"canonical", "supported", "deprecated", "untested"}
+
+PROVENANCE_FIELDS = ("product", "version", "source", "status")
 
 EMBEDDING_REGISTRY: dict[str, dict] = {
     "tessera": {
         "in_channels": 128,
         "resolution": 10,
         "description": "Tessera 128-band Sentinel-1/2 embeddings",
+        "product": "tessera",
+        "version": "v1",
+        "source": "gee_zarr",
+        # Never exercised end to end: open_tile tested path.is_dir() before
+        # path.suffix == ".zarr", so every zarr tile misrouted to the Tessera
+        # NPY reader. Fixed in Task 1.0, but nothing has run through it since.
+        "status": "untested",
         # Zarr fast-path: tiles are named by center coords, 0.1° × 0.1° grid.
         # e.g. grid_0.15_52.05_2024.zarr → center (0.15, 52.05)
         "zarr_tile_size": 0.1,
@@ -31,6 +63,10 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "in_channels": 64,
         "resolution": 10,
         "description": "AlphaEarth 64-band satellite embeddings",
+        "product": "alphaearth",
+        "version": "v1",
+        "source": "gee_zarr",
+        "status": "untested",          # same open_tile ordering bug as `tessera`
         # Zarr fast-path: tiles are named by bottom-left corner, 0.1° × 0.1° grid.
         # e.g. gse_2.2_48.8_2021.zarr → bottom-left (2.2, 48.8)
         "zarr_tile_size": 0.1,
@@ -42,30 +78,55 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "in_channels": 72,  # 12 temporal months × 6 VQ levels (band 13 is QA, excluded)
         "resolution": 30,
         "description": "Embedded Seamless Data (ESD) quantized embeddings, dequantized to 72 channels",
+        "product": "esd",
+        "version": None,
+        "source": "local_tif",
+        "status": "canonical",
     },
     "alpha_earth_coop": {
         "in_channels": 64,
         "resolution": 10,
         "description": "AlphaEarth coop GeoTIFF tiles (source.coop), 64-band Int8 quantized",
         "nodata_all_channels_eq": -128.0,
+        "product": "alphaearth",
+        "version": "coop",
+        "source": "source_coop",
+        "status": "canonical",
     },
     "tesserav1.1": {
         "in_channels": 128,
         "resolution": 10,
         "description": "Tessera v1.1 int8+scales tiles, dequantized to 128-band float32",
         "nodata_all_channels_eq": 0.0,
+        "product": "tessera",
+        "version": "v1.1",
+        # A DIFFERENT ARCHIVE from tesserav1.1_global despite the shared version
+        # label, and a different feature basis (Task 1.5.1). 51 cities only:
+        # 27,229 of the 352,366 cultural-split training patches.
+        "source": "percity_geotessera",
+        "status": "supported",
     },
     "tesserav1.1_global": {
         "in_channels": 128,
         "resolution": 10,
         "description": "Tessera v1.1 global tiles (global_0.1_degree_representation + tiff_all), 128-band float32",
         "nodata_all_channels_eq": 0.0,
+        "product": "tessera",
+        "version": "v1.1",
+        "source": "global_0.1deg",
+        # Canonical Tessera: 97.3% coverage of the cultural-split training set,
+        # the only Tessera entry that can carry a global-split claim.
+        "status": "canonical",
     },
     "tesserav2": {
         "in_channels": 128,
         "resolution": 10,
         "description": "Tessera v2 global tiles (large_student), int8+scales dequantized to 128-band float32",
         "nodata_all_channels_eq": 0.0,
+        "product": "tessera",
+        "version": "v2",
+        "source": "global_0.1deg",
+        "status": "supported",         # 37% So2Sat coverage; version comparison only
     },
     "osm_evidence": {
         "in_channels": 15,
@@ -74,6 +135,12 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
                        "roads, rail, landuse groups, vegetation, water, bare, "
                        "completeness mask) rasterized by build_osm_rasters.py. "
                        "--embedding-dir = .../osm_evidence/tiles",
+        "product": "osm",
+        "version": None,
+        "source": "local_tif",
+        # Code retained, generated rasters deleted when the OSM fusion pilot was
+        # put on hold — nothing can run against this until they are rebuilt.
+        "status": "untested",
         # 0.5° tiles named by bottom-left corner: osm_{lon}_{lat}.tif
         "zarr_tile_size": 0.5,
         "zarr_filename_pattern": r"osm_(?P<lon>[-\d.]+)_(?P<lat>[-\d.]+)\.(zarr|tif)",
@@ -86,6 +153,10 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "description": "Auxiliary structural bands, normalised to ~[0,1]: GHSL ANBH/50, "
                        "built fraction, non-residential built fraction, ETH canopy height/50. "
                        "--embedding-dir = .../aux_struct/merged_aux (precompute_aux_tiles.py)",
+        "product": "aux",
+        "version": None,
+        "source": "local_tif",
+        "status": "supported",
         # 0.5° precomputed tiles named by bottom-left corner: aux_{lon}_{lat}.tif
         "zarr_tile_size": 0.5,
         "zarr_filename_pattern": r"aux_(?P<lon>[-\d.]+)_(?P<lat>[-\d.]+)\.(zarr|tif)",
@@ -139,6 +210,82 @@ def get_in_channels(name: str) -> int:
     if name not in EMBEDDING_REGISTRY:
         raise ValueError(f"Unknown embedding '{name}'. Choose from: {list(EMBEDDING_REGISTRY)}")
     return EMBEDDING_REGISTRY[name]["in_channels"]
+
+
+# ── Provenance (Task 1.5.2) ──────────────────────────────────────────────────
+
+def provenance(name: str | list[str] | tuple[str, ...]) -> dict:
+    """Provenance of one embedding, or of a fused combination.
+
+    Fused runs (several ``--embedding-name`` values) get each field joined with
+    ``+`` in the given order, so the result is still a flat dict of strings that
+    a checkpoint and a W&B config can carry unchanged.
+
+    Returns ``{"embedding_name", "product", "version", "source", "status"}``,
+    with ``version: None`` rendered as the string ``"none"`` — these values are
+    written into checkpoints and compared as strings.
+    """
+    names = [name] if isinstance(name, str) else list(name)
+    for n in names:
+        if n not in EMBEDDING_REGISTRY:
+            raise ValueError(
+                f"Unknown embedding '{n}'. Choose from: {list(EMBEDDING_REGISTRY)}"
+            )
+    out = {"embedding_name": "+".join(names)}
+    for field in PROVENANCE_FIELDS:
+        out[field] = "+".join(
+            str(EMBEDDING_REGISTRY[n].get(field) or "none") for n in names
+        )
+    return out
+
+
+def is_comparable(a: str, b: str) -> bool:
+    """True only if two registry entries are the same product, version and source.
+
+    ``status`` is deliberately excluded: it records how much we trust an entry,
+    not what the data is, and promoting an entry to ``canonical`` must not
+    change whether an existing checkpoint still matches it.
+    """
+    pa, pb = provenance(a), provenance(b)
+    return all(pa[f] == pb[f] for f in ("product", "version", "source"))
+
+
+def check_checkpoint_provenance(ckpt: dict, embedding_name) -> None:
+    """Refuse a checkpoint built on a different product than the one requested.
+
+    This is the failure mode that produces a plausible wrong number instead of
+    an error: ``tesserav1.1`` and ``tesserav1.1_global`` both declare 128
+    channels, so a checkpoint from one loads cleanly against the other and
+    predicts confident nonsense (Task 1.5.1 — matched-channel correlation ≈ 0).
+
+    Mismatch raises. **Absence only warns**: every checkpoint written before
+    Task 1.5.3 carries no provenance at all, including the one the GATE 1
+    bit-identity regression replays, and refusing those would break
+    reproducibility of the pre-Phase-1 path for no safety gain.
+    """
+    want = provenance(embedding_name)
+    have = {f: ckpt.get(f) for f in PROVENANCE_FIELDS if ckpt.get(f) is not None}
+
+    if not have:
+        logger.warning(
+            "Checkpoint carries no provenance metadata (written before Task "
+            f"1.5.3). Assuming it matches '{want['embedding_name']}' — verify "
+            "against the run's W&B config if the numbers matter."
+        )
+        return
+
+    differs = {f: (have[f], want[f]) for f in ("product", "version", "source")
+               if f in have and have[f] != want[f]}
+    if differs:
+        detail = "; ".join(f"{f}: checkpoint '{h}' vs requested '{w}'"
+                           for f, (h, w) in differs.items())
+        raise ValueError(
+            f"Checkpoint provenance does not match --embedding-name "
+            f"'{want['embedding_name']}'. {detail}. The checkpoint was trained on "
+            f"'{ckpt.get('embedding_name', '<unrecorded>')}'. These are different "
+            "products even where the channel count matches, so the prediction "
+            "would be meaningless — re-run with the embedding it was trained on."
+        )
 
 
 def find_tiles_for_roi(
