@@ -66,7 +66,7 @@ if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
 from datasets.channel_stats import compute_channel_stats, stats_cache_path
-from datasets.registry import EMBEDDING_REGISTRY, get_nodata_predicate
+from datasets.registry import EMBEDDING_REGISTRY, get_nodata_predicate, provenance
 from datasets.so2sat import PatchDataModule, build_so2sat_items
 from models import build_model, resolve_arch
 from training import (
@@ -319,7 +319,8 @@ def main() -> None:
     if args.normalize == "channel":
         train_items = [it for it in all_items if it.split == "train"]
         cache_path = stats_cache_path(
-            output_label, args.year, _split_source, items=train_items,
+            output_label, args.year, _split_source,
+            embedding_name=args.embedding_name, items=train_items,
             n_sample=args.stats_sample, seed=args.seed,
             patch_size=args.patch_size, nodata_mode=args.nodata_mode,
         )
@@ -403,7 +404,10 @@ def main() -> None:
     run_cfg = dict(
         task="patch_classification",
         embedding=output_label,
-        embedding_name="+".join(args.embedding_name),
+        # Provenance on every run (Task 1.5.3, guard 3) so the RESULTS.md table
+        # can be rebuilt from W&B alone with no row ambiguous about which
+        # Tessera it used.
+        **provenance(args.embedding_name),
         cities="all_so2sat" if _global_like else city_names,
         year=args.year,
         family=args.family,
@@ -471,6 +475,10 @@ def main() -> None:
                 "normalize": args.normalize,
                 "channel_mean": channel_mean,
                 "channel_std": channel_std,
+                # Provenance travels with the weights (Task 1.5.3, guard 2), so
+                # infer_roi can refuse a checkpoint pointed at another product.
+                **provenance(args.embedding_name),
+                "year": args.year,
             },
         )
     logger.info(f"Best checkpoint: {ckpt_path}")

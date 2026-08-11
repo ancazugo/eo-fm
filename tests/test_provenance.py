@@ -128,3 +128,53 @@ def test_checkpoint_guard_only_warns_when_provenance_is_absent():
 def test_checkpoint_guard_catches_a_cross_product_swap():
     with pytest.raises(ValueError, match="alphaearth"):
         check_checkpoint_provenance(provenance("alpha_earth_coop"), TESSERA_GLOBAL)
+
+
+# ── Guard 1: normalizer cache key ────────────────────────────────────────────
+
+def test_stats_cache_path_separates_the_two_tessera_products():
+    """Everything else identical — only the embedding differs, as in practice.
+
+    Both extractions get passed the same --output-name in a careless re-run, so
+    output_name cannot be the thing that keeps their normalizers apart.
+    """
+    from datasets.channel_stats import stats_cache_path
+
+    args = ("GeoTessera_v1.1", "2017", "global_so2sat")
+    a = stats_cache_path(*args, embedding_name=TESSERA_V11)
+    b = stats_cache_path(*args, embedding_name=TESSERA_GLOBAL)
+    assert a != b
+    assert "percity_geotessera" in a.name
+    assert "global_0.1deg" in b.name
+
+
+def test_stats_cache_path_is_stable_for_the_same_embedding():
+    from datasets.channel_stats import stats_cache_path
+
+    args = ("AlphaEarthCoop", "2017", "global_so2sat")
+    assert (stats_cache_path(*args, embedding_name="alpha_earth_coop")
+            == stats_cache_path(*args, embedding_name="alpha_earth_coop"))
+
+
+def test_stats_cache_digest_also_carries_provenance():
+    """With items passed, the digest must move too — not just the filename stem."""
+    from datasets.channel_stats import stats_cache_path
+    from datasets.so2sat import PatchItem
+
+    items = [PatchItem(Path(f"/x/patch_{i}.npy"), 0, "train") for i in range(8)]
+    a = stats_cache_path("Same", "2017", "grid", embedding_name=TESSERA_V11,
+                         items=items)
+    b = stats_cache_path("Same", "2017", "grid", embedding_name=TESSERA_GLOBAL,
+                         items=items)
+    assert a.name.split("_")[-1] != b.name.split("_")[-1]
+
+
+# ── Guard 3: W&B config ──────────────────────────────────────────────────────
+
+def test_wandb_config_and_checkpoint_carry_the_same_five_fields():
+    """The five fields RESULTS.md has to be reconstructable from."""
+    p = provenance(TESSERA_GLOBAL)
+    assert set(p) == {"embedding_name", "product", "version", "source", "status"}
+    assert p["embedding_name"] == TESSERA_GLOBAL
+    assert p["product"] == "tessera"
+    assert p["source"] == "global_0.1deg"

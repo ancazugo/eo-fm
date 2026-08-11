@@ -48,9 +48,12 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "product": "tessera",
         "version": "v1",
         "source": "gee_zarr",
-        # Never exercised end to end: open_tile tested path.is_dir() before
-        # path.suffix == ".zarr", so every zarr tile misrouted to the Tessera
-        # NPY reader. Fixed in Task 1.0, but nothing has run through it since.
+        # Untested against the CURRENT code, not never used: 42 W&B runs used
+        # this product (Task 1.5.4), but they predate the open_tile ordering bug
+        # (path.is_dir() tested before path.suffix == ".zarr", which misrouted
+        # every zarr tile to the Tessera NPY reader). Fixed in Task 1.0 and
+        # nothing has been re-run through it since, so it should not look
+        # available until someone exercises it.
         "status": "untested",
         # Zarr fast-path: tiles are named by center coords, 0.1° × 0.1° grid.
         # e.g. grid_0.15_52.05_2024.zarr → center (0.15, 52.05)
@@ -66,7 +69,9 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "product": "alphaearth",
         "version": "v1",
         "source": "gee_zarr",
-        "status": "untested",          # same open_tile ordering bug as `tessera`
+        # Same open_tile ordering bug as `tessera`, same caveat: used
+        # historically, not verified against the fixed code.
+        "status": "untested",
         # Zarr fast-path: tiles are named by bottom-left corner, 0.1° × 0.1° grid.
         # e.g. gse_2.2_48.8_2021.zarr → bottom-left (2.2, 48.8)
         "zarr_tile_size": 0.1,

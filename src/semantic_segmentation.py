@@ -56,7 +56,7 @@ if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
 from datasets.grid_tiles import GridSegDataModule, build_city_tile_items
-from datasets.registry import EMBEDDING_REGISTRY
+from datasets.registry import EMBEDDING_REGISTRY, provenance
 from models import build_model, resolve_arch
 from training import (
     LCZUNetModule,
@@ -263,7 +263,9 @@ def main() -> None:
     run_cfg = dict(
         task="segmentation",
         embedding="+".join(args.output_name),
-        embedding_name=args.embedding_name,
+        # Provenance on every run (Task 1.5.3, guard 3): `embedding_name` alone
+        # does not say which Tessera archive a number came from.
+        **provenance(args.embedding_name),
         cities=city_names,
         year=args.year,
         label_source=args.label_source,
@@ -308,6 +310,9 @@ def main() -> None:
             early_stopping_patience=args.early_stopping_patience,
             run_dir=run_dir,
             model_name=model_name,
+            # Segmentation has no --normalize yet, but the checkpoint still has
+            # to record which product it was trained on (Task 1.5.3, guard 2).
+            norm_meta={**provenance(args.embedding_name), "year": args.year},
         )
     logger.info(f"Best checkpoint: {ckpt_path}")
 

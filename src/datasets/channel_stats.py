@@ -31,16 +31,17 @@ from pathlib import Path
 import numpy as np
 from loguru import logger
 
+from datasets.registry import provenance
 from utils.constants import DATA_DIR
 
 STATS_CACHE_DIR = DATA_DIR / "cache" / "channel_stats"
 
 
 def _cache_key(items: list, n_sample: int, seed: int, patch_size: int,
-               nodata_mode: str) -> str:
+               nodata_mode: str, prov: str = "") -> str:
     """Short digest of the inputs that change the statistics."""
     h = hashlib.sha256()
-    h.update(f"{len(items)}|{n_sample}|{seed}|{patch_size}|{nodata_mode}".encode())
+    h.update(f"{len(items)}|{n_sample}|{seed}|{patch_size}|{nodata_mode}|{prov}".encode())
     # A few paths pin the identity of the item list without hashing all 350k.
     for it in items[:64]:
         h.update(str(it.path).encode())
@@ -145,15 +146,26 @@ def compute_channel_stats(
 
 def stats_cache_path(
     output_name: str, year: str, split_source: str, *,
+    embedding_name: str | list[str] | tuple[str, ...],
     items: list | None = None, n_sample: int = 20000, seed: int = 0,
     patch_size: int = 32, nodata_mode: str = "mask",
 ) -> Path:
     """Cache path for one (embedding, year, split) combination.
 
-    The digest keeps runs that differ in sample size, seed, patch size or
-    nodata mode from silently sharing a normalizer.
+    Keyed on the full provenance triple (Task 1.5.3, guard 1), not just
+    ``output_name``: two extractions of the same product from different tile
+    sources are different feature spaces — `tesserav1.1` and
+    `tesserav1.1_global` have matched-channel correlation ≈ 0 — so sharing a
+    normalizer between them would z-score one product by the other's statistics
+    and produce a plausible wrong number. ``output_name`` is a free-text CLI
+    label and cannot be relied on to differ.
+
+    The digest additionally keeps runs that differ in sample size, seed, patch
+    size or nodata mode from silently sharing a normalizer.
     """
-    name = f"{output_name}_{year}_{split_source}"
+    prov = provenance(embedding_name)
+    triple = f"{prov['product']}-{prov['version']}-{prov['source']}"
+    name = f"{triple}_{output_name}_{year}_{split_source}"
     if items is not None:
-        name += f"_{_cache_key(items, n_sample, seed, patch_size, nodata_mode)}"
+        name += f"_{_cache_key(items, n_sample, seed, patch_size, nodata_mode, triple)}"
     return STATS_CACHE_DIR / f"{name}.npz"

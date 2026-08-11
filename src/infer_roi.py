@@ -750,7 +750,7 @@ def main() -> None:
     logger.info(f"Device: {device}")
 
     # ── Build model from the registry ─────────────────────────────────────────
-    from datasets.registry import get_in_channels
+    from datasets.registry import check_checkpoint_provenance, get_in_channels
     from models import get_family, resolve_arch
     from training.tasks import LCZResNetModule, LCZUNetModule
 
@@ -759,6 +759,16 @@ def main() -> None:
 
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     state = ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
+
+    # Before anything is built: a checkpoint from another product loads cleanly
+    # whenever the channel counts agree, and then predicts confident nonsense.
+    # Re-raised as SystemExit so the CLI reports it like the other user errors
+    # here, rather than as a traceback out of the registry.
+    if isinstance(ckpt, dict):
+        try:
+            check_checkpoint_provenance(ckpt, args.embedding_name)
+        except ValueError as e:
+            raise SystemExit(str(e)) from None
 
     if args.model_type == "linear_probe" and "norm.running_mean" not in state:
         # Legacy probe from the retired linear_probe.py script: fc-only state
