@@ -319,6 +319,9 @@ class PatchDataset(Dataset):
         dequantize_fn=None,
         nodata_mode: str = "zero",
         nodata_predicate=None,
+        normalize: str = "none",
+        channel_mean=None,
+        channel_std=None,
     ) -> None:
         self.patch_size = patch_size
         self.sub_patch_size = sub_patch_size
@@ -328,9 +331,26 @@ class PatchDataset(Dataset):
             raise ValueError(f"nodata_mode must be 'zero' or 'mask', got {nodata_mode!r}")
         self.nodata_mode = nodata_mode
         self.nodata_predicate = nodata_predicate
-        # Value written into invalid pixels, in decoded units. Task 1.2 replaces
-        # this with the per-channel mean, so masked pixels normalise to 0.
-        self.fill_value: float | np.ndarray = 0.0
+
+        if normalize not in ("none", "channel"):
+            raise ValueError(f"normalize must be 'none' or 'channel', got {normalize!r}")
+        self.normalize = normalize
+        self.channel_mean = None
+        self.channel_std = None
+        if normalize == "channel":
+            if channel_mean is None or channel_std is None:
+                raise ValueError("normalize='channel' requires channel_mean and channel_std")
+            self.channel_mean = np.asarray(channel_mean, dtype=np.float32)
+            self.channel_std = np.asarray(channel_std, dtype=np.float32)
+
+        # Value written into invalid pixels, in decoded units: the per-channel
+        # mean when we know it, so masked pixels normalise to exactly 0.
+        self.fill_value: float | np.ndarray = (
+            0.0 if self.channel_mean is None else self.channel_mean[:, None]
+        )
+        if self.channel_mean is not None:
+            self._norm_mean = torch.from_numpy(self.channel_mean)[:, None, None]
+            self._norm_std = torch.from_numpy(self.channel_std)[:, None, None]
 
         if items and isinstance(items[0][0], tuple) and sub_patch_size is not None:
             raise ValueError("sub_patch_size is not supported with fused (multi-source) items")
@@ -380,7 +400,7 @@ class PatchDataset(Dataset):
             return valid
         return (self._resize(valid) >= 1.0 - 1e-6).float()
 
-    def _load_source(self, path: Path, dequantize_fn, predicate=None):
+    def _load_source(self, path: Path, dequantize_fn, predicate=None, fill_offset: int = 0):
         """Load one source as ``(C, H, W)`` float32 plus its validity mask.
 
         The nodata predicate is applied to the array exactly as stored, before
@@ -404,7 +424,11 @@ class PatchDataset(Dataset):
             arr = dequantize_fn(arr)
 
         if invalid is not None and invalid.any():
-            arr[:, invalid] = self.fill_value
+            fill = self.fill_value
+            if isinstance(fill, np.ndarray):
+                # Fused sources each take their own slice of the channel means.
+                fill = fill[fill_offset:fill_offset + arr.shape[0]]
+            arr[:, invalid] = fill
 
         valid = None
         if self.nodata_mode == "mask":
@@ -429,8 +453,10 @@ class PatchDataset(Dataset):
             fns = (self.dequantize_fn if isinstance(self.dequantize_fn, (list, tuple))
                    else [self.dequantize_fn] * len(path))
             images, valids = [], []
+            offset = 0
             for i, (p, fn) in enumerate(zip(path, fns)):
-                arr, v = self._load_source(p, fn, self._predicate_for(i))
+                arr, v = self._load_source(p, fn, self._predicate_for(i), offset)
+                offset += arr.shape[0]
                 images.append(self._resize(torch.from_numpy(arr)))
                 if v is not None:
                     valids.append(self._resize_valid(torch.from_numpy(v)))
@@ -449,6 +475,12 @@ class PatchDataset(Dataset):
                 valid = None if v is None else torch.from_numpy(v[sl])
             image = self._resize(image)
             valid = None if valid is None else self._resize_valid(valid)
+
+        if self.normalize == "channel":
+            # Applied here, after the resize: bilinear interpolation is affine
+            # with weights summing to 1, so normalising before or after it gives
+            # the same result, and doing it once covers fused sources too.
+            image = (image - self._norm_mean) / (self._norm_std + 1e-6)
 
         out = {
             "image": image,
@@ -484,6 +516,9 @@ class PatchDataModule:
         sampler: str = "none",
         nodata_mode: str = "zero",
         nodata_predicate=None,
+        normalize: str = "none",
+        channel_mean=None,
+        channel_std=None,
     ) -> None:
         self.all_items = all_items
         self.patch_size = patch_size
@@ -495,6 +530,9 @@ class PatchDataModule:
         self.sampler = sampler
         self.nodata_mode = nodata_mode
         self.nodata_predicate = nodata_predicate
+        self.normalize = normalize
+        self.channel_mean = channel_mean
+        self.channel_std = channel_std
 
     def setup(self) -> None:
         def _for_split(s: str) -> list:
@@ -502,7 +540,8 @@ class PatchDataModule:
 
         kw = dict(sub_patch_size=self.sub_patch_size, sub_patch_stride=self.sub_patch_stride,
                   dequantize_fn=self.dequantize_fn, nodata_mode=self.nodata_mode,
-                  nodata_predicate=self.nodata_predicate)
+                  nodata_predicate=self.nodata_predicate, normalize=self.normalize,
+                  channel_mean=self.channel_mean, channel_std=self.channel_std)
         self._train_ds = PatchDataset(_for_split("train"), self.patch_size, **kw)
         self._val_ds   = PatchDataset(_for_split("val"),   self.patch_size, **kw)
         self._test_ds  = PatchDataset(_for_split("test"),  self.patch_size, **kw)

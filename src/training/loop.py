@@ -5,14 +5,20 @@ Replaces the near-identical ``_run_resnet_training_loop`` and
 early stopping and checkpointing on the task's monitored metric (``val_f1``
 for classification, ``val_miou`` for segmentation).
 
-Checkpoint format (unchanged from the previous loops):
-    {"model_state_dict": ..., "epoch": ..., <task.monitor>: <best value>}
+Checkpoint format:
+    {"model_state_dict": ..., "epoch": ..., <task.monitor>: <best value>,
+     "normalize": ..., "channel_mean": ..., "channel_std": ...}
+
+The three normalization keys were added in Phase 1 and are what let inference
+reproduce training exactly. Checkpoints written before then simply lack them;
+loaders must handle that rather than assume no normalization.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import torch
 from loguru import logger
 
@@ -26,6 +32,7 @@ def run_training_loop(
     run_dir: Path,
     model_name: str,
     warmup_epochs: int = 0,
+    norm_meta: dict | None = None,
 ):
     """Train ``task_module`` and return ``(task_with_best_weights, best_ckpt_path)``.
 
@@ -39,6 +46,12 @@ def run_training_loop(
         run_dir: Directory to save checkpoints.
         model_name: Stem for the checkpoint filename.
         warmup_epochs: Linear LR warmup epochs before cosine decay (0 = off).
+        norm_meta: Input-normalization metadata to embed in the checkpoint —
+            ``{"normalize": ..., "channel_mean": ..., "channel_std": ...}``.
+            Inference MUST reproduce the training normalization exactly, so it
+            travels with the weights rather than being re-derived; see
+            infer_roi.py, which refuses a checkpoint that lacks it unless
+            ``--normalize none`` is passed explicitly.
     """
     import wandb
 
@@ -58,6 +71,14 @@ def run_training_loop(
         )
     else:
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max_epochs)
+
+    # Store the normalization arrays as tensors: numpy arrays cannot be read
+    # back under torch.load's default weights_only=True, and a checkpoint that
+    # needs weights_only=False to open is a checkpoint nobody should trust.
+    norm_meta = {
+        k: (torch.as_tensor(v) if isinstance(v, np.ndarray) else v)
+        for k, v in (norm_meta or {}).items()
+    }
 
     datamodule.setup()
     train_loader = datamodule.train_dataloader()
@@ -108,6 +129,7 @@ def run_training_loop(
                     "model_state_dict": task_module.model.state_dict(),
                     "epoch": epoch + 1,
                     monitor: value,
+                    **norm_meta,
                 },
                 best_ckpt_path,
             )

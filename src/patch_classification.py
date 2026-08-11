@@ -65,6 +65,7 @@ _src = Path(__file__).parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
+from datasets.channel_stats import compute_channel_stats, stats_cache_path
 from datasets.registry import EMBEDDING_REGISTRY, get_nodata_predicate
 from datasets.so2sat import PatchDataModule, build_so2sat_items
 from models import build_model, resolve_arch
@@ -146,6 +147,14 @@ def main() -> None:
                         "i.e. non-overlapping).")
     g.add_argument("--head-dropout", type=float, default=0.0,
                    help="Dropout before the final FC layer (default: 0.0).")
+    g.add_argument("--normalize", choices=["none", "channel"], default="channel",
+                   help="Per-channel input standardisation using train-split "
+                        "statistics over valid pixels (default: channel). 'none' "
+                        "reproduces the pre-Phase-1 unnormalised path.")
+    g.add_argument("--stats-sample", type=int, default=20000,
+                   help="Patches sampled to estimate channel statistics (default: 20000).")
+    g.add_argument("--recompute-stats", action="store_true",
+                   help="Ignore any cached channel statistics and recompute them.")
     g.add_argument("--nodata-mode", choices=["zero", "mask"], default="mask",
                    help="How to treat per-family nodata sentinels (see "
                         "datasets.registry.get_nodata_predicate): 'mask' emits a "
@@ -302,6 +311,23 @@ def main() -> None:
     if not fused:
         nodata_predicate = nodata_predicate[0]
 
+    _split_source = ("grid_orig_test" if args.orig_test
+                     else "global_so2sat" if args.global_split else "grid")
+    channel_mean = channel_std = None
+    if args.normalize == "channel":
+        train_items = [it for it in all_items if it[2] == "train"]
+        cache_path = stats_cache_path(
+            output_label, args.year, _split_source, items=train_items,
+            n_sample=args.stats_sample, seed=args.seed,
+            patch_size=args.patch_size, nodata_mode=args.nodata_mode,
+        )
+        channel_mean, channel_std = compute_channel_stats(
+            train_items, dequantize_fn, nodata_predicate,
+            patch_size=args.patch_size, n_sample=args.stats_sample,
+            seed=args.seed, nodata_mode=args.nodata_mode,
+            cache_path=cache_path, recompute=args.recompute_stats,
+        )
+
     datamodule = PatchDataModule(
         all_items, args.patch_size, args.batch_size, args.num_workers,
         sub_patch_size=args.sub_patch_size,
@@ -310,6 +336,9 @@ def main() -> None:
         sampler=args.sampler,
         nodata_mode=args.nodata_mode,
         nodata_predicate=nodata_predicate,
+        normalize=args.normalize,
+        channel_mean=channel_mean,
+        channel_std=channel_std,
     )
 
     # ── WandB ─────────────────────────────────────────────────────────────────
@@ -330,6 +359,8 @@ def main() -> None:
         sub_patch_size=args.sub_patch_size,
         sub_patch_stride=args.sub_patch_stride,
         nodata_mode=args.nodata_mode,
+        normalize=args.normalize,
+        stats_sample=args.stats_sample if args.normalize == 'channel' else None,
         batch_size=args.batch_size,
         lr=args.lr,
         weight_decay=args.weight_decay,
@@ -349,8 +380,7 @@ def main() -> None:
         seed=args.seed,
         n_params=n_params,
         data_source="so2sat_patches",
-        split_source=("grid_orig_test" if args.orig_test
-                      else "global_so2sat" if args.global_split else "grid"),
+        split_source=_split_source,
         **{f"{s}_patches": split_counts[s] for s in ("train", "val", "test")},
     )
 
@@ -377,6 +407,11 @@ def main() -> None:
             run_dir=run_dir,
             model_name=model_name,
             warmup_epochs=args.warmup_epochs,
+            norm_meta={
+                "normalize": args.normalize,
+                "channel_mean": channel_mean,
+                "channel_std": channel_std,
+            },
         )
     logger.info(f"Best checkpoint: {ckpt_path}")
 
@@ -401,6 +436,7 @@ def main() -> None:
     run_city_inference(
         task.model, args.family, "classification", args.preset,
         city_dirs, run_dir, device, dequantize_fn,
+        normalize=(channel_mean, channel_std) if args.normalize == "channel" else None,
         embedding_name=args.embedding_name[0],
         embedding_dir=args.embedding_dir,
         num_classes=args.num_classes,
