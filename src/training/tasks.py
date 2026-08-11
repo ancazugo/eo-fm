@@ -115,9 +115,25 @@ class LCZResNetModule(nn.Module):
         self._n_train = 0
         self._val_loss_sum = 0.0
         self._n_val = 0
+        # Mean fraction of masked-out pixels per batch; reported but not acted on.
+        self._invalid_sum = 0.0
+        self._n_invalid = 0
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x.float())
+    def forward(self, x: torch.Tensor, valid: torch.Tensor | None = None) -> torch.Tensor:
+        return self._forward_masked(x.float(), valid)
+
+    def _forward_masked(
+        self, images: torch.Tensor, valid: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Forward, passing the validity mask only to models that pool with it.
+
+        Convolutional families ignore the mask for now (Task 1.5 logs the
+        invalid fraction without changing their behaviour); the pooling
+        families declare ``accepts_valid_mask`` and take a masked mean.
+        """
+        if valid is not None and getattr(self.model, "accepts_valid_mask", False):
+            return self.model(images, valid=valid)
+        return self.model(images)
 
     def _adjust_logits(self, logits: torch.Tensor) -> torch.Tensor:
         """Train-time logit adjustment; identity when disabled."""
@@ -146,12 +162,19 @@ class LCZResNetModule(nn.Module):
             m.reset()
         self._train_loss_sum = 0.0
         self._n_train = 0
+        self._invalid_sum = 0.0
+        self._n_invalid = 0
 
     def train_step(self, batch: dict, device: torch.device) -> torch.Tensor | None:
         """Forward + loss + metric update. Returns the loss tensor, or None
         for skipped batches (all-nodata labels or NaN loss)."""
         images = batch["image"].to(device).float()
         labels = batch["label"].to(device)
+        valid = batch.get("valid")
+        if valid is not None:
+            valid = valid.to(device).float()
+            self._invalid_sum += float(1.0 - valid.mean().item())
+            self._n_invalid += 1
         sample_w = batch.get("weight")
         if sample_w is not None:
             sample_w = sample_w.to(device).float()
@@ -168,13 +191,17 @@ class LCZResNetModule(nn.Module):
             lam = float(torch.distributions.Beta(
                 self.mixup_alpha, self.mixup_alpha).sample())
             perm = torch.randperm(images.size(0), device=device)
-            logits = self.model(lam * images + (1 - lam) * images[perm])
+            # A mixed pixel is only usable where BOTH contributing patches have data.
+            mixed_valid = None if valid is None else torch.minimum(valid, valid[perm])
+            logits = self._forward_masked(
+                lam * images + (1 - lam) * images[perm], mixed_valid
+            )
             loss_logits = self._adjust_logits(logits)
             loss = lam * _ce(loss_logits, labels, sample_w) + \
                 (1 - lam) * _ce(loss_logits, labels[perm],
                                 sample_w[perm] if sample_w is not None else None)
         else:
-            logits = self.model(images)
+            logits = self._forward_masked(images, valid)
             loss = _ce(self._adjust_logits(logits), labels, sample_w)
         if torch.isnan(loss):
             return None
@@ -191,8 +218,14 @@ class LCZResNetModule(nn.Module):
         self._n_train += 1
         return loss
 
+    def _invalid_log(self, prefix: str) -> dict[str, float]:
+        if not self._n_invalid:
+            return {}
+        return {f"{prefix}_invalid_frac": self._invalid_sum / self._n_invalid}
+
     def compute_train_logs(self) -> dict[str, float]:
         return {
+            **self._invalid_log("train"),
             "train_loss":      self._train_loss_sum / max(1, self._n_train),
             "train_oa":        self.train_acc.compute().item(),
             "train_acc_macro": self.train_acc_macro.compute().item(),
@@ -207,13 +240,20 @@ class LCZResNetModule(nn.Module):
             m.reset()
         self._val_loss_sum = 0.0
         self._n_val = 0
+        self._invalid_sum = 0.0
+        self._n_invalid = 0
 
     def val_step(self, batch: dict, device: torch.device) -> None:
         images = batch["image"].to(device).float()
         labels = batch["label"].to(device)
+        valid = batch.get("valid")
+        if valid is not None:
+            valid = valid.to(device).float()
+            self._invalid_sum += float(1.0 - valid.mean().item())
+            self._n_invalid += 1
         if (labels != -1).sum() == 0:
             return
-        logits = self.model(images)
+        logits = self._forward_masked(images, valid)
         loss = self.ce_loss(logits, labels)
         preds = logits.argmax(dim=1)
         self.val_acc(preds, labels)
@@ -226,6 +266,7 @@ class LCZResNetModule(nn.Module):
 
     def compute_val_logs(self) -> dict[str, float]:
         return {
+            **self._invalid_log("val"),
             "val_loss":      self._val_loss_sum / max(1, self._n_val),
             "val_acc":       self.val_acc.compute().item(),
             "val_acc_macro": self.val_acc_macro.compute().item(),

@@ -65,7 +65,7 @@ _src = Path(__file__).parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from datasets.registry import EMBEDDING_REGISTRY
+from datasets.registry import EMBEDDING_REGISTRY, get_nodata_predicate
 from datasets.so2sat import PatchDataModule, build_so2sat_items
 from models import build_model, resolve_arch
 from training import (
@@ -146,6 +146,12 @@ def main() -> None:
                         "i.e. non-overlapping).")
     g.add_argument("--head-dropout", type=float, default=0.0,
                    help="Dropout before the final FC layer (default: 0.0).")
+    g.add_argument("--nodata-mode", choices=["zero", "mask"], default="mask",
+                   help="How to treat per-family nodata sentinels (see "
+                        "datasets.registry.get_nodata_predicate): 'mask' emits a "
+                        "'valid' channel and fills invalid pixels, 'zero' keeps the "
+                        "pre-Phase-1 behaviour of passing them straight through "
+                        "(default: mask).")
 
     # ── Training ──────────────────────────────────────────────────────────────
     g = add_training_args(parser, batch_size=64)
@@ -292,12 +298,18 @@ def main() -> None:
     logger.info(f"'{args.family}/{args.preset}' ({arch}): params={n_params:,}")
 
     # ── DataModule ────────────────────────────────────────────────────────────
+    nodata_predicate = [get_nodata_predicate(e) for e in args.embedding_name]
+    if not fused:
+        nodata_predicate = nodata_predicate[0]
+
     datamodule = PatchDataModule(
         all_items, args.patch_size, args.batch_size, args.num_workers,
         sub_patch_size=args.sub_patch_size,
         sub_patch_stride=args.sub_patch_stride,
         dequantize_fn=dequantize_fn,
         sampler=args.sampler,
+        nodata_mode=args.nodata_mode,
+        nodata_predicate=nodata_predicate,
     )
 
     # ── WandB ─────────────────────────────────────────────────────────────────
@@ -317,6 +329,7 @@ def main() -> None:
         patch_size=args.patch_size,
         sub_patch_size=args.sub_patch_size,
         sub_patch_stride=args.sub_patch_stride,
+        nodata_mode=args.nodata_mode,
         batch_size=args.batch_size,
         lr=args.lr,
         weight_decay=args.weight_decay,

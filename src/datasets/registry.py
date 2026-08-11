@@ -4,10 +4,16 @@
 drives tile discovery without opening files (datasets.tiles.build_tile_index,
 find_tiles_for_roi). CLI ``--embedding-name`` choices are derived from the
 registry keys.
+
+``nodata_predicate`` marks per-pixel missing data. Each family stores nodata
+differently and none of them uses NaN, so the rule cannot be global — see
+:func:`get_nodata_predicate` for the measurements behind each entry.
 """
 
 import re
 from pathlib import Path
+
+import numpy as np
 
 EMBEDDING_REGISTRY: dict[str, dict] = {
     "tessera": {
@@ -41,21 +47,25 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "in_channels": 64,
         "resolution": 10,
         "description": "AlphaEarth coop GeoTIFF tiles (source.coop), 64-band Int8 quantized",
+        "nodata_all_channels_eq": -128.0,
     },
     "tesserav1.1": {
         "in_channels": 128,
         "resolution": 10,
         "description": "Tessera v1.1 int8+scales tiles, dequantized to 128-band float32",
+        "nodata_all_channels_eq": 0.0,
     },
     "tesserav1.1_global": {
         "in_channels": 128,
         "resolution": 10,
         "description": "Tessera v1.1 global tiles (global_0.1_degree_representation + tiff_all), 128-band float32",
+        "nodata_all_channels_eq": 0.0,
     },
     "tesserav2": {
         "in_channels": 128,
         "resolution": 10,
         "description": "Tessera v2 global tiles (large_student), int8+scales dequantized to 128-band float32",
+        "nodata_all_channels_eq": 0.0,
     },
     "osm_evidence": {
         "in_channels": 15,
@@ -83,6 +93,45 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "zarr_filename_is_center": False,
     },
 }
+
+
+def get_nodata_predicate(name: str):
+    """Return ``fn(arr) -> (H, W) bool`` marking invalid pixels, or None.
+
+    ``arr`` is the ``(C, H, W)`` array exactly as it comes off disk — before
+    ``nan_to_num`` and before any dequantization — so the sentinel is tested in
+    the units it is actually stored in.
+
+    Per-family rules, each measured over the So2Sat training split in Phase 0
+    (see RESULTS.md, "Incidental findings" and the GATE 0 amendments):
+
+    * ``alpha_earth_coop`` — invalid where all 64 int8 channels equal -128.
+      0.41-0.68% of pixels. -128 NEVER occurs in a single channel alone, so a
+      per-channel test would be wrong; and these are not NaN, so ``nan_to_num``
+      never caught them. Under the (correct) dequantization each becomes a
+      vector of L2 norm 8.06 instead of 1.0.
+    * ``tesserav1.1`` / ``tesserav1.1_global`` / ``tesserav2`` — invalid where
+      all 128 channels are exactly 0 (0.05-0.15% of pixels). Tessera also has
+      ~0.9% *per-channel* quantization zeros affecting 61% of pixels, which are
+      valid data: testing per-channel here would discard most of the dataset.
+    * ``seamless`` — none. Measured 0.0000% all-zero pixels.
+    * ``sentinel1`` / ``sentinel2`` — none. The GeoTIFFs set ``nodata=None``,
+      carry no NaNs and have no all-zero pixels in any of the three splits, so
+      they are treated as fully valid rather than searched for a mask at read
+      time.
+
+    NaN in any channel counts as invalid for every family, even though no
+    family currently contains any — it is the one rule that is always right.
+    """
+    sentinel = EMBEDDING_REGISTRY.get(name, {}).get("nodata_all_channels_eq")
+
+    def predicate(arr: np.ndarray) -> np.ndarray:
+        invalid = np.isnan(arr).any(axis=0)
+        if sentinel is not None:
+            invalid |= (arr == sentinel).all(axis=0)
+        return invalid
+
+    return predicate
 
 
 def get_in_channels(name: str) -> int:

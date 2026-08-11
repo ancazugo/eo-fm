@@ -317,11 +317,20 @@ class PatchDataset(Dataset):
         sub_patch_size: int | None = None,
         sub_patch_stride: int | None = None,
         dequantize_fn=None,
+        nodata_mode: str = "zero",
+        nodata_predicate=None,
     ) -> None:
         self.patch_size = patch_size
         self.sub_patch_size = sub_patch_size
         self.sub_patch_stride = sub_patch_stride or sub_patch_size
         self.dequantize_fn = dequantize_fn
+        if nodata_mode not in ("zero", "mask"):
+            raise ValueError(f"nodata_mode must be 'zero' or 'mask', got {nodata_mode!r}")
+        self.nodata_mode = nodata_mode
+        self.nodata_predicate = nodata_predicate
+        # Value written into invalid pixels, in decoded units. Task 1.2 replaces
+        # this with the per-channel mean, so masked pixels normalise to 0.
+        self.fill_value: float | np.ndarray = 0.0
 
         if items and isinstance(items[0][0], tuple) and sub_patch_size is not None:
             raise ValueError("sub_patch_size is not supported with fused (multi-source) items")
@@ -359,12 +368,58 @@ class PatchDataset(Dataset):
             ).squeeze(0)
         return image
 
-    def _load_source(self, path: Path, dequantize_fn) -> np.ndarray:
-        arr = np.load(path).astype(np.float32)   # (C, H, W)
-        arr = np.nan_to_num(arr, nan=0.0)
+    def _resize_valid(self, valid: torch.Tensor) -> torch.Tensor:
+        """Resize a (1, H, W) float validity mask through the image's own call.
+
+        Bilinear-interpolates the mask and then demands a full weight of 1, so
+        any output pixel whose interpolation touched an invalid input pixel is
+        itself invalid. The mask therefore never claims validity the resized
+        image cannot back.
+        """
+        if valid.shape[-2:] == (self.patch_size, self.patch_size):
+            return valid
+        return (self._resize(valid) >= 1.0 - 1e-6).float()
+
+    def _load_source(self, path: Path, dequantize_fn, predicate=None):
+        """Load one source as ``(C, H, W)`` float32 plus its validity mask.
+
+        The nodata predicate is applied to the array exactly as stored, before
+        ``nan_to_num`` and before dequantization, because each family's sentinel
+        is defined in its own stored units (see
+        ``datasets.registry.get_nodata_predicate``). Invalid pixels are then
+        overwritten with ``fill_value`` in *decoded* units so the sentinel does
+        not bleed into its neighbours through the bilinear resize.
+
+        Returns ``(arr, valid)``; ``valid`` is None in "zero" mode, which keeps
+        the pre-Phase-1 behaviour byte for byte.
+        """
+        raw = np.load(path).astype(np.float32)   # (C, H, W)
+
+        invalid = None
+        if self.nodata_mode == "mask" and predicate is not None:
+            invalid = predicate(raw)             # (H, W) bool, stored units
+
+        arr = np.nan_to_num(raw, nan=0.0)
         if dequantize_fn is not None:
             arr = dequantize_fn(arr)
-        return arr
+
+        if invalid is not None and invalid.any():
+            arr[:, invalid] = self.fill_value
+
+        valid = None
+        if self.nodata_mode == "mask":
+            valid = (
+                np.ones((1, *arr.shape[1:]), dtype=np.float32) if invalid is None
+                else (~invalid)[None].astype(np.float32)
+            )
+        return arr, valid
+
+    def _predicate_for(self, i: int):
+        """Per-source nodata predicate (a sequence for fused multi-source items)."""
+        p = self.nodata_predicate
+        if isinstance(p, (list, tuple)):
+            return p[i]
+        return p
 
     def __getitem__(self, idx: int) -> dict:
         path, label, r, c, weight = self.expanded[idx]
@@ -373,23 +428,34 @@ class PatchDataset(Dataset):
             # Fusion: resize each source to the common grid, then concat channels
             fns = (self.dequantize_fn if isinstance(self.dequantize_fn, (list, tuple))
                    else [self.dequantize_fn] * len(path))
-            image = torch.cat(
-                [self._resize(torch.from_numpy(self._load_source(p, fn)))
-                 for p, fn in zip(path, fns)],
-                dim=0,
-            )
+            images, valids = [], []
+            for i, (p, fn) in enumerate(zip(path, fns)):
+                arr, v = self._load_source(p, fn, self._predicate_for(i))
+                images.append(self._resize(torch.from_numpy(arr)))
+                if v is not None:
+                    valids.append(self._resize_valid(torch.from_numpy(v)))
+            image = torch.cat(images, dim=0)
+            # A pixel is usable only where every source has data.
+            valid = torch.stack(valids).amin(dim=0) if valids else None
         else:
-            arr = self._load_source(path, self.dequantize_fn)
+            arr, v = self._load_source(path, self.dequantize_fn, self._predicate_for(0))
             if r is None:
                 image = torch.from_numpy(arr)
+                valid = None if v is None else torch.from_numpy(v)
             else:
-                image = torch.from_numpy(arr[:, r:r + self.sub_patch_size, c:c + self.sub_patch_size])
+                sl = (slice(None), slice(r, r + self.sub_patch_size),
+                      slice(c, c + self.sub_patch_size))
+                image = torch.from_numpy(arr[sl])
+                valid = None if v is None else torch.from_numpy(v[sl])
             image = self._resize(image)
+            valid = None if valid is None else self._resize_valid(valid)
 
         out = {
             "image": image,
             "label": torch.tensor(label, dtype=torch.long),
         }
+        if valid is not None:
+            out["valid"] = valid
         if self.has_weights:
             out["weight"] = torch.tensor(weight, dtype=torch.float32)
         return out
@@ -416,6 +482,8 @@ class PatchDataModule:
         sub_patch_stride: int | None = None,
         dequantize_fn=None,
         sampler: str = "none",
+        nodata_mode: str = "zero",
+        nodata_predicate=None,
     ) -> None:
         self.all_items = all_items
         self.patch_size = patch_size
@@ -425,13 +493,16 @@ class PatchDataModule:
         self.sub_patch_stride = sub_patch_stride
         self.dequantize_fn = dequantize_fn
         self.sampler = sampler
+        self.nodata_mode = nodata_mode
+        self.nodata_predicate = nodata_predicate
 
     def setup(self) -> None:
         def _for_split(s: str) -> list:
             return [it for it in self.all_items if it[2] == s]
 
         kw = dict(sub_patch_size=self.sub_patch_size, sub_patch_stride=self.sub_patch_stride,
-                  dequantize_fn=self.dequantize_fn)
+                  dequantize_fn=self.dequantize_fn, nodata_mode=self.nodata_mode,
+                  nodata_predicate=self.nodata_predicate)
         self._train_ds = PatchDataset(_for_split("train"), self.patch_size, **kw)
         self._val_ds   = PatchDataset(_for_split("val"),   self.patch_size, **kw)
         self._test_ds  = PatchDataset(_for_split("test"),  self.patch_size, **kw)
@@ -446,6 +517,8 @@ class PatchDataModule:
             "image": torch.stack([b["image"] for b in batch]),
             "label": torch.stack([b["label"] for b in batch]),
         }
+        if "valid" in batch[0]:
+            out["valid"] = torch.stack([b["valid"] for b in batch])
         if "weight" in batch[0]:
             out["weight"] = torch.stack([b["weight"] for b in batch])
         return out
