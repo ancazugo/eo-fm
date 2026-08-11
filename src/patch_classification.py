@@ -318,6 +318,13 @@ def main() -> None:
     if not fused:
         nodata_predicate = nodata_predicate[0]
 
+    if args.class_weights != "none" and args.logit_adjustment > 0:
+        parser.error(
+            "--class-weights and --logit-adjustment are mutually exclusive: both "
+            "reweight the same class imbalance, one in the loss and one in the "
+            "logits, so combining them double-corrects it. Pick one."
+        )
+
     if args.normalize == "none" and args.noise_sigma > 0:
         logger.warning(
             f"--normalize none with --noise-sigma {args.noise_sigma} reintroduces "
