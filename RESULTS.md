@@ -1,6 +1,7 @@
 # RESULTS
 
-Running log of every result produced by `PLAN.md`. Diagnostics get a section per
+Running log of every result produced by `PLAN.md` (Phases 0–1) and `PLAN-V2.md`
+(Phase 1.5 onward). Diagnostics get a section per
 task; training runs get one table row each (phase, run name, W&B id, embedding,
 split, model, seed, OA, macro-F1, kappa, and the one factor that changed).
 
@@ -273,15 +274,22 @@ The two nodata populations have opposite shapes: AlphaEarth's is concentrated
 | `tesserav2` | — | 0.3724 | n/a | — | **0.134** |
 
 **The corrections are small and the Phase 0 conclusion is unchanged**: the
-effective noise ratio still spans ~14× across families. Two reasons the masking
-barely moves these numbers, both worth recording:
+effective noise ratio still spans ~14× across families.
 
-1. The Phase 0 table was already **post-resize**, and bilinear resize dilutes an
-   isolated sentinel pixel; the +17.8% inflation measured above is a
-   native-grid effect.
+> **Correction (Task 1.5.0).** This section originally attributed the small
+> corrections to bilinear resize diluting an isolated sentinel pixel. That is
+> **wrong** — the resize changes the sentinel's variance share by 0.18 pp, not
+> 27 pp. The real reason is reason 2 below, which turns out to explain the
+> AlphaEarth row as well: Phase 0's paired sample is essentially sentinel-free.
+> See "Task 1.5.0 — Resize audit" for the measurement.
+
+1. ~~The Phase 0 table was already **post-resize**, and bilinear resize dilutes
+   an isolated sentinel pixel.~~ Superseded — see the correction above.
 2. The corrected run samples each family's own index at n=20000, whereas Phase 0
    used the 5-family paired intersection at n=5000 — which is most of the
-   +4.0% on `seamless`, a family with no nodata at all.
+   +4.0% on `seamless`, a family with no nodata at all, and **all** of the
+   AlphaEarth agreement: the paired intersection carries 0.0184% sentinel pixels
+   against 15.73% outside it.
 
 `tesserav2` is new here: median std 0.372, i.e. a third of `tesserav1.1_global`'s
 scale, so the two Tessera generations are **not** interchangeable under a shared
@@ -332,3 +340,137 @@ running unnormalised.
 ### GATE 1 status
 
 Reached. Phase 2 not started.
+
+---
+
+## Phase 1.5 — Provenance, versioning, and the resize diagnostic
+
+Branch `fix/p15-provenance`, cut from `fix/p1-correctness`. Plan of record:
+`PLAN-V2.md` §Phase 1.5.
+
+```bash
+python src/diagnostics/resize_audit.py --n-sample 2000 --seed 0
+```
+
+Artefacts: `diagnostics/resize_audit.json`, `diagnostics/resize_audit.md`.
+
+### Task 1.5.0 — Resize audit
+
+2000 patches per family, cultural-split **training** set, each family sampled
+over its own patch_ids (seed 0), target 32×32.
+
+#### Geometry — nothing is 32×32 natively except the raw Sentinel patches
+
+| family | native shapes (top 3) | exact no-op | H factor | W factor |
+|---|---|---|---|---|
+| `alpha_earth_coop` | 33×34 (674), 34×33 (547), 33×33 (319) | 0.0% | 1.031 | 1.031 |
+| `tesserav1.1_global` | 33×34 (571), 34×33 (517), 33×33 (359) | 0.0% | 1.031 | 1.031 |
+| `tesserav1.1` | 35×33 (1104), 36×33 (627), 36×32 (129) | 0.0% | **1.094** | 1.031 |
+| `tesserav2` | 33×34 (496), 34×33 (483), 33×33 (386) | 0.0% | 1.031 | 1.031 |
+| `seamless` | 12×12 (1027), 11×12 (327), 12×11 (324) | 0.0% | **0.375** | **0.375** |
+| `sentinel1` | 32×32 (2000) | **100.0%** | 1.000 | 1.000 |
+| `sentinel2` | 32×32 (2000) | **100.0%** | 1.000 | 1.000 |
+
+Factor > 1 is a downsample, < 1 an upsample. Three things follow:
+
+1. **The 10 m embeddings are mildly downsampled, ~1.03× per dimension.** A 320 m
+   patch reprojected into the tile's local UTM circumscribes a 33×33-ish window
+   rather than landing on exactly 32×32, so `F.interpolate` fires on every
+   patch. It is small, but it is not nothing and it is universal.
+2. **`seamless` is upsampled 2.67× per dimension** — 12×12 real 30 m pixels
+   inflated to 32×32, ~7× more output pixels than input. Every ESD result in
+   the chapter is computed on interpolated data, and a `--patch-size 12` arm is
+   the honest comparison. This belongs in the methods section.
+3. **`sentinel1` / `sentinel2` are 32×32 natively and never resized**, so the
+   Task 3.4 raw baseline is the one modality that reaches the model untouched.
+
+`tesserav1.1`'s 1.094 H-factor differs from every other family's 1.031 — the
+per-city extraction crops a taller window than the global one. First hint that
+the two are not the same product (Task 1.5.1).
+
+#### Sentinel variance decomposition — five variants
+
+| family | invalid px | native unmasked | native masked | resized unmasked | resized masked | resized masked+filled |
+|---|---|---|---|---|---|---|
+| `alpha_earth_coop` | 0.4817% | 0.1266 | 0.1051 | 0.1259 | 0.1047 | 0.1047 |
+| `tesserav1.1_global` | 0.1543% | 1.1674 | 1.1675 | 1.1349 | 1.1356 | 1.1356 |
+| `tesserav1.1` | 0.1341% | 0.8132 | 0.8120 | 0.7965 | 0.7956 | 0.7956 |
+| `tesserav2` | 0.1050% | 0.3890 | 0.3891 | 0.3806 | 0.3808 | 0.3808 |
+| `seamless` | 0.0000% | 0.5682 | 0.5682 | 0.5524 | 0.5524 | — |
+| `sentinel1` | 0.0000% | 0.3645 | 0.3645 | 0.3645 | 0.3645 | — |
+| `sentinel2` | 0.0000% | 0.0817 | 0.0817 | 0.0817 | 0.0817 | — |
+
+Sentinel share of per-channel variance:
+
+| family | native | post-resize | change |
+|---|---|---|---|
+| `alpha_earth_coop` | **31.04%** | **30.86%** | **−0.18 pp** |
+| `tesserav1.1` | 0.30% | 0.24% | −0.06 pp |
+| all others | 0.00% | 0.00% | 0.00 pp |
+
+**The resize does not dilute the sentinel.** 31.04% → 30.86% across a 1.031×
+resample. The GATE 1 explanation ("bilinear resize dilutes an isolated sentinel
+pixel") required spreading one input pixel over ~30 output pixels and is wrong;
+the entry in "Corrected channel statistics" above has been struck.
+
+The `resized masked` and `resized masked+filled` columns agree to four decimals
+for every family, i.e. the Phase 1 mean-fill is numerically inert for the
+statistics — which is what it should be, since it exists to stop the sentinel
+bleeding into neighbours through the interpolation, not to move the moments.
+
+#### Paired vs unpaired — the actual explanation
+
+`paired` = the patch_id exists in every one of `alpha_earth_coop`,
+`tesserav1.1_global`, `seamless`, `sentinel1`, `sentinel2` (intersection
+342,297), i.e. it was eligible for the GATE 0 sample.
+
+| family | paired n | paired invalid px | unpaired n | unpaired invalid px |
+|---|---|---|---|---|
+| `alpha_earth_coop` | 1941 | **0.0184%** | 59 | **15.7292%** |
+| `tesserav1.1_global` | 1998 | 0.1545% | 2 | 0.0000% |
+| `tesserav1.1` | 2000 | 0.1341% | 0 | — |
+| `tesserav2` | 1976 | 0.1062% | 24 | 0.0000% |
+| `seamless` / `sentinel1` / `sentinel2` | ~1940 | 0.0000% | ~58 | 0.0000% |
+
+**AlphaEarth's nodata lives almost entirely in the ~3% of patches no other
+family covers** — 855× denser outside the paired intersection than inside it.
+That is the reconciliation: GATE 0 sampled paired and therefore measured an
+essentially sentinel-free AlphaEarth (median std 0.1054), while the A3/A5
+reconnaissance sampled coop's own index and hit the sentinel (0.1244–0.1266).
+Both numbers are correct; they describe different populations. Nothing about the
+GATE 0 cross-family comparison is invalidated — if anything it was cleaner than
+we knew, because the pairing acted as an accidental nodata filter.
+
+The practical consequence is the opposite of the one recorded at GATE 1: masking
+matters **more**, not less, than the corrected-stats table suggested, because
+training on the global split uses all 352,366 coop patches including those 3%.
+
+#### L2 norm, native vs post-resize (valid pixels)
+
+| family | native p1 / p50 / p99 | resized p1 / p50 / p99 |
+|---|---|---|
+| `alpha_earth_coop` | 0.995 / 1.000 / 1.005 | 0.987 / 0.998 / 1.003 |
+| `tesserav1.1_global` | 7.943 / 15.594 / 36.132 | 7.929 / 15.420 / 35.606 |
+| `tesserav1.1` | 6.588 / 12.989 / 22.722 | 6.554 / 12.746 / 22.558 |
+| `tesserav2` | 11.295 / 11.314 / 11.333 | 11.154 / 11.279 / 11.319 |
+| `seamless` | 4.077 / 5.214 / 6.828 | 3.772 / 5.000 / 6.800 |
+| `sentinel1` | 0.048 / 0.333 / 3.283 | 0.049 / 0.331 / 3.113 |
+| `sentinel2` | 0.099 / 0.466 / 1.150 | 0.099 / 0.467 / 1.143 |
+
+Norm shrinkage is real but small: AlphaEarth's unit-norm vectors lose ~0.2% at
+p50 and ~0.8% at p1, exactly as expected when bilinear interpolation mixes two
+unit vectors that are not parallel. Worth one sentence in the methods; not worth
+correcting. `tesserav2` is the outlier in a different way — its L2 norm is
+**effectively constant** (11.295 / 11.314 / 11.333, a 0.3% spread), so v2
+embeddings are norm-normalised in a way v1.1's are not (7.9 → 36.1).
+
+#### Mask ordering — already correct, now pinned by tests
+
+Phase 1's implementation does both things the plan asked about:
+`PatchDataset._load_source` builds the mask on the **native** grid and mean-fills
+invalid pixels *before* the resize, and `_resize_valid` propagates conservatively
+(bilinear, then threshold at `>= 1 - 1e-6`, so any output pixel whose
+interpolation touched an invalid input is invalid). Two tests added to
+`tests/test_nodata_masking.py` pin this at the real 33×33 → 32×32 factor and
+assert the fill equals the channel mean rather than zero. No fix required, and
+the "numerically inert" verdict on Tessera's nodata continues to hold.

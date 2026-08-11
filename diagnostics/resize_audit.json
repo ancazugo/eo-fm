@@ -1,0 +1,955 @@
+{
+  "meta": {
+    "generated": "2026-08-11T17:45:01+00:00",
+    "split": "training",
+    "year": "2017",
+    "n_sample": 2000,
+    "seed": 0,
+    "patch_size": 32,
+    "paired_families": [
+      "alpha_earth_coop",
+      "tesserav1.1_global",
+      "seamless",
+      "sentinel1",
+      "sentinel2"
+    ],
+    "paired_intersection_size": 342297
+  },
+  "families": {
+    "alpha_earth_coop": {
+      "family": "alpha_earth_coop",
+      "embedding_name": "alpha_earth_coop",
+      "n_patches": 2000,
+      "patch_size": 32,
+      "geometry": {
+        "native_shapes": {
+          "33x34": 674,
+          "34x33": 547,
+          "33x33": 319,
+          "35x33": 249,
+          "33x35": 155,
+          "36x33": 19,
+          "36x32": 15,
+          "32x34": 10,
+          "35x32": 7,
+          "32x35": 5
+        },
+        "frac_exact_noop": 0.0,
+        "resample_factor_h": {
+          "median": 1.03125,
+          "min": 1.0,
+          "max": 1.125
+        },
+        "resample_factor_w": {
+          "median": 1.03125,
+          "min": 1.0,
+          "max": 1.09375
+        }
+      },
+      "nodata": {
+        "frac_invalid_pixels": 0.004816860122456514,
+        "frac_patches_with_invalid": 0.006
+      },
+      "variants": {
+        "native_unmasked": {
+          "median_std": 0.12658066125810785,
+          "min_std": 0.09939408986115618,
+          "max_std": 0.16257189101161432,
+          "n_pixel_samples": 2248145.0
+        },
+        "native_masked": {
+          "median_std": 0.10511680363520592,
+          "min_std": 0.07335188100269935,
+          "max_std": 0.14536416205973093,
+          "n_pixel_samples": 2237316.0
+        },
+        "resized_unmasked_unfilled": {
+          "median_std": 0.1259026067675967,
+          "min_std": 0.09858772589473432,
+          "max_std": 0.1619850711810992,
+          "n_pixel_samples": 2048000.0
+        },
+        "resized_masked_unfilled": {
+          "median_std": 0.10468642121342434,
+          "min_std": 0.07287662861569046,
+          "max_std": 0.14515276691091747,
+          "n_pixel_samples": 2038236.0
+        },
+        "resized_masked_filled": {
+          "median_std": 0.10468642121342434,
+          "min_std": 0.07287662861569046,
+          "max_std": 0.14515276691091747,
+          "n_pixel_samples": 2038236.0
+        }
+      },
+      "sentinel_variance_share": {
+        "native": 0.3103804372808675,
+        "resized_unfilled": 0.3086288349459889
+      },
+      "l2_norm": {
+        "native": {
+          "p1": 0.9954617204957147,
+          "p50": 1.00009764342084,
+          "p99": 1.004710655255804,
+          "mean": 1.0001006199048434
+        },
+        "resized": {
+          "p1": 0.9868870856905615,
+          "p50": 0.998317590810003,
+          "p99": 1.0026863318406525,
+          "mean": 0.9976499263315005
+        }
+      },
+      "paired_split": {
+        "paired": {
+          "n_patches": 1941,
+          "frac_invalid_pixels": 0.00018378915488154995,
+          "variants": {
+            "native_unmasked": {
+              "median_std": 0.10608142973287837,
+              "min_std": 0.07514638311108804,
+              "max_std": 0.14550370661057702,
+              "n_pixel_samples": 2181848.0
+            },
+            "native_masked": {
+              "median_std": 0.10520750804010037,
+              "min_std": 0.0739910706109964,
+              "max_std": 0.1447895955504478,
+              "n_pixel_samples": 2181447.0
+            },
+            "resized_unmasked_unfilled": {
+              "median_std": 0.10560567542517513,
+              "min_std": 0.07459924408033353,
+              "max_std": 0.14519064854062932,
+              "n_pixel_samples": 1987584.0
+            }
+          },
+          "sentinel_variance_share_native": 0.01640856306884042
+        },
+        "unpaired": {
+          "n_patches": 59,
+          "frac_invalid_pixels": 0.15729218516674962,
+          "variants": {
+            "native_unmasked": {
+              "median_std": 0.3680818049689679,
+              "min_std": 0.29102569599995354,
+              "max_std": 0.48349875366969514,
+              "n_pixel_samples": 66297.0
+            },
+            "native_masked": {
+              "median_std": 0.0602133331802829,
+              "min_std": 0.029858482471298763,
+              "max_std": 0.11910157094618656,
+              "n_pixel_samples": 55869.0
+            },
+            "resized_unmasked_unfilled": {
+              "median_std": 0.36521279716625543,
+              "min_std": 0.2887315060543965,
+              "max_std": 0.4798978369269728,
+              "n_pixel_samples": 60416.0
+            }
+          },
+          "sentinel_variance_share_native": 0.9732393512507216
+        }
+      }
+    },
+    "tesserav1.1_global": {
+      "family": "tesserav1.1_global",
+      "embedding_name": "tesserav1.1_global",
+      "n_patches": 2000,
+      "patch_size": 32,
+      "geometry": {
+        "native_shapes": {
+          "33x34": 571,
+          "34x33": 517,
+          "33x33": 359,
+          "35x33": 256,
+          "33x35": 180,
+          "36x33": 36,
+          "34x34": 19,
+          "35x32": 16,
+          "36x32": 11,
+          "35x34": 8,
+          "32x34": 6,
+          "32x35": 6,
+          "33x36": 4,
+          "36x34": 4,
+          "34x32": 2,
+          "35x21": 1,
+          "33x32": 1,
+          "34x35": 1,
+          "35x30": 1,
+          "18x34": 1
+        },
+        "frac_exact_noop": 0.0,
+        "resample_factor_h": {
+          "median": 1.03125,
+          "min": 0.5625,
+          "max": 1.125
+        },
+        "resample_factor_w": {
+          "median": 1.03125,
+          "min": 0.65625,
+          "max": 1.125
+        }
+      },
+      "nodata": {
+        "frac_invalid_pixels": 0.001543230454266241,
+        "frac_patches_with_invalid": 0.0405
+      },
+      "variants": {
+        "native_unmasked": {
+          "median_std": 1.1673631352989968,
+          "min_std": 0.7535417881806513,
+          "max_std": 1.8234560078440811,
+          "n_pixel_samples": 2249826.0
+        },
+        "native_masked": {
+          "median_std": 1.1674691134424975,
+          "min_std": 0.7527170527279623,
+          "max_std": 1.8229856772193371,
+          "n_pixel_samples": 2246354.0
+        },
+        "resized_unmasked_unfilled": {
+          "median_std": 1.1348699547933645,
+          "min_std": 0.7356556628670953,
+          "max_std": 1.8048966292874349,
+          "n_pixel_samples": 2048000.0
+        },
+        "resized_masked_unfilled": {
+          "median_std": 1.1356034544203553,
+          "min_std": 0.7348581770169186,
+          "max_std": 1.8044931016249612,
+          "n_pixel_samples": 2044718.0
+        },
+        "resized_masked_filled": {
+          "median_std": 1.1356034544203553,
+          "min_std": 0.7348581770169186,
+          "max_std": 1.8044931016249612,
+          "n_pixel_samples": 2044718.0
+        }
+      },
+      "sentinel_variance_share": {
+        "native": 0.0,
+        "resized_unfilled": 0.0
+      },
+      "l2_norm": {
+        "native": {
+          "p1": 7.94275837703424,
+          "p50": 15.594473097473056,
+          "p99": 36.13154512390834,
+          "mean": 16.70999414029195
+        },
+        "resized": {
+          "p1": 7.929480104193564,
+          "p50": 15.420320383975152,
+          "p99": 35.606400713770526,
+          "mean": 16.555615265700713
+        }
+      },
+      "paired_split": {
+        "paired": {
+          "n_patches": 1998,
+          "frac_invalid_pixels": 0.001544771225254518,
+          "variants": {
+            "native_unmasked": {
+              "median_std": 1.1677828934735492,
+              "min_std": 0.7533399007368188,
+              "max_std": 1.823856549129943,
+              "n_pixel_samples": 2247582.0
+            },
+            "native_masked": {
+              "median_std": 1.167771164792582,
+              "min_std": 0.7525154481177851,
+              "max_std": 1.8233844258455387,
+              "n_pixel_samples": 2244110.0
+            },
+            "resized_unmasked_unfilled": {
+              "median_std": 1.1350851368755304,
+              "min_std": 0.7354474419490941,
+              "max_std": 1.8052860338967267,
+              "n_pixel_samples": 2045952.0
+            }
+          },
+          "sentinel_variance_share_native": 2.0086990713874542e-05
+        },
+        "unpaired": {
+          "n_patches": 2,
+          "frac_invalid_pixels": 0.0,
+          "variants": {
+            "native_unmasked": {
+              "median_std": 0.7467783652734421,
+              "min_std": 0.2585954914078139,
+              "max_std": 1.9746309239625432,
+              "n_pixel_samples": 2244.0
+            },
+            "native_masked": {
+              "median_std": 0.7467783652734421,
+              "min_std": 0.2585954914078139,
+              "max_std": 1.9746309239625432,
+              "n_pixel_samples": 2244.0
+            },
+            "resized_unmasked_unfilled": {
+              "median_std": 0.7280707152623945,
+              "min_std": 0.23361078856314957,
+              "max_std": 1.9660037932988217,
+              "n_pixel_samples": 2048.0
+            }
+          },
+          "sentinel_variance_share_native": 0.0
+        }
+      }
+    },
+    "tesserav1.1": {
+      "family": "tesserav1.1",
+      "embedding_name": "tesserav1.1",
+      "n_patches": 2000,
+      "patch_size": 32,
+      "geometry": {
+        "native_shapes": {
+          "35x33": 1104,
+          "36x33": 627,
+          "36x32": 129,
+          "35x32": 94,
+          "36x34": 25,
+          "35x34": 13,
+          "36x30": 2,
+          "35x26": 1,
+          "36x5": 1,
+          "35x9": 1,
+          "36x25": 1,
+          "5x13": 1,
+          "36x20": 1
+        },
+        "frac_exact_noop": 0.0,
+        "resample_factor_h": {
+          "median": 1.09375,
+          "min": 0.15625,
+          "max": 1.125
+        },
+        "resample_factor_w": {
+          "median": 1.03125,
+          "min": 0.15625,
+          "max": 1.0625
+        }
+      },
+      "nodata": {
+        "frac_invalid_pixels": 0.0013413876803927741,
+        "frac_patches_with_invalid": 0.0415
+      },
+      "variants": {
+        "native_unmasked": {
+          "median_std": 0.8132116908990001,
+          "min_std": 0.44598719725481095,
+          "max_std": 1.5866011581185633,
+          "n_pixel_samples": 2325204.0
+        },
+        "native_masked": {
+          "median_std": 0.8119837300482016,
+          "min_std": 0.4462857111083231,
+          "max_std": 1.5872047082892056,
+          "n_pixel_samples": 2322085.0
+        },
+        "resized_unmasked_unfilled": {
+          "median_std": 0.796537919903644,
+          "min_std": 0.42641489580157826,
+          "max_std": 1.582252840603509,
+          "n_pixel_samples": 2048000.0
+        },
+        "resized_masked_unfilled": {
+          "median_std": 0.7955732764519784,
+          "min_std": 0.4267148006875234,
+          "max_std": 1.5829357631346757,
+          "n_pixel_samples": 2045103.0
+        },
+        "resized_masked_filled": {
+          "median_std": 0.7955732764519784,
+          "min_std": 0.4267148006875234,
+          "max_std": 1.5829357631346757,
+          "n_pixel_samples": 2045103.0
+        }
+      },
+      "sentinel_variance_share": {
+        "native": 0.003017747397471515,
+        "resized_unfilled": 0.0024206238376067724
+      },
+      "l2_norm": {
+        "native": {
+          "p1": 6.587815142921959,
+          "p50": 12.98947564780782,
+          "p99": 22.72234648646178,
+          "mean": 13.077272083927953
+        },
+        "resized": {
+          "p1": 6.554425947040805,
+          "p50": 12.746497698736583,
+          "p99": 22.558100198159025,
+          "mean": 12.948974163014055
+        }
+      },
+      "paired_split": {
+        "paired": {
+          "n_patches": 2000,
+          "frac_invalid_pixels": 0.0013413876803927741,
+          "variants": {
+            "native_unmasked": {
+              "median_std": 0.8132116908990001,
+              "min_std": 0.44598719725481095,
+              "max_std": 1.5866011581185633,
+              "n_pixel_samples": 2325204.0
+            },
+            "native_masked": {
+              "median_std": 0.8119837300482016,
+              "min_std": 0.4462857111083231,
+              "max_std": 1.5872047082892056,
+              "n_pixel_samples": 2322085.0
+            },
+            "resized_unmasked_unfilled": {
+              "median_std": 0.796537919903644,
+              "min_std": 0.42641489580157826,
+              "max_std": 1.582252840603509,
+              "n_pixel_samples": 2048000.0
+            }
+          },
+          "sentinel_variance_share_native": 0.003017747397471515
+        },
+        "unpaired": {
+          "n_patches": 0,
+          "frac_invalid_pixels": 0.0,
+          "variants": {},
+          "sentinel_variance_share_native": null
+        }
+      }
+    },
+    "tesserav2": {
+      "family": "tesserav2",
+      "embedding_name": "tesserav2",
+      "n_patches": 2000,
+      "patch_size": 32,
+      "geometry": {
+        "native_shapes": {
+          "33x34": 496,
+          "34x33": 483,
+          "33x33": 386,
+          "35x33": 269,
+          "33x35": 139,
+          "36x33": 130,
+          "36x32": 26,
+          "35x32": 25,
+          "36x34": 7,
+          "35x34": 4,
+          "30x33": 3,
+          "31x33": 3,
+          "34x32": 3,
+          "32x34": 3,
+          "34x30": 3,
+          "34x26": 2,
+          "34x34": 2,
+          "24x33": 2,
+          "34x35": 2,
+          "29x33": 2,
+          "33x27": 2,
+          "34x31": 1,
+          "21x35": 1,
+          "34x20": 1,
+          "33x26": 1,
+          "33x32": 1,
+          "34x23": 1,
+          "25x34": 1,
+          "34x29": 1
+        },
+        "frac_exact_noop": 0.0,
+        "resample_factor_h": {
+          "median": 1.03125,
+          "min": 0.65625,
+          "max": 1.125
+        },
+        "resample_factor_w": {
+          "median": 1.03125,
+          "min": 0.625,
+          "max": 1.09375
+        }
+      },
+      "nodata": {
+        "frac_invalid_pixels": 0.001049721792615505,
+        "frac_patches_with_invalid": 0.0295
+      },
+      "variants": {
+        "native_unmasked": {
+          "median_std": 0.3889788491385137,
+          "min_std": 0.2236749187590933,
+          "max_std": 1.5993371961677398,
+          "n_pixel_samples": 2250120.0
+        },
+        "native_masked": {
+          "median_std": 0.38913715741712174,
+          "min_std": 0.22376873060463723,
+          "max_std": 1.6001765433314787,
+          "n_pixel_samples": 2247758.0
+        },
+        "resized_unmasked_unfilled": {
+          "median_std": 0.38061616099966455,
+          "min_std": 0.21554812114011396,
+          "max_std": 1.5930850985791176,
+          "n_pixel_samples": 2048000.0
+        },
+        "resized_masked_unfilled": {
+          "median_std": 0.380800566360966,
+          "min_std": 0.21564239908075725,
+          "max_std": 1.5939561430497515,
+          "n_pixel_samples": 2045756.0
+        },
+        "resized_masked_filled": {
+          "median_std": 0.380800566360966,
+          "min_std": 0.21564239908075725,
+          "max_std": 1.5939561430497515,
+          "n_pixel_samples": 2045756.0
+        }
+      },
+      "sentinel_variance_share": {
+        "native": 0.0,
+        "resized_unfilled": 0.0
+      },
+      "l2_norm": {
+        "native": {
+          "p1": 11.295204145295727,
+          "p50": 11.314117865512376,
+          "p99": 11.333389747112799,
+          "mean": 11.314125887092006
+        },
+        "resized": {
+          "p1": 11.154143651137817,
+          "p50": 11.27942294226061,
+          "p99": 11.319495302990545,
+          "mean": 11.271729743346771
+        }
+      },
+      "paired_split": {
+        "paired": {
+          "n_patches": 1976,
+          "frac_invalid_pixels": 0.00106224714290597,
+          "variants": {
+            "native_unmasked": {
+              "median_std": 0.3876898687362045,
+              "min_std": 0.22457908473239604,
+              "max_std": 1.587024669265987,
+              "n_pixel_samples": 2223588.0
+            },
+            "native_masked": {
+              "median_std": 0.3878476913045271,
+              "min_std": 0.22467487185472945,
+              "max_std": 1.5878666253339486,
+              "n_pixel_samples": 2221226.0
+            },
+            "resized_unmasked_unfilled": {
+              "median_std": 0.3791719069363153,
+              "min_std": 0.21644937983018733,
+              "max_std": 1.5802029132837032,
+              "n_pixel_samples": 2023424.0
+            }
+          },
+          "sentinel_variance_share_native": 0.0
+        },
+        "unpaired": {
+          "n_patches": 24,
+          "frac_invalid_pixels": 0.0,
+          "variants": {
+            "native_unmasked": {
+              "median_std": 0.2577748013088429,
+              "min_std": 0.09611493257150558,
+              "max_std": 1.9102644375866462,
+              "n_pixel_samples": 26532.0
+            },
+            "native_masked": {
+              "median_std": 0.2577748013088429,
+              "min_std": 0.09611493257150558,
+              "max_std": 1.9102644375866462,
+              "n_pixel_samples": 26532.0
+            },
+            "resized_unmasked_unfilled": {
+              "median_std": 0.251043752086199,
+              "min_std": 0.08873802805743783,
+              "max_std": 1.8870644610015919,
+              "n_pixel_samples": 24576.0
+            }
+          },
+          "sentinel_variance_share_native": 0.0
+        }
+      }
+    },
+    "seamless": {
+      "family": "seamless",
+      "embedding_name": "seamless",
+      "n_patches": 2000,
+      "patch_size": 32,
+      "geometry": {
+        "native_shapes": {
+          "12x12": 1027,
+          "11x12": 327,
+          "12x11": 324,
+          "13x12": 98,
+          "12x13": 70,
+          "11x11": 59,
+          "11x13": 48,
+          "13x11": 46,
+          "12x5": 1
+        },
+        "frac_exact_noop": 0.0,
+        "resample_factor_h": {
+          "median": 0.375,
+          "min": 0.34375,
+          "max": 0.40625
+        },
+        "resample_factor_w": {
+          "median": 0.375,
+          "min": 0.15625,
+          "max": 0.40625
+        }
+      },
+      "nodata": {
+        "frac_invalid_pixels": 0.0,
+        "frac_patches_with_invalid": 0.0
+      },
+      "variants": {
+        "native_unmasked": {
+          "median_std": 0.5681871256802369,
+          "min_std": 0.44196950993234985,
+          "max_std": 0.7829840357795698,
+          "n_pixel_samples": 280669.0
+        },
+        "native_masked": {
+          "median_std": 0.5681871256802369,
+          "min_std": 0.44196950993234985,
+          "max_std": 0.7829840357795698,
+          "n_pixel_samples": 280669.0
+        },
+        "resized_unmasked_unfilled": {
+          "median_std": 0.5523700581396735,
+          "min_std": 0.4240988630118144,
+          "max_std": 0.7661058269672547,
+          "n_pixel_samples": 2048000.0
+        },
+        "resized_masked_unfilled": {
+          "median_std": 0.5523700581396735,
+          "min_std": 0.4240988630118144,
+          "max_std": 0.7661058269672547,
+          "n_pixel_samples": 2048000.0
+        }
+      },
+      "sentinel_variance_share": {
+        "native": 0.0,
+        "resized_unfilled": 0.0
+      },
+      "l2_norm": {
+        "native": {
+          "p1": 4.077376607575022,
+          "p50": 5.2141634036535525,
+          "p99": 6.8282501418738315,
+          "mean": 5.283283348066625
+        },
+        "resized": {
+          "p1": 3.77243194947897,
+          "p50": 4.999583387886757,
+          "p99": 6.799511546933239,
+          "mean": 5.093116265481656
+        }
+      },
+      "paired_split": {
+        "paired": {
+          "n_patches": 1945,
+          "frac_invalid_pixels": 0.0,
+          "variants": {
+            "native_unmasked": {
+              "median_std": 0.5536170488632681,
+              "min_std": 0.4454565082354025,
+              "max_std": 0.7649090578324566,
+              "n_pixel_samples": 272896.0
+            },
+            "native_masked": {
+              "median_std": 0.5536170488632681,
+              "min_std": 0.4454565082354025,
+              "max_std": 0.7649090578324566,
+              "n_pixel_samples": 272896.0
+            },
+            "resized_unmasked_unfilled": {
+              "median_std": 0.533736405560139,
+              "min_std": 0.42731121460612076,
+              "max_std": 0.7472576102584515,
+              "n_pixel_samples": 1991680.0
+            }
+          },
+          "sentinel_variance_share_native": 0.0
+        },
+        "unpaired": {
+          "n_patches": 55,
+          "frac_invalid_pixels": 0.0,
+          "variants": {
+            "native_unmasked": {
+              "median_std": 0.328558847341298,
+              "min_std": 0.0795177431090718,
+              "max_std": 0.8114252585468593,
+              "n_pixel_samples": 7773.0
+            },
+            "native_masked": {
+              "median_std": 0.328558847341298,
+              "min_std": 0.0795177431090718,
+              "max_std": 0.8114252585468593,
+              "n_pixel_samples": 7773.0
+            },
+            "resized_unmasked_unfilled": {
+              "median_std": 0.32322573581788283,
+              "min_std": 0.07118005245036933,
+              "max_std": 0.8035760130529628,
+              "n_pixel_samples": 56320.0
+            }
+          },
+          "sentinel_variance_share_native": 0.0
+        }
+      }
+    },
+    "sentinel1": {
+      "family": "sentinel1",
+      "embedding_name": "sentinel1",
+      "n_patches": 2000,
+      "patch_size": 32,
+      "geometry": {
+        "native_shapes": {
+          "32x32": 2000
+        },
+        "frac_exact_noop": 1.0,
+        "resample_factor_h": {
+          "median": 1.0,
+          "min": 1.0,
+          "max": 1.0
+        },
+        "resample_factor_w": {
+          "median": 1.0,
+          "min": 1.0,
+          "max": 1.0
+        }
+      },
+      "nodata": {
+        "frac_invalid_pixels": 0.0,
+        "frac_patches_with_invalid": 0.0
+      },
+      "variants": {
+        "native_unmasked": {
+          "median_std": 0.364480499311586,
+          "min_std": 0.16980777998985014,
+          "max_std": 3.00812817064579,
+          "n_pixel_samples": 2048000.0
+        },
+        "native_masked": {
+          "median_std": 0.364480499311586,
+          "min_std": 0.16980777998985014,
+          "max_std": 3.00812817064579,
+          "n_pixel_samples": 2048000.0
+        },
+        "resized_unmasked_unfilled": {
+          "median_std": 0.364480499311586,
+          "min_std": 0.16980777998985014,
+          "max_std": 3.00812817064579,
+          "n_pixel_samples": 2048000.0
+        },
+        "resized_masked_unfilled": {
+          "median_std": 0.364480499311586,
+          "min_std": 0.16980777998985014,
+          "max_std": 3.00812817064579,
+          "n_pixel_samples": 2048000.0
+        }
+      },
+      "sentinel_variance_share": {
+        "native": 0.0,
+        "resized_unfilled": 0.0
+      },
+      "l2_norm": {
+        "native": {
+          "p1": 0.04814111448209969,
+          "p50": 0.3325128552431591,
+          "p99": 3.2827802745036383,
+          "mean": 0.5265353674281542
+        },
+        "resized": {
+          "p1": 0.0493032644889123,
+          "p50": 0.33056459704085495,
+          "p99": 3.1133826228652595,
+          "mean": 0.505906488062431
+        }
+      },
+      "paired_split": {
+        "paired": {
+          "n_patches": 1942,
+          "frac_invalid_pixels": 0.0,
+          "variants": {
+            "native_unmasked": {
+              "median_std": 0.369820275342283,
+              "min_std": 0.17201583171575416,
+              "max_std": 3.0523226048871033,
+              "n_pixel_samples": 1988608.0
+            },
+            "native_masked": {
+              "median_std": 0.369820275342283,
+              "min_std": 0.17201583171575416,
+              "max_std": 3.0523226048871033,
+              "n_pixel_samples": 1988608.0
+            },
+            "resized_unmasked_unfilled": {
+              "median_std": 0.369820275342283,
+              "min_std": 0.17201583171575416,
+              "max_std": 3.0523226048871033,
+              "n_pixel_samples": 1988608.0
+            }
+          },
+          "sentinel_variance_share_native": 0.0
+        },
+        "unpaired": {
+          "n_patches": 58,
+          "frac_invalid_pixels": 0.0,
+          "variants": {
+            "native_unmasked": {
+              "median_std": 0.059329250325389035,
+              "min_std": 0.02537166186186373,
+              "max_std": 0.19568842004419978,
+              "n_pixel_samples": 59392.0
+            },
+            "native_masked": {
+              "median_std": 0.059329250325389035,
+              "min_std": 0.02537166186186373,
+              "max_std": 0.19568842004419978,
+              "n_pixel_samples": 59392.0
+            },
+            "resized_unmasked_unfilled": {
+              "median_std": 0.059329250325389035,
+              "min_std": 0.02537166186186373,
+              "max_std": 0.19568842004419978,
+              "n_pixel_samples": 59392.0
+            }
+          },
+          "sentinel_variance_share_native": 0.0
+        }
+      }
+    },
+    "sentinel2": {
+      "family": "sentinel2",
+      "embedding_name": "sentinel2",
+      "n_patches": 2000,
+      "patch_size": 32,
+      "geometry": {
+        "native_shapes": {
+          "32x32": 2000
+        },
+        "frac_exact_noop": 1.0,
+        "resample_factor_h": {
+          "median": 1.0,
+          "min": 1.0,
+          "max": 1.0
+        },
+        "resample_factor_w": {
+          "median": 1.0,
+          "min": 1.0,
+          "max": 1.0
+        }
+      },
+      "nodata": {
+        "frac_invalid_pixels": 0.0,
+        "frac_patches_with_invalid": 0.0
+      },
+      "variants": {
+        "native_unmasked": {
+          "median_std": 0.08172913121640328,
+          "min_std": 0.03875506206439755,
+          "max_std": 0.10018765373194728,
+          "n_pixel_samples": 2048000.0
+        },
+        "native_masked": {
+          "median_std": 0.08172913121640328,
+          "min_std": 0.03875506206439755,
+          "max_std": 0.10018765373194728,
+          "n_pixel_samples": 2048000.0
+        },
+        "resized_unmasked_unfilled": {
+          "median_std": 0.08172913121640328,
+          "min_std": 0.03875506206439755,
+          "max_std": 0.10018765373194728,
+          "n_pixel_samples": 2048000.0
+        },
+        "resized_masked_unfilled": {
+          "median_std": 0.08172913121640328,
+          "min_std": 0.03875506206439755,
+          "max_std": 0.10018765373194728,
+          "n_pixel_samples": 2048000.0
+        }
+      },
+      "sentinel_variance_share": {
+        "native": 0.0,
+        "resized_unfilled": 0.0
+      },
+      "l2_norm": {
+        "native": {
+          "p1": 0.09884180460241701,
+          "p50": 0.4660017368410511,
+          "p99": 1.1500208285356446,
+          "mean": 0.47536065661807786
+        },
+        "resized": {
+          "p1": 0.09875884661375227,
+          "p50": 0.46699737932072166,
+          "p99": 1.143476086572342,
+          "mean": 0.4753689445917805
+        }
+      },
+      "paired_split": {
+        "paired": {
+          "n_patches": 1937,
+          "frac_invalid_pixels": 0.0,
+          "variants": {
+            "native_unmasked": {
+              "median_std": 0.08039571136688356,
+              "min_std": 0.038882369716078356,
+              "max_std": 0.09791399475779027,
+              "n_pixel_samples": 1983488.0
+            },
+            "native_masked": {
+              "median_std": 0.08039571136688356,
+              "min_std": 0.038882369716078356,
+              "max_std": 0.09791399475779027,
+              "n_pixel_samples": 1983488.0
+            },
+            "resized_unmasked_unfilled": {
+              "median_std": 0.08039571136688356,
+              "min_std": 0.038882369716078356,
+              "max_std": 0.09791399475779027,
+              "n_pixel_samples": 1983488.0
+            }
+          },
+          "sentinel_variance_share_native": 0.0
+        },
+        "unpaired": {
+          "n_patches": 63,
+          "frac_invalid_pixels": 0.0,
+          "variants": {
+            "native_unmasked": {
+              "median_std": 0.04320973337923421,
+              "min_std": 0.016909042354741315,
+              "max_std": 0.06707645707792095,
+              "n_pixel_samples": 64512.0
+            },
+            "native_masked": {
+              "median_std": 0.04320973337923421,
+              "min_std": 0.016909042354741315,
+              "max_std": 0.06707645707792095,
+              "n_pixel_samples": 64512.0
+            },
+            "resized_unmasked_unfilled": {
+              "median_std": 0.04320973337923421,
+              "min_std": 0.016909042354741315,
+              "max_std": 0.06707645707792095,
+              "n_pixel_samples": 64512.0
+            }
+          },
+          "sentinel_variance_share_native": 0.0
+        }
+      }
+    }
+  }
+}

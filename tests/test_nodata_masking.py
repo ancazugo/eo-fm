@@ -190,3 +190,55 @@ def test_resized_mask_rejects_pixels_blended_with_nodata(tmp_path):
     # The invalid input pixel must invalidate every output pixel it touched.
     assert item["valid"][0, 0, 0] == 0.0
     assert item["valid"].sum() < 16
+
+
+def test_mask_is_built_on_the_native_grid_not_after_the_resize(tmp_path):
+    """Task 1.5.0 follow-on: ordering, at the real ~1.03x resampling factor.
+
+    Every family is resized (33x33 -> 32x32 for the 10 m embeddings; nothing is
+    32x32 natively except the raw Sentinel patches), so a mask computed *after*
+    the resize would have to recover the sentinel from an already-blended array.
+    An interior invalid pixel at that mild a factor must still come back invalid.
+    """
+    from datasets.so2sat import PatchDataset
+
+    arr = np.zeros((64, 33, 33), dtype=np.float32)
+    arr[:, 17, 17] = -128.0
+    path = _write_patch(tmp_path, arr)
+
+    ds = PatchDataset(
+        [PatchItem(path, 0, "train")], patch_size=32,
+        nodata_mode="mask", nodata_predicate=get_nodata_predicate("alpha_earth_coop"),
+    )
+    valid = ds[0]["valid"]
+
+    assert valid.shape == (1, 32, 32)
+    assert valid.sum() < 32 * 32          # the sentinel survived the resample
+    assert valid[0, 16:18, 16:18].min() == 0.0
+
+
+def test_invalid_pixels_are_filled_with_the_channel_mean(tmp_path):
+    """The fill is the channel mean in decoded units, so it normalises to 0.
+
+    Filling with 0 instead would push masked pixels to -mean/std after
+    normalisation, which is a real value the resize would then blend into
+    neighbouring valid pixels.
+    """
+    from datasets.so2sat import PatchDataset
+
+    arr = np.zeros((4, 6, 6), dtype=np.float32)
+    arr[:, 2, 2] = np.nan                       # NaN is invalid for every family
+    path = _write_patch(tmp_path, arr)
+
+    mean = np.array([0.5, -0.25, 2.0, 10.0], dtype=np.float32)
+    std = np.ones(4, dtype=np.float32)
+    ds = PatchDataset(
+        [PatchItem(path, 0, "train")], patch_size=6,
+        nodata_mode="mask", nodata_predicate=get_nodata_predicate("sentinel1"),
+        normalize="channel", channel_mean=mean, channel_std=std,
+    )
+    item = ds[0]
+
+    assert item["valid"][0, 2, 2] == 0.0
+    # Normalised, the filled pixel is exactly 0 — not -mean/std.
+    assert torch.allclose(item["image"][:, 2, 2], torch.zeros(4), atol=1e-5)
