@@ -127,8 +127,12 @@ def test_build_mosaic_orchestration(tmp_path, monkeypatch):
     fake_tiles = type(sys)("datasets.tiles")
     fake_tiles.build_tile_index = lambda d, name, year: (["tile0"], _FakeTree())
     fake_tiles.open_tile = lambda p: tile_da
-    sys.modules["datasets.tiles"] = fake_tiles
-    sys.modules.setdefault("datasets", type(sys)("datasets"))
+    # Via monkeypatch so sys.modules is restored afterwards: a plain assignment
+    # leaves the fake installed for the rest of the session, and any later test
+    # that imports datasets.tiles for real gets this stub instead.
+    monkeypatch.setitem(sys.modules, "datasets.tiles", fake_tiles)
+    if "datasets" not in sys.modules:
+        monkeypatch.setitem(sys.modules, "datasets", type(sys)("datasets"))
 
     cfg = _FakeConfig()
     path = build_mosaic("TestAOI", 2025, "tessera", tmp_path / "emb", cfg, tmp_path / "mosaics")
