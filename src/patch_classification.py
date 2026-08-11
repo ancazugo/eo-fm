@@ -183,6 +183,10 @@ def main() -> None:
                    help="CE label smoothing (default: 0.0).")
     g.add_argument("--mixup-alpha", type=float, default=0.0,
                    help="Mixup Beta(alpha, alpha) on training batches (default: 0.0 = off).")
+    g.add_argument("--mixup-renorm", action="store_true",
+                   help="L2-renormalise mixed pixels across channels, in raw units. "
+                        "Only meaningful for AlphaEarth (unit-norm 64-d embeddings); "
+                        "requires --normalize channel and --mixup-alpha > 0.")
     g.add_argument("--sampler", choices=["none", "balanced", "sqrt_balanced"],
                    default="none",
                    help="Class-balanced train sampling: per-sample weight 1/count "
@@ -273,6 +277,60 @@ def main() -> None:
         dequantize_fn, in_channels_override = deq[0]
         in_channels = detect_in_channels(all_items[0].path, in_channels_override)
 
+    # ── DataModule ────────────────────────────────────────────────────────────
+    nodata_predicate = [get_nodata_predicate(e) for e in args.embedding_name]
+    if not fused:
+        nodata_predicate = nodata_predicate[0]
+
+    if args.mixup_renorm:
+        if args.mixup_alpha <= 0:
+            parser.error("--mixup-renorm has no effect without --mixup-alpha > 0")
+        if args.normalize != "channel":
+            parser.error(
+                "--mixup-renorm requires --normalize channel: the renorm is applied "
+                "in raw units, which means undoing the channel statistics first."
+            )
+        if any(e != "alpha_earth_coop" for e in args.embedding_name):
+            logger.warning(
+                f"--mixup-renorm with {args.embedding_name}: projecting onto the unit "
+                "sphere is only meaningful for AlphaEarth, whose embeddings are "
+                "unit-norm 64-d vectors. For other families this distorts the inputs."
+            )
+
+    if args.class_weights != "none" and args.logit_adjustment > 0:
+        parser.error(
+            "--class-weights and --logit-adjustment are mutually exclusive: both "
+            "reweight the same class imbalance, one in the loss and one in the "
+            "logits, so combining them double-corrects it. Pick one."
+        )
+
+    if args.normalize == "none" and args.noise_sigma > 0:
+        logger.warning(
+            f"--normalize none with --noise-sigma {args.noise_sigma} reintroduces "
+            "the Phase 0 confound: absolute noise on unnormalised inputs means a "
+            "different relative perturbation per embedding family (0.05 was 4.4% "
+            "of a channel std for Tessera but 47.4% for AlphaEarth). Fine as a "
+            "deliberate ablation, wrong for a cross-family comparison."
+        )
+
+    _split_source = ("grid_orig_test" if args.orig_test
+                     else "global_so2sat" if args.global_split else "grid")
+    channel_mean = channel_std = None
+    if args.normalize == "channel":
+        train_items = [it for it in all_items if it.split == "train"]
+        cache_path = stats_cache_path(
+            output_label, args.year, _split_source, items=train_items,
+            n_sample=args.stats_sample, seed=args.seed,
+            patch_size=args.patch_size, nodata_mode=args.nodata_mode,
+        )
+        channel_mean, channel_std = compute_channel_stats(
+            train_items, dequantize_fn, nodata_predicate,
+            patch_size=args.patch_size, n_sample=args.stats_sample,
+            seed=args.seed, nodata_mode=args.nodata_mode,
+            cache_path=cache_path, recompute=args.recompute_stats,
+        )
+
+
     # ── Model ─────────────────────────────────────────────────────────────────
     arch = resolve_arch(args.family, args.preset, args.arch)
     model = build_model(
@@ -313,50 +371,15 @@ def main() -> None:
         mixup_alpha=args.mixup_alpha,
         noise_sigma=args.noise_sigma,
         noise_prob=args.noise_prob,
+        mixup_renorm=args.mixup_renorm,
+        channel_mean=channel_mean,
+        channel_std=channel_std,
         monitor=args.monitor,
         logit_adjustment_tau=args.logit_adjustment,
         class_priors=class_priors,
     )
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"'{args.family}/{args.preset}' ({arch}): params={n_params:,}")
-
-    # ── DataModule ────────────────────────────────────────────────────────────
-    nodata_predicate = [get_nodata_predicate(e) for e in args.embedding_name]
-    if not fused:
-        nodata_predicate = nodata_predicate[0]
-
-    if args.class_weights != "none" and args.logit_adjustment > 0:
-        parser.error(
-            "--class-weights and --logit-adjustment are mutually exclusive: both "
-            "reweight the same class imbalance, one in the loss and one in the "
-            "logits, so combining them double-corrects it. Pick one."
-        )
-
-    if args.normalize == "none" and args.noise_sigma > 0:
-        logger.warning(
-            f"--normalize none with --noise-sigma {args.noise_sigma} reintroduces "
-            "the Phase 0 confound: absolute noise on unnormalised inputs means a "
-            "different relative perturbation per embedding family (0.05 was 4.4% "
-            "of a channel std for Tessera but 47.4% for AlphaEarth). Fine as a "
-            "deliberate ablation, wrong for a cross-family comparison."
-        )
-
-    _split_source = ("grid_orig_test" if args.orig_test
-                     else "global_so2sat" if args.global_split else "grid")
-    channel_mean = channel_std = None
-    if args.normalize == "channel":
-        train_items = [it for it in all_items if it.split == "train"]
-        cache_path = stats_cache_path(
-            output_label, args.year, _split_source, items=train_items,
-            n_sample=args.stats_sample, seed=args.seed,
-            patch_size=args.patch_size, nodata_mode=args.nodata_mode,
-        )
-        channel_mean, channel_std = compute_channel_stats(
-            train_items, dequantize_fn, nodata_predicate,
-            patch_size=args.patch_size, n_sample=args.stats_sample,
-            seed=args.seed, nodata_mode=args.nodata_mode,
-            cache_path=cache_path, recompute=args.recompute_stats,
-        )
 
     datamodule = PatchDataModule(
         all_items, args.patch_size, args.batch_size, args.num_workers,
@@ -403,6 +426,7 @@ def main() -> None:
         class_weights=args.class_weights,
         label_smoothing=args.label_smoothing,
         mixup_alpha=args.mixup_alpha,
+        mixup_renorm=args.mixup_renorm,
         sampler=args.sampler,
         logit_adjustment=args.logit_adjustment,
         pseudo_gpkg=str(args.pseudo_gpkg) if args.pseudo_gpkg else None,

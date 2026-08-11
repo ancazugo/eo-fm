@@ -43,6 +43,17 @@ class LCZResNetModule(nn.Module):
         class_weights: Optional (num_classes,) tensor of per-class CE weights.
         label_smoothing: CE label smoothing (default 0.0).
         mixup_alpha: Beta(alpha, alpha) mixup on training batches (0 = off).
+        mixup_renorm: L2-renormalize each mixed pixel across channels. Only
+            meaningful for AlphaEarth, whose embeddings are unit-norm 64-d
+            vectors; mixing two of them leaves the sphere. Requires
+            channel_mean/channel_std, because after z-scoring the vectors no
+            longer lie on the unit sphere and renormalizing in normalized space
+            would be meaningless — the renorm is applied in raw units and the
+            result mapped back. (Note that mixup itself is unaffected by
+            normalization: z-scoring is affine and the mixup weights sum to 1,
+            so mixing before or after it is identical.)
+        channel_mean: Per-channel means, required by mixup_renorm.
+        channel_std: Per-channel stds, required by mixup_renorm.
         noise_sigma: Augmentation noise in normalized per-channel std units.
         noise_prob: Probability of noising a sample.
         augment: Apply flips/rotations/noise in train_step (on device). Set
@@ -69,6 +80,9 @@ class LCZResNetModule(nn.Module):
         noise_sigma: float = 0.05,
         noise_prob: float = 0.5,
         augment: bool = True,
+        mixup_renorm: bool = False,
+        channel_mean: torch.Tensor | None = None,
+        channel_std: torch.Tensor | None = None,
         monitor: str = "val_f1",
         logit_adjustment_tau: float = 0.0,
         class_priors: torch.Tensor | None = None,
@@ -84,6 +98,15 @@ class LCZResNetModule(nn.Module):
         self.noise_prob = noise_prob
         self.augment = augment
         self.monitor = monitor
+        self.mixup_renorm = mixup_renorm
+        if mixup_renorm:
+            if channel_mean is None or channel_std is None:
+                raise ValueError(
+                    "mixup_renorm needs channel_mean/channel_std: the renorm has to "
+                    "happen in raw units, so it must undo the normalisation first."
+                )
+            self.register_buffer("_norm_mean", torch.as_tensor(channel_mean).view(1, -1, 1, 1))
+            self.register_buffer("_norm_std", torch.as_tensor(channel_std).view(1, -1, 1, 1))
         self.logit_adjustment_tau = logit_adjustment_tau
         if logit_adjustment_tau > 0:
             if class_priors is None:
@@ -146,6 +169,18 @@ class LCZResNetModule(nn.Module):
         if valid is not None and getattr(self.model, "accepts_valid_mask", False):
             return self.model(images, valid=valid)
         return self.model(images)
+
+    def _renorm_unit_sphere(self, x: torch.Tensor) -> torch.Tensor:
+        """Project mixed samples back onto the unit sphere, in raw units.
+
+        Undoes the channel normalization, renormalizes each pixel's channel
+        vector to L2 norm 1, then re-applies the normalization — so the model
+        keeps seeing standardized inputs while the mixed embedding respects the
+        geometry AlphaEarth actually has.
+        """
+        raw = x * self._norm_std + self._norm_mean
+        raw = raw / raw.norm(dim=1, keepdim=True).clamp_min(1e-8)
+        return (raw - self._norm_mean) / self._norm_std
 
     def _adjust_logits(self, logits: torch.Tensor) -> torch.Tensor:
         """Train-time logit adjustment; identity when disabled."""
@@ -217,9 +252,10 @@ class LCZResNetModule(nn.Module):
             perm = torch.randperm(images.size(0), device=device)
             # A mixed pixel is only usable where BOTH contributing patches have data.
             mixed_valid = None if valid is None else torch.minimum(valid, valid[perm])
-            logits = self._forward_masked(
-                lam * images + (1 - lam) * images[perm], mixed_valid
-            )
+            mixed = lam * images + (1 - lam) * images[perm]
+            if self.mixup_renorm:
+                mixed = self._renorm_unit_sphere(mixed)
+            logits = self._forward_masked(mixed, mixed_valid)
             loss_logits = self._adjust_logits(logits)
             loss = lam * _ce(loss_logits, labels, sample_w) + \
                 (1 - lam) * _ce(loss_logits, labels[perm],
