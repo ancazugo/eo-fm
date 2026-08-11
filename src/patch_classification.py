@@ -167,6 +167,13 @@ def main() -> None:
     g.add_argument("--class-weights", choices=["none", "inv_freq", "sqrt_inv_freq"],
                    default="none",
                    help="Per-class CE weights from train-split frequencies (default: none).")
+    g.add_argument("--noise-sigma", type=float, default=0.05,
+                   help="Gaussian augmentation noise, in units of the normalised "
+                        "per-channel std (default: 0.05, the historical value — "
+                        "untuned; 0 disables).")
+    g.add_argument("--noise-prob", type=float, default=0.5,
+                   help="Probability of adding augmentation noise to a sample "
+                        "(default: 0.5).")
     g.add_argument("--label-smoothing", type=float, default=0.0,
                    help="CE label smoothing (default: 0.0).")
     g.add_argument("--mixup-alpha", type=float, default=0.0,
@@ -311,6 +318,15 @@ def main() -> None:
     if not fused:
         nodata_predicate = nodata_predicate[0]
 
+    if args.normalize == "none" and args.noise_sigma > 0:
+        logger.warning(
+            f"--normalize none with --noise-sigma {args.noise_sigma} reintroduces "
+            "the Phase 0 confound: absolute noise on unnormalised inputs means a "
+            "different relative perturbation per embedding family (0.05 was 4.4% "
+            "of a channel std for Tessera but 47.4% for AlphaEarth). Fine as a "
+            "deliberate ablation, wrong for a cross-family comparison."
+        )
+
     _split_source = ("grid_orig_test" if args.orig_test
                      else "global_so2sat" if args.global_split else "grid")
     channel_mean = channel_std = None
@@ -339,6 +355,8 @@ def main() -> None:
         normalize=args.normalize,
         channel_mean=channel_mean,
         channel_std=channel_std,
+        noise_sigma=args.noise_sigma,
+        noise_prob=args.noise_prob,
     )
 
     # ── WandB ─────────────────────────────────────────────────────────────────
@@ -360,6 +378,8 @@ def main() -> None:
         sub_patch_stride=args.sub_patch_stride,
         nodata_mode=args.nodata_mode,
         normalize=args.normalize,
+        noise_sigma=args.noise_sigma,
+        noise_prob=args.noise_prob,
         stats_sample=args.stats_sample if args.normalize == 'channel' else None,
         batch_size=args.batch_size,
         lr=args.lr,

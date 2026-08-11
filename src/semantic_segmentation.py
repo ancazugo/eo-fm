@@ -138,6 +138,12 @@ def main() -> None:
 
     # ── Loss ──────────────────────────────────────────────────────────────────
     g = parser.add_argument_group("Loss")
+    g.add_argument("--noise-sigma", type=float, default=0.05,
+                   help="Gaussian augmentation noise, in units of the normalised "
+                        "per-channel std (default: 0.05, historical value — untuned; "
+                        "0 disables).")
+    g.add_argument("--noise-prob", type=float, default=0.5,
+                   help="Probability of adding augmentation noise (default: 0.5).")
     g.add_argument("--dice-weight", type=float, default=0.5,
                    help="Weight of Dice loss (0 = CE-only, 1 = Dice-only). Default: 0.5.")
 
@@ -248,6 +254,8 @@ def main() -> None:
         eval_label_source="gpkg" if eval_items is not None else None,
         aux_dropout_p=aux_dropout,
         aux_channel_start=base_channels,
+        noise_sigma=args.noise_sigma,
+        noise_prob=args.noise_prob,
     )
 
     # ── WandB ─────────────────────────────────────────────────────────────────
@@ -265,6 +273,8 @@ def main() -> None:
         preset=args.preset,
         in_channels=in_channels,
         num_classes=args.num_classes,
+        noise_sigma=args.noise_sigma,
+        noise_prob=args.noise_prob,
         batch_size=args.batch_size,
         lr=args.lr,
         weight_decay=args.weight_decay,

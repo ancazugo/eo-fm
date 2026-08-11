@@ -519,6 +519,8 @@ class PatchDataModule:
         normalize: str = "none",
         channel_mean=None,
         channel_std=None,
+        noise_sigma: float = 0.05,
+        noise_prob: float = 0.5,
     ) -> None:
         self.all_items = all_items
         self.patch_size = patch_size
@@ -533,6 +535,8 @@ class PatchDataModule:
         self.normalize = normalize
         self.channel_mean = channel_mean
         self.channel_std = channel_std
+        self.noise_sigma = noise_sigma
+        self.noise_prob = noise_prob
 
     def setup(self) -> None:
         def _for_split(s: str) -> list:
@@ -564,7 +568,9 @@ class PatchDataModule:
 
     def _train_collate(self, batch: list) -> dict:
         out = self._collate(batch)
-        out["image"] = augment_images(out["image"])
+        out["image"] = augment_images(
+            out["image"], noise_sigma=self.noise_sigma, noise_prob=self.noise_prob
+        )
         return out
 
     def train_dataloader(self) -> DataLoader:
