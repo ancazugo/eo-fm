@@ -77,7 +77,8 @@ def build_metadata(all_items: list[tuple], gpkg: Path, bounds_csv: Path) -> pd.D
     """
     # Replicate extract_and_cache's split grouping + ordering.
     grouped: dict[str, list[tuple]] = {s: [] for s in _SPLITS}
-    for path, label, sp in all_items:
+    for it in all_items:
+        path, label, sp = it.path, it.label, it.split
         if sp in grouped:
             grouped[sp].append((path, label))
 

@@ -250,7 +250,7 @@ def main() -> None:
         n_pseudo = len(pseudo_items)
         all_items = all_items + pseudo_items
 
-    split_counts = {s: sum(1 for it in all_items if it[2] == s)
+    split_counts = {s: sum(1 for it in all_items if it.split == s)
                     for s in ("train", "val", "test")}
     logger.info(f"Total patches: {len(all_items)}  splits: {split_counts}"
                 + (f"  (incl. {n_pseudo} pseudo-labeled)" if n_pseudo else ""))
@@ -258,7 +258,7 @@ def main() -> None:
     deq = [resolve_dequantize(e, force=args.dequantize) for e in args.embedding_name]
     if fused:
         dequantize_fn = [fn for fn, _ in deq]
-        first_paths = all_items[0][0]
+        first_paths = all_items[0].path
         in_channels = sum(
             detect_in_channels(p, override)
             for p, (_, override) in zip(first_paths, deq)
@@ -266,7 +266,7 @@ def main() -> None:
         logger.info(f"Fused in_channels = {in_channels} ({output_label})")
     else:
         dequantize_fn, in_channels_override = deq[0]
-        in_channels = detect_in_channels(all_items[0][0], in_channels_override)
+        in_channels = detect_in_channels(all_items[0].path, in_channels_override)
 
     # ── Model ─────────────────────────────────────────────────────────────────
     arch = resolve_arch(args.family, args.preset, args.arch)
@@ -281,7 +281,7 @@ def main() -> None:
     class_priors = None
     if args.class_weights != "none" or args.logit_adjustment > 0:
         counts = np.bincount(
-            [it[1] for it in all_items if it[2] == "train"],
+            [it.label for it in all_items if it.split == "train"],
             minlength=args.num_classes,
         ).astype(np.float64)
     if args.class_weights != "none":
@@ -331,7 +331,7 @@ def main() -> None:
                      else "global_so2sat" if args.global_split else "grid")
     channel_mean = channel_std = None
     if args.normalize == "channel":
-        train_items = [it for it in all_items if it[2] == "train"]
+        train_items = [it for it in all_items if it.split == "train"]
         cache_path = stats_cache_path(
             output_label, args.year, _split_source, items=train_items,
             n_sample=args.stats_sample, seed=args.seed,

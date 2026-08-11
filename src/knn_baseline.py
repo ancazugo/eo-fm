@@ -136,7 +136,8 @@ def extract_and_cache(
 
     logger.info(f"Extracting features (pooling={pooling}) …")
     split_items: dict[str, list] = {s: [] for s in splits}
-    for path, label, sp in items:
+    for it in items:
+        path, label, sp = it.path, it.label, it.split
         if sp in split_items:
             split_items[sp].append((path, label))
 
@@ -615,7 +616,7 @@ def main() -> None:
         no_wandb=args.no_wandb,
     )
 
-    test_items = [(p, l, s) for p, l, s in all_items if s == "test"]
+    test_items = [(it.path, it.label, it.split) for it in all_items if it.split == "test"]
 
     # ── Classifier ────────────────────────────────────────────────────────────
     # Val predictions are reported alongside test so hyperparameter sweeps

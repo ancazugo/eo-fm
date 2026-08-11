@@ -43,7 +43,7 @@ def _cache_key(items: list, n_sample: int, seed: int, patch_size: int,
     h.update(f"{len(items)}|{n_sample}|{seed}|{patch_size}|{nodata_mode}".encode())
     # A few paths pin the identity of the item list without hashing all 350k.
     for it in items[:64]:
-        h.update(str(it[0]).encode())
+        h.update(str(it.path).encode())
     return h.hexdigest()[:16]
 
 

@@ -1,7 +1,7 @@
 """So2Sat pre-extracted patch data layer for the classification pipeline.
 
-Item tuples are ``(npy_path, label_int, split)`` with labels 0-16
-(LCZ_class 1-17 shifted by -1) and split ∈ {"train", "val", "test"}.
+Items are :class:`PatchItem` records with labels 0-16 (LCZ_class 1-17 shifted
+by -1) and split ∈ {"train", "val", "test"}.
 
 Two split modes:
   Per-city: patches_reference_{city}_split.gpkg (grid-based split column).
@@ -10,6 +10,8 @@ Two split modes:
 
 from __future__ import annotations
 
+import warnings
+from dataclasses import dataclass
 from pathlib import Path
 
 import geopandas as gpd
@@ -20,6 +22,37 @@ from loguru import logger
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from training.augment import augment_images
+
+
+@dataclass(frozen=True)
+class PatchItem:
+    """One labelled patch.
+
+    Replaces the ``(path, label, split)`` / ``(path, label, split, weight)``
+    tuples the builders used to return. Those were unpacked positionally in
+    several places (``for path, label, _ in items``, ``it[2] == split``), so
+    adding a field would have broken them silently — with named access the
+    breakage is loud and local.
+
+    Attributes:
+        path: The patch ``.npy`` path, or a tuple of paths for fused sources.
+        label: Class index 0-16.
+        split: "train" | "val" | "test".
+        city: Source city, when known. The per-city builder knows it directly;
+            the global builder derives it from the So2Sat city bounds, since
+            patches_reference_rxr.gpkg carries no city column. Needed by
+            per-city normalization in Phase 4.
+        weight: Per-sample loss weight, or None for ordinary (unweighted)
+            patches. Only pseudo-labelled items set it, and the "weight" batch
+            key is emitted only when some item carries one, so unweighted runs
+            keep their exact previous batch format.
+    """
+
+    path: Path | tuple
+    label: int
+    split: str
+    city: str | None = None
+    weight: float | None = None
 
 
 # ── Item builders ─────────────────────────────────────────────────────────────
@@ -78,21 +111,69 @@ def merge_patch_indexes(indexes: list[dict]) -> dict:
     return merged
 
 
+def assign_cities(gdf, city_bounds: Path):
+    """Attach a ``city`` column to a patch GeoDataFrame by spatial join.
+
+    patches_reference_rxr.gpkg has only patch_id / dataset / LCZ_class /
+    geometry — no city — so for the global split the city has to come from the
+    So2Sat city bounds (JRC_NAME_MAIN in so2sat_guppd_bounds.gpkg). Patches
+    outside every city box get None.
+    """
+    bounds = gpd.read_file(city_bounds, layer="so2sat_guppd_bounds_gdf")
+    bounds = bounds[["JRC_NAME_MAIN", "geometry"]].rename(
+        columns={"JRC_NAME_MAIN": "city"}
+    ).to_crs(gdf.crs)
+
+    pts = gdf[["geometry"]].copy()
+    with warnings.catch_warnings():
+        # Centroids in a geographic CRS are approximate, which geopandas warns
+        # about. It cannot matter here: a So2Sat patch is 320 m across and the
+        # error is sub-metre, far too small to move a patch into another city.
+        warnings.filterwarnings("ignore", message=".*Geometry is in a geographic CRS.*")
+        pts["geometry"] = pts.geometry.centroid
+    joined = gpd.sjoin(pts, bounds, how="left", predicate="within")
+    # Overlapping city boxes can match a patch twice; keep the first.
+    return joined[~joined.index.duplicated(keep="first")]["city"]
+
+
 def build_global_items(
     patches_gpkg: Path,
     patch_index: dict[str, dict[str, Path]],
     label_col: str = "LCZ_class",
-) -> list[tuple]:
-    """Build (npy_path, label_int, split) tuples from the global So2Sat GPKG.
+    city_bounds: Path | None = None,
+) -> list[PatchItem]:
+    """Build PatchItems from the global So2Sat GPKG.
 
     Uses the 'dataset' column ('training'/'validation'/'testing') and maps it
     to the 'train'/'val'/'test' strings expected by PatchDataModule.
+
+    ``city_bounds`` (default: so2sat_guppd_bounds.gpkg beside the patches GPKG)
+    supplies the city per patch; without it the items carry city=None and
+    Phase 4's per-city normalization cannot run on the global split.
     """
     _SPLIT_MAP = {"training": "train", "validation": "val", "testing": "test"}
     gdf = gpd.read_file(patches_gpkg)
-    items: list[tuple] = []
+
+    cities = None
+    bounds_path = city_bounds or (patches_gpkg.parent / "so2sat_guppd_bounds.gpkg")
+    if bounds_path.exists():
+        try:
+            cities = assign_cities(gdf, bounds_path)
+            logger.info(
+                f"Global split: city assigned from {bounds_path.name} "
+                f"({cities.notna().sum()}/{len(gdf)} patches matched a city)"
+            )
+        except Exception as e:                                   # noqa: BLE001
+            logger.warning(f"City assignment failed ({e}) — items will carry city=None")
+    else:
+        logger.warning(
+            f"No city bounds at {bounds_path} — global items carry city=None, "
+            "so per-city normalization (Phase 4) is unavailable for this split."
+        )
+
+    items: list[PatchItem] = []
     n_missing = 0
-    for _, row in gdf.iterrows():
+    for i, row in gdf.iterrows():
         pid = str(row["patch_id"])
         path = patch_index.get(str(row["dataset"]), {}).get(pid)
         if path is None:
@@ -102,7 +183,9 @@ def build_global_items(
         if split is None:
             continue
         label = int(row[label_col]) - 1   # 1-17 → 0-16
-        items.append((path, label, split))
+        city = None if cities is None else cities.get(i)
+        items.append(PatchItem(path, label, split,
+                               city=None if city is None or city != city else str(city)))
     logger.info(
         f"Global split: {len(items)} patches matched "
         f"({n_missing} patch_ids had no npy)"
@@ -116,16 +199,15 @@ def build_pseudo_items(
     label_col: str = "LCZ_class",
     weight_col: str = "weight",
     weight_scale: float = 1.0,
-) -> list[tuple]:
+) -> list[PatchItem]:
     """Build weighted train items from a pseudo-label GeoPackage
     (generate_pseudo_labels.py output).
 
-    Returns 4-tuples ``(npy_path, label_int, "train", weight)``; the weight
-    (scaled by ``weight_scale``) flows through PatchDataset into the
-    per-sample weighted CE loss.
+    Returns train PatchItems carrying a ``weight`` (scaled by ``weight_scale``)
+    that flows through PatchDataset into the per-sample weighted CE loss.
     """
     gdf = gpd.read_file(pseudo_gpkg)
-    items: list[tuple] = []
+    items: list[PatchItem] = []
     n_missing = 0
     for _, row in gdf.iterrows():
         pid = str(row["patch_id"])
@@ -136,7 +218,7 @@ def build_pseudo_items(
             continue
         label = int(row[label_col]) - 1   # 1-17 → 0-16
         weight = float(row[weight_col]) * weight_scale
-        items.append((path, label, "train", weight))
+        items.append(PatchItem(path, label, "train", weight=weight))
     logger.info(
         f"Pseudo items: {len(items)} weighted train patches from "
         f"{pseudo_gpkg.name} ({n_missing} had no npy)"
@@ -156,8 +238,8 @@ def build_city_items(
     label_col: str = "LCZ_class",
     *,
     orig_test: bool = False,
-) -> list[tuple]:
-    """Build (npy_path, label_int, split) tuples for one city.
+) -> list[PatchItem]:
+    """Build PatchItems for one city.
 
     Uses patches_reference_{city}_split.gpkg as the authoritative source of
     patch_ids and their grid-based train/val/test split assignment; the
@@ -173,7 +255,7 @@ def build_city_items(
         return []
 
     sdf = gpd.read_file(split_gpkg)
-    items: list[tuple] = []
+    items: list[PatchItem] = []
     n_missing = 0
 
     for _, row in sdf.iterrows():
@@ -188,7 +270,7 @@ def build_city_items(
                      else _GRID_FOLD[str(row["split"])])
         else:
             split = str(row["split"])
-        items.append((path, label, split))
+        items.append(PatchItem(path, label, split, city=city))
 
     logger.info(
         f"  {city}: {len(items)} patches matched "
@@ -208,7 +290,7 @@ def build_so2sat_items(
     cities: list[str] | None = None,
     label_col: str = "LCZ_class",
     orig_test: bool = False,
-) -> tuple[list[tuple], list[Path]]:
+) -> tuple[list[PatchItem], list[Path]]:
     """Build the full item list plus the city dirs used for per-city inference.
 
     ``output_name`` may be a list of embedding names (fusion): the per-source
@@ -312,7 +394,7 @@ class PatchDataset(Dataset):
 
     def __init__(
         self,
-        items: list,        # (npy_path, label_int, split)
+        items: list[PatchItem],
         patch_size: int,
         sub_patch_size: int | None = None,
         sub_patch_stride: int | None = None,
@@ -352,24 +434,23 @@ class PatchDataset(Dataset):
             self._norm_mean = torch.from_numpy(self.channel_mean)[:, None, None]
             self._norm_std = torch.from_numpy(self.channel_std)[:, None, None]
 
-        if items and isinstance(items[0][0], tuple) and sub_patch_size is not None:
+        if items and isinstance(items[0].path, tuple) and sub_patch_size is not None:
             raise ValueError("sub_patch_size is not supported with fused (multi-source) items")
 
-        # Items are (path, label, split) or (path, label, split, weight);
-        # the "weight" batch key is only emitted when any item carries one,
+        # The "weight" batch key is only emitted when some item carries one,
         # so unweighted runs keep their exact previous batch format.
-        self.has_weights = any(len(it) > 3 for it in items)
+        self.has_weights = any(it.weight is not None for it in items)
 
-        def _w(it) -> float:
-            return float(it[3]) if len(it) > 3 else 1.0
+        def _w(it: PatchItem) -> float:
+            return 1.0 if it.weight is None else float(it.weight)
 
         if sub_patch_size is None:
-            self.expanded = [(it[0], it[1], None, None, _w(it)) for it in items]
+            self.expanded = [(it.path, it.label, None, None, _w(it)) for it in items]
         else:
             stride = self.sub_patch_stride
             self.expanded = []
             for it in items:
-                path, label = it[0], it[1]
+                path, label = it.path, it.label
                 _, H, W = np.load(path, mmap_mode="r").shape
                 for r in range(0, H - sub_patch_size + 1, stride):
                     for c in range(0, W - sub_patch_size + 1, stride):
@@ -540,7 +621,7 @@ class PatchDataModule:
 
     def setup(self) -> None:
         def _for_split(s: str) -> list:
-            return [it for it in self.all_items if it[2] == s]
+            return [it for it in self.all_items if it.split == s]
 
         kw = dict(sub_patch_size=self.sub_patch_size, sub_patch_stride=self.sub_patch_stride,
                   dequantize_fn=self.dequantize_fn, nodata_mode=self.nodata_mode,

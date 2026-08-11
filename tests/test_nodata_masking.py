@@ -15,6 +15,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from datasets.registry import get_nodata_predicate  # noqa: E402
+from datasets.so2sat import PatchItem  # noqa: E402
 from models.pooling import pool_mean_std  # noqa: E402
 
 
@@ -105,7 +106,7 @@ def test_dataset_emits_valid_channel_and_fills_sentinel(tmp_path):
     path = _write_patch(tmp_path, arr)
 
     ds = PatchDataset(
-        [(path, 0, "train")], patch_size=8,
+        [PatchItem(path, 0, "train")], patch_size=8,
         nodata_mode="mask", nodata_predicate=get_nodata_predicate("alpha_earth_coop"),
     )
     item = ds[0]
@@ -125,7 +126,7 @@ def test_zero_mode_preserves_previous_behaviour(tmp_path):
     path = _write_patch(tmp_path, arr)
 
     ds = PatchDataset(
-        [(path, 0, "train")], patch_size=8,
+        [PatchItem(path, 0, "train")], patch_size=8,
         nodata_mode="zero", nodata_predicate=get_nodata_predicate("alpha_earth_coop"),
     )
     item = ds[0]
@@ -179,7 +180,7 @@ def test_resized_mask_rejects_pixels_blended_with_nodata(tmp_path):
     path = _write_patch(tmp_path, arr)
 
     ds = PatchDataset(
-        [(path, 0, "train")], patch_size=4,          # forces a resize
+        [PatchItem(path, 0, "train")], patch_size=4,          # forces a resize
         nodata_mode="mask", nodata_predicate=get_nodata_predicate("alpha_earth_coop"),
     )
     item = ds[0]

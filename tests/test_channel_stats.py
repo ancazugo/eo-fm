@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from datasets.channel_stats import compute_channel_stats  # noqa: E402
 from datasets.registry import get_nodata_predicate  # noqa: E402
-from datasets.so2sat import PatchDataset  # noqa: E402
+from datasets.so2sat import PatchDataset, PatchItem  # noqa: E402
 
 
 def _items(tmp_path: Path, arrays: list[np.ndarray]) -> list[tuple]:
@@ -24,7 +24,7 @@ def _items(tmp_path: Path, arrays: list[np.ndarray]) -> list[tuple]:
     for i, a in enumerate(arrays):
         p = tmp_path / f"patch_{i:06d}.npy"
         np.save(p, a)
-        items.append((p, 0, "train"))
+        items.append(PatchItem(p, 0, "train"))
     return items
 
 
