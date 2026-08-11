@@ -474,3 +474,79 @@ interpolation touched an invalid input is invalid). Two tests added to
 `tests/test_nodata_masking.py` pin this at the real 33×33 → 32×32 factor and
 assert the fill equals the channel mean rather than zero. No fix required, and
 the "numerically inert" verdict on Tessera's nodata continues to hold.
+
+### Task 1.5.1 — Tessera product identity
+
+```bash
+python src/diagnostics/tessera_product_check.py --n-sample 2000 --seed 0
+```
+
+2000 shared patch_ids per pair, compared on the **native** grid with no resize
+(a resize would blur exactly the disagreement being measured). `tesserav1.1`'s
+27,229 ids are a strict subset of both `tesserav1.1_global` and `tesserav2`.
+
+| pair | ids in common | compared | shape mismatches |
+|---|---|---|---|
+| `tesserav1.1` vs `tesserav1.1_global` | 27,229 | 2,000 | 0 |
+| `tesserav1.1_global` vs `tesserav2` | 131,086 | 1,956 | 44 |
+| `tesserav1.1` vs `tesserav2` | 27,229 | 1,993 | 7 |
+
+| pair | matched-channel r | best cross-channel r | std ratio (med / CV) | linear R² (held out / null) | L2-norm r | verdict |
+|---|---|---|---|---|---|---|
+| `tesserav1.1` vs `tesserav1.1_global` | **−0.0049** | 0.6503 | 1.259 / **0.397** | **0.8924** / −0.0163 | 0.8315 | distinct products |
+| `tesserav1.1_global` vs `tesserav2` | −0.0064 | 0.4824 | 0.343 / 0.648 | 0.8872 / −0.0271 | 0.0759 | distinct products |
+| `tesserav1.1` vs `tesserav2` | −0.0164 | 0.6615 | 0.469 / 0.749 | 0.9081 / −0.0148 | 0.1224 | distinct products |
+
+The linear map is fitted on half the patches and scored on the other half —
+**held out by patch, not by pixel**, since neighbouring pixels are strongly
+autocorrelated and a pixel-level split would score the map on near-copies of its
+own training data. The null rolls one side by half the sample so every pixel is
+paired with a pixel from a different patch; it lands at −0.02, so the 0.89
+held-out R² is real and not 128 free parameters fitting marginals.
+
+**Verdict: outcome 3 — distinct products carrying the same information in
+different feature bases.** Not the scale bug PLAN-V2 flagged for an immediate
+stop, and not a sampling artifact either:
+
+- Native shapes match **exactly** on all 2000 pairs, so the crop geometry is
+  identical and the two are spatially aligned (per-pixel L2-norm r = 0.83).
+- Channel *k* of one is not channel *k* of the other (matched r ≈ 0.00) but each
+  channel has a strong best match somewhere in the other's 128 (median 0.65).
+- The std ratio has **CV 0.40** — a scale bug would be one number, not a
+  distribution spanning 0.54–4.54.
+- A linear map recovers 89% of one from the other on held-out patches.
+
+Two separately produced Tessera archives, then: the per-city `geotessera`
+download and the internal `/tessera/v1.1/global_0.1_degree_representation`
+re-run. Same architecture and version label, different inference pass, and an
+embedding basis is arbitrary up to rotation across runs.
+
+**Consequences.**
+
+1. A model trained on one and applied to the other produces garbage, and nothing
+   currently prevents that — both declare `in_channels: 128`, so
+   `build_model` accepts either without complaint. Task 1.5.3 guard 2 closes it.
+2. A normalizer fitted on one is invalid on the other. Task 1.5.3 guard 1
+   closes it.
+3. The GATE 0 "0.80 vs 1.14 median std" line was never a like-for-like scale
+   comparison and should not be read as one. Corrected: on the *same* 2000
+   patches the medians are 0.813 and 1.024, and the difference is basis, not
+   scale.
+4. No existing number is wrong — a run takes one `--output-name` /
+   `--embedding-name` pair, so no run could have mixed the two. They are
+   *unlabelled*, which Task 1.5.4 fixes.
+5. Downstream accuracy should be close between them, since R² = 0.89 means
+   little information is lost either way. That is a Phase 2 prediction (Task
+   2.5), not a claim.
+
+`tesserav2` is a third distinct basis, and differs in kind as well: its per-pixel
+L2 norm is **effectively constant** (11.295 / 11.314 / 11.333 at p1/p50/p99)
+where v1.1's spans 7.9–36.1. v2 embeddings are norm-normalised; v1.1's are not.
+That is why the L2-norm correlation against either v1.1 product is ≈ 0.1 — there
+is no norm variation left to correlate.
+
+**Canonical nomination: `tesserav1.1_global`.** It covers 342,944 of the 352,366
+cultural-split training patches (97.3%) against `tesserav1.1`'s 27,229 (7.7%,
+51 cities only), so it is the only Tessera entry that can carry a global-split
+claim at all. Confirmation that it is the entry behind the existing 0.65/0.62
+headline is Task 1.5.4's job below; Task 2.0 owns the formal sign-off.
