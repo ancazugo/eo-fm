@@ -153,6 +153,11 @@ def main() -> None:
                         "reproduces the pre-Phase-1 unnormalised path.")
     g.add_argument("--stats-sample", type=int, default=20000,
                    help="Patches sampled to estimate channel statistics (default: 20000).")
+    g.add_argument("--packed-dir", type=Path, default=None,
+                   help="Read patches from memory-mapped shards written by "
+                        "src/pack_patches.py instead of one file per patch. "
+                        "Falls back to the per-file path for any patch not in "
+                        "the pack.")
     g.add_argument("--recompute-stats", action="store_true",
                    help="Ignore any cached channel statistics and recompute them.")
     g.add_argument("--nodata-mode", choices=["zero", "mask"], default="mask",
@@ -306,6 +311,8 @@ def main() -> None:
         class_weights=class_weights,
         label_smoothing=args.label_smoothing,
         mixup_alpha=args.mixup_alpha,
+        noise_sigma=args.noise_sigma,
+        noise_prob=args.noise_prob,
         monitor=args.monitor,
         logit_adjustment_tau=args.logit_adjustment,
         class_priors=class_priors,
@@ -364,6 +371,7 @@ def main() -> None:
         channel_std=channel_std,
         noise_sigma=args.noise_sigma,
         noise_prob=args.noise_prob,
+        packed_dir=args.packed_dir,
     )
 
     # ── WandB ─────────────────────────────────────────────────────────────────
@@ -388,6 +396,7 @@ def main() -> None:
         noise_sigma=args.noise_sigma,
         noise_prob=args.noise_prob,
         stats_sample=args.stats_sample if args.normalize == 'channel' else None,
+        packed_dir=str(args.packed_dir) if args.packed_dir else None,
         batch_size=args.batch_size,
         lr=args.lr,
         weight_decay=args.weight_decay,

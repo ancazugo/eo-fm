@@ -21,7 +21,6 @@ import torch.nn.functional as F
 from loguru import logger
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
-from training.augment import augment_images
 
 
 @dataclass(frozen=True)
@@ -374,6 +373,61 @@ def build_so2sat_items(
     return all_items, city_dirs
 
 
+class PackedPatchStore:
+    """Reader for the memory-mapped shards written by ``src/pack_patches.py``.
+
+    Opening one file per patch across ~400k files dominates input-pipeline time;
+    the shards turn that into a memmap slice. Shards are opened lazily and cached
+    per worker process, so each DataLoader worker keeps only what it touches.
+    """
+
+    def __init__(self, packed_dir: Path) -> None:
+        import json
+        self.dir = Path(packed_dir)
+        index_path = self.dir / "index.json"
+        if not index_path.exists():
+            raise FileNotFoundError(
+                f"No index.json in {self.dir} — run src/pack_patches.py first."
+            )
+        self.index = json.loads(index_path.read_text())
+        self.prefix = self.index.get("prefix", "patch_")
+        # {patch_id: (split, shard, row)} across every packed split
+        self.lookup: dict[str, tuple[str, int, int]] = {}
+        for split, entry in self.index["splits"].items():
+            for pid, (shard, row) in entry["patches"].items():
+                self.lookup[f"{split}/{pid}"] = (split, shard, row)
+        self._shards: dict[tuple[str, int], np.ndarray] = {}
+
+    def _key(self, path: Path) -> str:
+        """Map an original patch path to its packed key ({split}/{patch_id}).
+
+        The original So2Sat splits restart patch_id at 000000, so the id alone
+        is ambiguous and the split has to qualify it (same rule as
+        build_patch_index).
+        """
+        pid = path.stem[len(self.prefix):]
+        for part in path.parts[::-1]:
+            if part in ("training", "validation", "testing", "unlabeled"):
+                return f"{part}/{pid}"
+        raise KeyError(f"Cannot infer split for {path}")
+
+    def get(self, path: Path) -> np.ndarray | None:
+        """Return the patch array, or None when it is not in the pack."""
+        try:
+            key = self._key(path)
+        except KeyError:
+            return None
+        hit = self.lookup.get(key)
+        if hit is None:
+            return None
+        split, shard, row = hit
+        mm = self._shards.get((split, shard))
+        if mm is None:
+            mm = np.load(self.dir / f"{split}_{shard:04d}.npy", mmap_mode="r")
+            self._shards[(split, shard)] = mm
+        return np.asarray(mm[row], dtype=np.float32)
+
+
 # ── Dataset ───────────────────────────────────────────────────────────────────
 
 class PatchDataset(Dataset):
@@ -404,7 +458,9 @@ class PatchDataset(Dataset):
         normalize: str = "none",
         channel_mean=None,
         channel_std=None,
+        packed_dir: Path | None = None,
     ) -> None:
+        self.packed = PackedPatchStore(packed_dir) if packed_dir else None
         self.patch_size = patch_size
         self.sub_patch_size = sub_patch_size
         self.sub_patch_stride = sub_patch_stride or sub_patch_size
@@ -494,7 +550,11 @@ class PatchDataset(Dataset):
         Returns ``(arr, valid)``; ``valid`` is None in "zero" mode, which keeps
         the pre-Phase-1 behaviour byte for byte.
         """
-        raw = np.load(path).astype(np.float32)   # (C, H, W)
+        raw = None
+        if self.packed is not None:
+            raw = self.packed.get(path)          # memmap slice, no per-file open
+        if raw is None:
+            raw = np.load(path).astype(np.float32)   # (C, H, W)
 
         invalid = None
         if self.nodata_mode == "mask" and predicate is not None:
@@ -602,6 +662,7 @@ class PatchDataModule:
         channel_std=None,
         noise_sigma: float = 0.05,
         noise_prob: float = 0.5,
+        packed_dir: Path | None = None,
     ) -> None:
         self.all_items = all_items
         self.patch_size = patch_size
@@ -618,6 +679,7 @@ class PatchDataModule:
         self.channel_std = channel_std
         self.noise_sigma = noise_sigma
         self.noise_prob = noise_prob
+        self.packed_dir = packed_dir
 
     def setup(self) -> None:
         def _for_split(s: str) -> list:
@@ -626,7 +688,8 @@ class PatchDataModule:
         kw = dict(sub_patch_size=self.sub_patch_size, sub_patch_stride=self.sub_patch_stride,
                   dequantize_fn=self.dequantize_fn, nodata_mode=self.nodata_mode,
                   nodata_predicate=self.nodata_predicate, normalize=self.normalize,
-                  channel_mean=self.channel_mean, channel_std=self.channel_std)
+                  channel_mean=self.channel_mean, channel_std=self.channel_std,
+                  packed_dir=self.packed_dir)
         self._train_ds = PatchDataset(_for_split("train"), self.patch_size, **kw)
         self._val_ds   = PatchDataset(_for_split("val"),   self.patch_size, **kw)
         self._test_ds  = PatchDataset(_for_split("test"),  self.patch_size, **kw)
@@ -647,12 +710,6 @@ class PatchDataModule:
             out["weight"] = torch.stack([b["weight"] for b in batch])
         return out
 
-    def _train_collate(self, batch: list) -> dict:
-        out = self._collate(batch)
-        out["image"] = augment_images(
-            out["image"], noise_sigma=self.noise_sigma, noise_prob=self.noise_prob
-        )
-        return out
 
     def train_dataloader(self) -> DataLoader:
         sampler = None
@@ -670,7 +727,7 @@ class PatchDataModule:
         return DataLoader(
             self._train_ds, batch_size=self.batch_size,
             shuffle=sampler is None, sampler=sampler,
-            num_workers=self.num_workers, collate_fn=self._train_collate, drop_last=True,
+            num_workers=self.num_workers, collate_fn=self._collate, drop_last=True,
         )
 
     def val_dataloader(self) -> DataLoader:

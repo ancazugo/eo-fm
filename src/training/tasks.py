@@ -22,6 +22,8 @@ import torch.nn.functional as F
 from torchmetrics import Accuracy, JaccardIndex
 from torchmetrics.classification import MulticlassCohenKappa, MulticlassF1Score
 
+from training.augment import augment_images
+
 
 # ─── Classification ───────────────────────────────────────────────────────────
 
@@ -41,6 +43,10 @@ class LCZResNetModule(nn.Module):
         class_weights: Optional (num_classes,) tensor of per-class CE weights.
         label_smoothing: CE label smoothing (default 0.0).
         mixup_alpha: Beta(alpha, alpha) mixup on training batches (0 = off).
+        noise_sigma: Augmentation noise in normalized per-channel std units.
+        noise_prob: Probability of noising a sample.
+        augment: Apply flips/rotations/noise in train_step (on device). Set
+            False when the input pipeline already augments.
         monitor: Validation metric for checkpointing/early stopping
             ("val_f1" or "val_kappa").
         logit_adjustment_tau: Logit-adjusted CE (Menon et al. 2021): the
@@ -60,6 +66,9 @@ class LCZResNetModule(nn.Module):
         class_weights: torch.Tensor | None = None,
         label_smoothing: float = 0.0,
         mixup_alpha: float = 0.0,
+        noise_sigma: float = 0.05,
+        noise_prob: float = 0.5,
+        augment: bool = True,
         monitor: str = "val_f1",
         logit_adjustment_tau: float = 0.0,
         class_priors: torch.Tensor | None = None,
@@ -71,6 +80,9 @@ class LCZResNetModule(nn.Module):
         self.weight_decay = weight_decay
         self.max_epochs = max_epochs
         self.mixup_alpha = mixup_alpha
+        self.noise_sigma = noise_sigma
+        self.noise_prob = noise_prob
+        self.augment = augment
         self.monitor = monitor
         self.logit_adjustment_tau = logit_adjustment_tau
         if logit_adjustment_tau > 0:
@@ -180,6 +192,18 @@ class LCZResNetModule(nn.Module):
             sample_w = sample_w.to(device).float()
         if (labels != -1).sum() == 0:
             return None
+
+        # Augmentation runs here, on-device and batched, rather than in the
+        # DataLoader collate: ~25x faster, and it keeps the validity mask under
+        # the same flips and rotations as the image.
+        if self.augment and self.training:
+            if valid is None:
+                images = augment_images(
+                    images, noise_sigma=self.noise_sigma, noise_prob=self.noise_prob)
+            else:
+                images, valid = augment_images(
+                    images, valid, noise_sigma=self.noise_sigma,
+                    noise_prob=self.noise_prob)
 
         def _ce(logits: torch.Tensor, targets: torch.Tensor,
                 w: torch.Tensor | None) -> torch.Tensor:
