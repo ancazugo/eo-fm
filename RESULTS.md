@@ -550,3 +550,107 @@ cultural-split training patches (97.3%) against `tesserav1.1`'s 27,229 (7.7%,
 51 cities only), so it is the only Tessera entry that can carry a global-split
 claim at all. Confirmation that it is the entry behind the existing 0.65/0.62
 headline is Task 1.5.4's job below; Task 2.0 owns the formal sign-off.
+
+### Task 1.5.2 / 1.5.3 — Provenance schema and the three guards
+
+Every registry entry now carries `product` / `version` / `source` / `status`.
+No key was renamed: keys appear in extraction paths on disk and in the W&B
+config of every historical run, so a rename orphans both.
+
+| key | product | version | source | status |
+|---|---|---|---|---|
+| `alpha_earth_coop` | alphaearth | coop | source_coop | canonical |
+| `alpha_earth` | alphaearth | v1 | gee_zarr | untested |
+| `tesserav1.1_global` | tessera | v1.1 | global_0.1deg | **canonical** |
+| `tesserav1.1` | tessera | v1.1 | percity_geotessera | supported |
+| `tesserav2` | tessera | v2 | global_0.1deg | supported |
+| `tessera` | tessera | v1 | gee_zarr | untested |
+| `seamless` | esd | — | local_tif | canonical |
+| `osm_evidence` | osm | — | local_tif | untested |
+| `aux_struct` | aux | — | local_tif | supported |
+
+`untested` means *not verified against the current code*, not never used: the
+`open_tile` ordering bug fixed in Task 1.0 was introduced after those runs, and
+nothing has been re-run through the fixed path. `is_comparable(a, b)` compares
+product, version and source but deliberately **not** status — status records how
+much an entry is trusted, not what the data is, so promoting one to `canonical`
+must not invalidate existing checkpoints.
+
+The three guards, each with tests in `tests/test_provenance.py` (37 tests):
+
+1. **Normalizer cache key.** `stats_cache_path` now takes `embedding_name` and
+   puts the provenance triple in both the filename stem and the digest. Two
+   extractions of the same product from different tile sources can no longer
+   share a stats file — which matters because `--output-name` is free text and
+   nothing stopped both Tessera archives being given the same label. Existing
+   caches are invalidated by the new filenames, so the first run after this
+   recomputes.
+2. **Checkpoint binding.** `embedding_name`, `product`, `version`, `source` and
+   `year` are written into every checkpoint by both pipelines, alongside the
+   Task 1.2 channel statistics. `check_checkpoint_provenance` **raises** on a
+   mismatch and names both sides; **absence only warns**, since every
+   pre-1.5.3 checkpoint carries nothing — including the one the GATE 1
+   bit-identity regression replays.
+3. **W&B config.** The same five fields go into `run_cfg` for both pipelines, so
+   this table can be rebuilt from W&B alone.
+
+Verified end to end:
+
+| check | result |
+|---|---|
+| `pytest` | 65 passed in `tests/`, 213 + 37 across the full suite |
+| classification checkpoint | carries all five fields, still loads under `weights_only=True` |
+| segmentation checkpoint | carries all five fields |
+| wrong `--embedding-name` on a `tesserav1.1_global` checkpoint | **refused**, exit 1, message naming both products |
+| GATE 1 regression (pre-Phase-1 ckpt + `--normalize none`) | md5 `7c2222b04ad830fe0c08eb4ee686df51` — **unchanged**, guard warns only |
+
+### Task 1.5.4 — W&B provenance audit
+
+```bash
+python src/diagnostics/wandb_provenance_audit.py
+```
+
+All **225** runs in `phd-thesis-team/lcz-classification-dl` resolved: 35
+`explicit` (config carries `embedding_name`) and 190 `inferred` from the
+`--output-name` label via a mapping of the labels this project has actually
+used. Nothing was left unresolved and nothing was guessed — six 2026-05-05/06
+runs used the spelling `GeoTesserav1.1`, for which no directory survives on
+disk; they resolve to the per-city archive on dating rather than on the label,
+since they are per-city grid-split runs and the global extraction did not exist
+yet.
+
+| embedding | product | version | source | runs |
+|---|---|---|---|---|
+| `alpha_earth_coop` | alphaearth | coop | source_coop | 60 |
+| `seamless` | esd | none | local_tif | 54 |
+| `tessera` | tessera | v1 | gee_zarr | 42 |
+| `tesserav1.1` | tessera | v1.1 | percity_geotessera | 37 |
+| `tesserav1.1_global` | tessera | v1.1 | global_0.1deg | 30 |
+| `tesserav1.1_global+alpha_earth_coop` | fused | — | — | 1 |
+| `tesserav1.1_global+aux_struct` | fused | — | — | 1 |
+
+**Every cultural-split Tessera run used `global_0.1deg`.** The headline numbers
+resolve unambiguously:
+
+| run | id | source | test_kappa | test_f1 |
+|---|---|---|---|---|
+| `student-noisy-v3` | ey10pcob | `global_0.1deg` | **0.6497** | 0.5656 |
+| `student-noisy-v1` | k4ka3wjs | `global_0.1deg` | 0.6419 | 0.5780 |
+| `student-noisy-v2` | 2pz0icbd | `global_0.1deg` | 0.6320 | 0.5766 |
+| `opt3-tessera-seed1` | h6tv58sp | `global_0.1deg` | 0.6268 | 0.5586 |
+| `opt3-lr5e-4-warmup3` | lhmxayfl | `global_0.1deg` | **0.6190** | 0.5652 |
+
+So the 0.6497 single-model and 0.619 opt3 headlines both belong to
+`tesserav1.1_global`, which confirms the canonical nomination on evidence rather
+than on coverage alone. Task 2.0 still owns the formal sign-off.
+
+The 37 `percity_geotessera` runs are **all** per-city grid-split (best 0.9742,
+autocorrelation-inflated and not comparable to anything above). The per-city
+archive has therefore never produced a cultural-split number, which is worth
+knowing before Task 2.5 tries to compare the two products.
+
+**No run could have mixed the two products.** A run takes one `--output-name` /
+`--embedding-name` pair and `infer_roi` reads its embedding from the CLI, so
+there is no path by which one run trained on one archive and evaluated on the
+other. The audit's job was labelling, not damage assessment, and nothing needs
+re-running.
