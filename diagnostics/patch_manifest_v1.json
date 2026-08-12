@@ -1,0 +1,1723 @@
+{
+  "meta": {
+    "generated": "2026-08-12T14:16:52+00:00",
+    "source_parquet": "diagnostics/invalid_fraction.parquet",
+    "source_sha256": "5cd86a9c10c6de0b784f78363dcdf29947c954b77cc834b3cebd1bd779102cac",
+    "manifest_path": "diagnostics/patch_manifest_v1.parquet",
+    "data_dir": "/maps/acz25/phd-thesis-data"
+  },
+  "manifest": {
+    "families": [
+      "alpha_earth_coop",
+      "tesserav1.1_global",
+      "seamless"
+    ],
+    "max_invalid_frac": 0.25,
+    "min_native_frac": 0.5,
+    "denominator_split": "training",
+    "expected_native_area": {
+      "alpha_earth_coop": 1122.0,
+      "seamless": 144.0,
+      "tesserav1.1_global": 1122.0
+    },
+    "n_reference": 400673,
+    "n_members": 389484,
+    "per_split": {
+      "training": {
+        "n_reference": 352366,
+        "n_members": 341754
+      },
+      "validation": {
+        "n_reference": 24119,
+        "n_members": 23878
+      },
+      "testing": {
+        "n_reference": 24188,
+        "n_members": 23852
+      }
+    },
+    "sha256": "ad7fdae39ae75b77d0b9c477fdf051aaf12ce9894615b05c74b39399f37ca728"
+  },
+  "native_area": {
+    "alpha_earth_coop": {
+      "expected_native_area": 1122.0,
+      "median_shape": [
+        33.0,
+        33.0
+      ],
+      "area_quantiles": {
+        "min": 99.0,
+        "p1": 1089.0,
+        "p50": 1122.0,
+        "p99": 1188.0,
+        "max": 1188.0
+      },
+      "modal_shapes": {
+        "33x34": 122201,
+        "34x33": 92372,
+        "33x33": 59070,
+        "35x33": 43868,
+        "33x35": 24823
+      },
+      "native_frac_histogram": {
+        "<0.25": 14,
+        "0.25-0.5": 6,
+        "0.5-0.75": 2,
+        "0.75-0.95": 7,
+        ">=0.95": 400644
+      },
+      "below_min_native_frac": {
+        "training": 20,
+        "validation": 0,
+        "testing": 0
+      },
+      "below_per_side_rule": {
+        "training": 22,
+        "validation": 0,
+        "testing": 0
+      }
+    },
+    "seamless": {
+      "expected_native_area": 144.0,
+      "median_shape": [
+        12.0,
+        12.0
+      ],
+      "area_quantiles": {
+        "min": 33.0,
+        "p1": 121.0,
+        "p50": 144.0,
+        "p99": 156.0,
+        "max": 156.0
+      },
+      "modal_shapes": {
+        "12x12": 182431,
+        "12x11": 57382,
+        "11x12": 55770,
+        "13x12": 19685,
+        "11x11": 10915
+      },
+      "native_frac_histogram": {
+        "<0.25": 2,
+        "0.25-0.5": 28,
+        "0.5-0.75": 29,
+        "0.75-0.95": 143890,
+        ">=0.95": 256077
+      },
+      "below_min_native_frac": {
+        "training": 30,
+        "validation": 0,
+        "testing": 0
+      },
+      "below_per_side_rule": {
+        "training": 77,
+        "validation": 0,
+        "testing": 0
+      }
+    },
+    "tesserav1.1_global": {
+      "expected_native_area": 1122.0,
+      "median_shape": [
+        33.0,
+        33.0
+      ],
+      "area_quantiles": {
+        "min": 12.0,
+        "p1": 1089.0,
+        "p50": 1122.0,
+        "p99": 1188.0,
+        "max": 1224.0
+      },
+      "modal_shapes": {
+        "33x34": 94220,
+        "34x33": 85399,
+        "33x33": 67009,
+        "35x33": 46212,
+        "33x35": 29997
+      },
+      "native_frac_histogram": {
+        "<0.25": 156,
+        "0.25-0.5": 164,
+        "0.5-0.75": 166,
+        "0.75-0.95": 396,
+        ">=0.95": 389798
+      },
+      "below_min_native_frac": {
+        "training": 314,
+        "validation": 0,
+        "testing": 6
+      },
+      "below_per_side_rule": {
+        "training": 560,
+        "validation": 0,
+        "testing": 17
+      }
+    }
+  },
+  "family_loss": {
+    "training": {
+      "alpha_earth_coop": {
+        "on_disk": 352366,
+        "own_filtered": 350862,
+        "manifest": 341754,
+        "loss_vs_own_filtered": 0.02595892402141013
+      },
+      "tesserav1.1_global": {
+        "on_disk": 342944,
+        "own_filtered": 342614,
+        "manifest": 341754,
+        "loss_vs_own_filtered": 0.0025101134221018405
+      },
+      "seamless": {
+        "on_disk": 351719,
+        "own_filtered": 351689,
+        "manifest": 341754,
+        "loss_vs_own_filtered": 0.028249390796982563
+      }
+    },
+    "validation": {
+      "alpha_earth_coop": {
+        "on_disk": 24119,
+        "own_filtered": 24011,
+        "manifest": 23878,
+        "loss_vs_own_filtered": 0.005539127899712632
+      },
+      "tesserav1.1_global": {
+        "on_disk": 23878,
+        "own_filtered": 23878,
+        "manifest": 23878,
+        "loss_vs_own_filtered": 0.0
+      },
+      "seamless": {
+        "on_disk": 24119,
+        "own_filtered": 24119,
+        "manifest": 23878,
+        "loss_vs_own_filtered": 0.009992122393134044
+      }
+    },
+    "testing": {
+      "alpha_earth_coop": {
+        "on_disk": 24188,
+        "own_filtered": 24188,
+        "manifest": 23852,
+        "loss_vs_own_filtered": 0.013891185711923267
+      },
+      "tesserav1.1_global": {
+        "on_disk": 23858,
+        "own_filtered": 23852,
+        "manifest": 23852,
+        "loss_vs_own_filtered": 0.0
+      },
+      "seamless": {
+        "on_disk": 24188,
+        "own_filtered": 24188,
+        "manifest": 23852,
+        "loss_vs_own_filtered": 0.013891185711923267
+      }
+    }
+  },
+  "intersection": {
+    "severe_invalid_frac": 0.75,
+    "by_split": {
+      "training": {
+        "n_severe": 1277,
+        "n_above_max_invalid": 1484,
+        "others": {
+          "tesserav1.1_global": {
+            "severe_also_absent": 1277,
+            "severe_also_absent_frac": 1.0,
+            "base_absence_rate": 0.026739242719218084
+          },
+          "seamless": {
+            "severe_also_absent": 0,
+            "severe_also_absent_frac": 0.0,
+            "base_absence_rate": 0.0018361589937735195
+          }
+        },
+        "n_above_max_invalid_after_coverage_only": 178
+      },
+      "validation": {
+        "n_severe": 105,
+        "n_above_max_invalid": 108,
+        "others": {
+          "tesserav1.1_global": {
+            "severe_also_absent": 105,
+            "severe_also_absent_frac": 1.0,
+            "base_absence_rate": 0.009992122393134044
+          },
+          "seamless": {
+            "severe_also_absent": 0,
+            "severe_also_absent_frac": 0.0,
+            "base_absence_rate": 0.0
+          }
+        },
+        "n_above_max_invalid_after_coverage_only": 0
+      },
+      "testing": {
+        "n_severe": 0,
+        "n_above_max_invalid": 0,
+        "others": {
+          "tesserav1.1_global": {
+            "severe_also_absent": 0,
+            "severe_also_absent_frac": 0.0,
+            "base_absence_rate": 0.013643128824210352
+          },
+          "seamless": {
+            "severe_also_absent": 0,
+            "severe_also_absent_frac": 0.0,
+            "base_absence_rate": 0.0
+          }
+        },
+        "n_above_max_invalid_after_coverage_only": 0
+      }
+    }
+  },
+  "composition": {
+    "by_split": {
+      "training": {
+        "n_reference": 352366,
+        "n_members": 341754,
+        "cities_over_5pct": [
+          {
+            "city": "Istanbul",
+            "size": 20431,
+            "sum": 17798,
+            "lost": 2633,
+            "loss_pct": 12.88727913464833,
+            "held_out": false
+          },
+          {
+            "city": "Qingdao",
+            "size": 5482,
+            "sum": 4790,
+            "lost": 692,
+            "loss_pct": 12.623130244436338,
+            "held_out": false
+          },
+          {
+            "city": "New York",
+            "size": 20371,
+            "sum": 18345,
+            "lost": 2026,
+            "loss_pct": 9.945510775121496,
+            "held_out": false
+          },
+          {
+            "city": "Cape Town",
+            "size": 11252,
+            "sum": 10243,
+            "lost": 1009,
+            "loss_pct": 8.967294703163882,
+            "held_out": false
+          },
+          {
+            "city": "Lisbon",
+            "size": 1258,
+            "sum": 1187,
+            "lost": 71,
+            "loss_pct": 5.643879173290938,
+            "held_out": false
+          },
+          {
+            "city": "Shanghai",
+            "size": 7304,
+            "sum": 6925,
+            "lost": 379,
+            "loss_pct": 5.188937568455641,
+            "held_out": false
+          }
+        ],
+        "by_city": [
+          {
+            "city": "Istanbul",
+            "size": 20431,
+            "sum": 17798,
+            "lost": 2633,
+            "loss_pct": 12.88727913464833,
+            "held_out": false
+          },
+          {
+            "city": "Qingdao",
+            "size": 5482,
+            "sum": 4790,
+            "lost": 692,
+            "loss_pct": 12.623130244436338,
+            "held_out": false
+          },
+          {
+            "city": "New York",
+            "size": 20371,
+            "sum": 18345,
+            "lost": 2026,
+            "loss_pct": 9.945510775121496,
+            "held_out": false
+          },
+          {
+            "city": "Cape Town",
+            "size": 11252,
+            "sum": 10243,
+            "lost": 1009,
+            "loss_pct": 8.967294703163882,
+            "held_out": false
+          },
+          {
+            "city": "Lisbon",
+            "size": 1258,
+            "sum": 1187,
+            "lost": 71,
+            "loss_pct": 5.643879173290938,
+            "held_out": false
+          },
+          {
+            "city": "Shanghai",
+            "size": 7304,
+            "sum": 6925,
+            "lost": 379,
+            "loss_pct": 5.188937568455641,
+            "held_out": false
+          },
+          {
+            "city": "Vancouver",
+            "size": 30657,
+            "sum": 29539,
+            "lost": 1118,
+            "loss_pct": 3.6468017092344325,
+            "held_out": false
+          },
+          {
+            "city": "Amsterdam",
+            "size": 3451,
+            "sum": 3343,
+            "lost": 108,
+            "loss_pct": 3.1295276731382207,
+            "held_out": false
+          },
+          {
+            "city": "Melbourne",
+            "size": 35093,
+            "sum": 34153,
+            "lost": 940,
+            "loss_pct": 2.678596871170889,
+            "held_out": false
+          },
+          {
+            "city": "Madrid",
+            "size": 6785,
+            "sum": 6623,
+            "lost": 162,
+            "loss_pct": 2.3876197494473104,
+            "held_out": false
+          },
+          {
+            "city": "\u4e1c\u8425\u533a",
+            "size": 3240,
+            "sum": 3164,
+            "lost": 76,
+            "loss_pct": 2.345679012345679,
+            "held_out": false
+          },
+          {
+            "city": "Guangzhou",
+            "size": 5013,
+            "sum": 4912,
+            "lost": 101,
+            "loss_pct": 2.01476161978855,
+            "held_out": true
+          },
+          {
+            "city": "Wuhan",
+            "size": 8261,
+            "sum": 8133,
+            "lost": 128,
+            "loss_pct": 1.5494492192228544,
+            "held_out": false
+          },
+          {
+            "city": "Hong Kong",
+            "size": 4298,
+            "sum": 4256,
+            "lost": 42,
+            "loss_pct": 0.9771986970684039,
+            "held_out": false
+          },
+          {
+            "city": "London",
+            "size": 27340,
+            "sum": 27096,
+            "lost": 244,
+            "loss_pct": 0.8924652523774689,
+            "held_out": false
+          },
+          {
+            "city": "Paris",
+            "size": 12511,
+            "sum": 12411,
+            "lost": 100,
+            "loss_pct": 0.7992966189753017,
+            "held_out": false
+          },
+          {
+            "city": "Tokyo",
+            "size": 884,
+            "sum": 878,
+            "lost": 6,
+            "loss_pct": 0.6787330316742082,
+            "held_out": false
+          },
+          {
+            "city": "Beijing",
+            "size": 5392,
+            "sum": 5392,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Chicago",
+            "size": 48,
+            "sum": 48,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Changsha",
+            "size": 4667,
+            "sum": 4667,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Caracas",
+            "size": 12,
+            "sum": 12,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Cairo",
+            "size": 17445,
+            "sum": 17445,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Bogota",
+            "size": 8,
+            "sum": 8,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Buenos Aires",
+            "size": 5,
+            "sum": 5,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Berlin",
+            "size": 19130,
+            "sum": 19130,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Lima",
+            "size": 48,
+            "sum": 48,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Osaka [Kyoto]",
+            "size": 6443,
+            "sum": 6443,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Nanjing",
+            "size": 6356,
+            "sum": 6356,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Milan",
+            "size": 2963,
+            "sum": 2963,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Los Angeles",
+            "size": 11905,
+            "sum": 11905,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Cologne",
+            "size": 15265,
+            "sum": 15265,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Dhaka",
+            "size": 30,
+            "sum": 30,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Karachi",
+            "size": 1140,
+            "sum": 1140,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Philadelphia",
+            "size": 2,
+            "sum": 2,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Salvador",
+            "size": 1,
+            "sum": 1,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Rome",
+            "size": 5347,
+            "sum": 5347,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Rio De Janeiro",
+            "size": 13596,
+            "sum": 13596,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Rawalpindi [Islamabad]",
+            "size": 8108,
+            "sum": 8108,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Quezon City [Manila]",
+            "size": 384,
+            "sum": 384,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "S\u00e3o Paulo",
+            "size": 19570,
+            "sum": 19570,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Washington D.C.",
+            "size": 4206,
+            "sum": 4206,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          },
+          {
+            "city": "Zurich",
+            "size": 2515,
+            "sum": 2515,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": false
+          }
+        ],
+        "classes_over_5pct": [
+          {
+            "lcz": 17.0,
+            "size": 49359,
+            "sum": 40041,
+            "lost": 9318,
+            "loss_pct": 18.878016167264327
+          }
+        ],
+        "by_lcz": [
+          {
+            "lcz": 17.0,
+            "size": 49359,
+            "sum": 40041,
+            "lost": 9318,
+            "loss_pct": 18.878016167264327
+          },
+          {
+            "lcz": 12.0,
+            "size": 9514,
+            "sum": 9316,
+            "lost": 198,
+            "loss_pct": 2.081143577885222
+          },
+          {
+            "lcz": 4.0,
+            "size": 8651,
+            "sum": 8531,
+            "lost": 120,
+            "loss_pct": 1.3871228759680962
+          },
+          {
+            "lcz": 16.0,
+            "size": 7898,
+            "sum": 7809,
+            "lost": 89,
+            "loss_pct": 1.1268675614079513
+          },
+          {
+            "lcz": 11.0,
+            "size": 42902,
+            "sum": 42611,
+            "lost": 291,
+            "loss_pct": 0.6782900564076266
+          },
+          {
+            "lcz": 6.0,
+            "size": 35290,
+            "sum": 35103,
+            "lost": 187,
+            "loss_pct": 0.529895154434684
+          },
+          {
+            "lcz": 14.0,
+            "size": 41377,
+            "sum": 41169,
+            "lost": 208,
+            "loss_pct": 0.5026947337893032
+          },
+          {
+            "lcz": 8.0,
+            "size": 39326,
+            "sum": 39228,
+            "lost": 98,
+            "loss_pct": 0.2491990032039872
+          },
+          {
+            "lcz": 2.0,
+            "size": 24431,
+            "sum": 24376,
+            "lost": 55,
+            "loss_pct": 0.22512381809995496
+          },
+          {
+            "lcz": 15.0,
+            "size": 2392,
+            "sum": 2389,
+            "lost": 3,
+            "loss_pct": 0.1254180602006689
+          },
+          {
+            "lcz": 10.0,
+            "size": 11954,
+            "sum": 11942,
+            "lost": 12,
+            "loss_pct": 0.1003848084323239
+          },
+          {
+            "lcz": 3.0,
+            "size": 31693,
+            "sum": 31669,
+            "lost": 24,
+            "loss_pct": 0.07572650112012116
+          },
+          {
+            "lcz": 5.0,
+            "size": 16493,
+            "sum": 16486,
+            "lost": 7,
+            "loss_pct": 0.04244224822652034
+          },
+          {
+            "lcz": 9.0,
+            "size": 13584,
+            "sum": 13582,
+            "lost": 2,
+            "loss_pct": 0.014723203769140165
+          },
+          {
+            "lcz": 1.0,
+            "size": 5068,
+            "sum": 5068,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 7.0,
+            "size": 3269,
+            "sum": 3269,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 13.0,
+            "size": 9165,
+            "sum": 9165,
+            "lost": 0,
+            "loss_pct": 0.0
+          }
+        ],
+        "class_share_shift": [
+          {
+            "lcz": 17.0,
+            "before_pct": 14.007878172127844,
+            "after_pct": 11.71632226689373,
+            "delta_pp": -2.2915559052341132
+          },
+          {
+            "lcz": 15.0,
+            "before_pct": 0.6788396156269334,
+            "after_pct": 0.6990408305389256,
+            "delta_pp": 0.02020121491199227
+          },
+          {
+            "lcz": 12.0,
+            "before_pct": 2.7000334879074597,
+            "after_pct": 2.725937370155141,
+            "delta_pp": 0.02590388224768085
+          },
+          {
+            "lcz": 7.0,
+            "before_pct": 0.9277285549684134,
+            "after_pct": 0.956535987874319,
+            "delta_pp": 0.028807432905905532
+          },
+          {
+            "lcz": 4.0,
+            "before_pct": 2.455117690129014,
+            "after_pct": 2.4962399854866364,
+            "delta_pp": 0.04112229535762277
+          },
+          {
+            "lcz": 16.0,
+            "before_pct": 2.241419433202976,
+            "after_pct": 2.28497691321828,
+            "delta_pp": 0.04355748001530352
+          },
+          {
+            "lcz": 1.0,
+            "before_pct": 1.4382772458182684,
+            "after_pct": 1.4829380197451967,
+            "delta_pp": 0.044660773926928285
+          },
+          {
+            "lcz": 13.0,
+            "before_pct": 2.6009887446575437,
+            "after_pct": 2.681753542021454,
+            "delta_pp": 0.0807647973639105
+          },
+          {
+            "lcz": 10.0,
+            "before_pct": 3.3924953031790808,
+            "after_pct": 3.494326328294621,
+            "delta_pp": 0.10183102511554035
+          },
+          {
+            "lcz": 9.0,
+            "before_pct": 3.8550824994465978,
+            "after_pct": 3.974203666965127,
+            "delta_pp": 0.11912116751852872
+          },
+          {
+            "lcz": 5.0,
+            "before_pct": 4.680644557079854,
+            "after_pct": 4.8239376861719245,
+            "delta_pp": 0.14329312909207026
+          },
+          {
+            "lcz": 2.0,
+            "before_pct": 6.93341582332007,
+            "after_pct": 7.132615858190395,
+            "delta_pp": 0.19920003487032406
+          },
+          {
+            "lcz": 6.0,
+            "before_pct": 10.015154697104716,
+            "after_pct": 10.271423304482171,
+            "delta_pp": 0.25626860737745644
+          },
+          {
+            "lcz": 3.0,
+            "before_pct": 8.994341111230936,
+            "after_pct": 9.266606974607466,
+            "delta_pp": 0.2722658633765307
+          },
+          {
+            "lcz": 11.0,
+            "before_pct": 12.175408524091427,
+            "after_pct": 12.468325169566413,
+            "delta_pp": 0.29291664547498597
+          },
+          {
+            "lcz": 14.0,
+            "before_pct": 11.742619889546663,
+            "after_pct": 12.046384241296371,
+            "delta_pp": 0.30376435174970656
+          },
+          {
+            "lcz": 8.0,
+            "before_pct": 11.160554650562199,
+            "after_pct": 11.478431854491827,
+            "delta_pp": 0.3178772039296285
+          }
+        ],
+        "lost_by_family": {
+          "alpha_earth_coop": {
+            "absent": 0,
+            "failed_criteria": 1504
+          },
+          "tesserav1.1_global": {
+            "absent": 9422,
+            "failed_criteria": 330
+          },
+          "seamless": {
+            "absent": 647,
+            "failed_criteria": 30
+          }
+        },
+        "lost_lcz_counts": {
+          "2": 55,
+          "3": 24,
+          "4": 120,
+          "5": 7,
+          "6": 187,
+          "8": 98,
+          "9": 2,
+          "10": 12,
+          "11": 291,
+          "12": 198,
+          "14": 208,
+          "15": 3,
+          "16": 89,
+          "17": 9318
+        },
+        "watch_cities": [
+          {
+            "city": "New York",
+            "size": 20371,
+            "sum": 18345,
+            "lost": 2026,
+            "loss_pct": 9.945510775121496,
+            "held_out": false
+          },
+          {
+            "city": "Cape Town",
+            "size": 11252,
+            "sum": 10243,
+            "lost": 1009,
+            "loss_pct": 8.967294703163882,
+            "held_out": false
+          },
+          {
+            "city": "Lisbon",
+            "size": 1258,
+            "sum": 1187,
+            "lost": 71,
+            "loss_pct": 5.643879173290938,
+            "held_out": false
+          },
+          {
+            "city": "Shanghai",
+            "size": 7304,
+            "sum": 6925,
+            "lost": 379,
+            "loss_pct": 5.188937568455641,
+            "held_out": false
+          },
+          {
+            "city": "Melbourne",
+            "size": 35093,
+            "sum": 34153,
+            "lost": 940,
+            "loss_pct": 2.678596871170889,
+            "held_out": false
+          },
+          {
+            "city": "Guangzhou",
+            "size": 5013,
+            "sum": 4912,
+            "lost": 101,
+            "loss_pct": 2.01476161978855,
+            "held_out": true
+          },
+          {
+            "city": "London",
+            "size": 27340,
+            "sum": 27096,
+            "lost": 244,
+            "loss_pct": 0.8924652523774689,
+            "held_out": false
+          }
+        ]
+      },
+      "validation": {
+        "n_reference": 24119,
+        "n_members": 23878,
+        "cities_over_5pct": [
+          {
+            "city": "Mumbai",
+            "size": 2413,
+            "sum": 2172,
+            "lost": 241,
+            "loss_pct": 9.98756734355574,
+            "held_out": true
+          }
+        ],
+        "by_city": [
+          {
+            "city": "Mumbai",
+            "size": 2413,
+            "sum": 2172,
+            "lost": 241,
+            "loss_pct": 9.98756734355574,
+            "held_out": true
+          },
+          {
+            "city": "Guangzhou",
+            "size": 2407,
+            "sum": 2407,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          },
+          {
+            "city": "Jakarta",
+            "size": 2411,
+            "sum": 2411,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          },
+          {
+            "city": "Moscow",
+            "size": 2411,
+            "sum": 2411,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          },
+          {
+            "city": "Munich",
+            "size": 2412,
+            "sum": 2412,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          },
+          {
+            "city": "Nairobi",
+            "size": 2411,
+            "sum": 2411,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          },
+          {
+            "city": "San Jose",
+            "size": 2395,
+            "sum": 2395,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          },
+          {
+            "city": "Santiago",
+            "size": 2389,
+            "sum": 2389,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          },
+          {
+            "city": "Sydney",
+            "size": 2411,
+            "sum": 2411,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          },
+          {
+            "city": "Tehran",
+            "size": 2411,
+            "sum": 2411,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          }
+        ],
+        "classes_over_5pct": [
+          {
+            "lcz": 17.0,
+            "size": 2609,
+            "sum": 2368,
+            "lost": 241,
+            "loss_pct": 9.237255653507091
+          }
+        ],
+        "by_lcz": [
+          {
+            "lcz": 17.0,
+            "size": 2609,
+            "sum": 2368,
+            "lost": 241,
+            "loss_pct": 9.237255653507091
+          },
+          {
+            "lcz": 1.0,
+            "size": 256,
+            "sum": 256,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 2.0,
+            "size": 1254,
+            "sum": 1254,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 4.0,
+            "size": 849,
+            "sum": 849,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 3.0,
+            "size": 2353,
+            "sum": 2353,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 6.0,
+            "size": 1906,
+            "sum": 1906,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 7.0,
+            "size": 474,
+            "sum": 474,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 8.0,
+            "size": 3395,
+            "sum": 3395,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 5.0,
+            "size": 757,
+            "sum": 757,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 9.0,
+            "size": 1914,
+            "sum": 1914,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 10.0,
+            "size": 860,
+            "sum": 860,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 12.0,
+            "size": 382,
+            "sum": 382,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 11.0,
+            "size": 2287,
+            "sum": 2287,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 13.0,
+            "size": 1202,
+            "sum": 1202,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 14.0,
+            "size": 2747,
+            "sum": 2747,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 15.0,
+            "size": 202,
+            "sum": 202,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 16.0,
+            "size": 672,
+            "sum": 672,
+            "lost": 0,
+            "loss_pct": 0.0
+          }
+        ],
+        "class_share_shift": [
+          {
+            "lcz": 17.0,
+            "before_pct": 10.817198059621045,
+            "after_pct": 9.917078482284948,
+            "delta_pp": -0.9001195773360976
+          },
+          {
+            "lcz": 15.0,
+            "before_pct": 0.8375139931174592,
+            "after_pct": 0.8459669989111317,
+            "delta_pp": 0.008453005793672419
+          },
+          {
+            "lcz": 1.0,
+            "before_pct": 1.0614038724656911,
+            "after_pct": 1.0721165926794538,
+            "delta_pp": 0.010712720213762808
+          },
+          {
+            "lcz": 12.0,
+            "before_pct": 1.583813590944898,
+            "after_pct": 1.5997989781388726,
+            "delta_pp": 0.01598538719397441
+          },
+          {
+            "lcz": 7.0,
+            "before_pct": 1.9652556076122558,
+            "after_pct": 1.9850908786330514,
+            "delta_pp": 0.019835271020795728
+          },
+          {
+            "lcz": 16.0,
+            "before_pct": 2.786185165222439,
+            "after_pct": 2.8143060557835664,
+            "delta_pp": 0.0281208905611275
+          },
+          {
+            "lcz": 5.0,
+            "before_pct": 3.138604419752063,
+            "after_pct": 3.170282268196666,
+            "delta_pp": 0.03167784844460356
+          },
+          {
+            "lcz": 4.0,
+            "before_pct": 3.5200464364194204,
+            "after_pct": 3.555574168690845,
+            "delta_pp": 0.03552773227142453
+          },
+          {
+            "lcz": 10.0,
+            "before_pct": 3.5656536340644305,
+            "after_pct": 3.6016416785325402,
+            "delta_pp": 0.03598804446810974
+          },
+          {
+            "lcz": 13.0,
+            "before_pct": 4.983622869936564,
+            "after_pct": 5.033922439065249,
+            "delta_pp": 0.05029956912868394
+          },
+          {
+            "lcz": 2.0,
+            "before_pct": 5.199220531531158,
+            "after_pct": 5.2516961219532625,
+            "delta_pp": 0.05247559042210401
+          },
+          {
+            "lcz": 6.0,
+            "before_pct": 7.902483519217214,
+            "after_pct": 7.982243068933746,
+            "delta_pp": 0.0797595497165321
+          },
+          {
+            "lcz": 9.0,
+            "before_pct": 7.935652390231768,
+            "after_pct": 8.01574671245498,
+            "delta_pp": 0.080094322223212
+          },
+          {
+            "lcz": 11.0,
+            "before_pct": 9.482151001285294,
+            "after_pct": 9.577854091632465,
+            "delta_pp": 0.09570309034717117
+          },
+          {
+            "lcz": 3.0,
+            "before_pct": 9.755794187155354,
+            "after_pct": 9.854259150682637,
+            "delta_pp": 0.09846496352728246
+          },
+          {
+            "lcz": 14.0,
+            "before_pct": 11.389361084622083,
+            "after_pct": 11.504313594103358,
+            "delta_pp": 0.11495250948127672
+          },
+          {
+            "lcz": 8.0,
+            "before_pct": 14.076039636800864,
+            "after_pct": 14.218108719323228,
+            "delta_pp": 0.14206908252236417
+          }
+        ],
+        "lost_by_family": {
+          "alpha_earth_coop": {
+            "absent": 0,
+            "failed_criteria": 108
+          },
+          "tesserav1.1_global": {
+            "absent": 241,
+            "failed_criteria": 0
+          },
+          "seamless": {
+            "absent": 0,
+            "failed_criteria": 0
+          }
+        },
+        "lost_lcz_counts": {
+          "17": 241
+        },
+        "watch_cities": [
+          {
+            "city": "Mumbai",
+            "size": 2413,
+            "sum": 2172,
+            "lost": 241,
+            "loss_pct": 9.98756734355574,
+            "held_out": true
+          },
+          {
+            "city": "Guangzhou",
+            "size": 2407,
+            "sum": 2407,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          }
+        ]
+      },
+      "testing": {
+        "n_reference": 24188,
+        "n_members": 23852,
+        "cities_over_5pct": [
+          {
+            "city": "Sydney",
+            "size": 2419,
+            "sum": 2084,
+            "lost": 335,
+            "loss_pct": 13.848697809011988,
+            "held_out": true
+          }
+        ],
+        "by_city": [
+          {
+            "city": "Sydney",
+            "size": 2419,
+            "sum": 2084,
+            "lost": 335,
+            "loss_pct": 13.848697809011988,
+            "held_out": true
+          },
+          {
+            "city": "Mumbai",
+            "size": 2421,
+            "sum": 2420,
+            "lost": 1,
+            "loss_pct": 0.041305245766212306,
+            "held_out": true
+          },
+          {
+            "city": "Jakarta",
+            "size": 2420,
+            "sum": 2420,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          },
+          {
+            "city": "Guangzhou",
+            "size": 2402,
+            "sum": 2402,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          },
+          {
+            "city": "Munich",
+            "size": 2420,
+            "sum": 2420,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          },
+          {
+            "city": "Moscow",
+            "size": 2420,
+            "sum": 2420,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          },
+          {
+            "city": "Nairobi",
+            "size": 2417,
+            "sum": 2417,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          },
+          {
+            "city": "San Jose",
+            "size": 2417,
+            "sum": 2417,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          },
+          {
+            "city": "Santiago",
+            "size": 2409,
+            "sum": 2409,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          },
+          {
+            "city": "Tehran",
+            "size": 2416,
+            "sum": 2416,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          }
+        ],
+        "classes_over_5pct": [
+          {
+            "lcz": 17.0,
+            "size": 2540,
+            "sum": 2204,
+            "lost": 336,
+            "loss_pct": 13.228346456692913
+          }
+        ],
+        "by_lcz": [
+          {
+            "lcz": 17.0,
+            "size": 2540,
+            "sum": 2204,
+            "lost": 336,
+            "loss_pct": 13.228346456692913
+          },
+          {
+            "lcz": 1.0,
+            "size": 266,
+            "sum": 266,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 2.0,
+            "size": 1262,
+            "sum": 1262,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 4.0,
+            "size": 857,
+            "sum": 857,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 3.0,
+            "size": 2465,
+            "sum": 2465,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 6.0,
+            "size": 1936,
+            "sum": 1936,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 7.0,
+            "size": 503,
+            "sum": 503,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 8.0,
+            "size": 3496,
+            "sum": 3496,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 5.0,
+            "size": 763,
+            "sum": 763,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 9.0,
+            "size": 2013,
+            "sum": 2013,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 10.0,
+            "size": 908,
+            "sum": 908,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 12.0,
+            "size": 433,
+            "sum": 433,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 11.0,
+            "size": 2368,
+            "sum": 2368,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 13.0,
+            "size": 1166,
+            "sum": 1166,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 14.0,
+            "size": 2435,
+            "sum": 2435,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 15.0,
+            "size": 205,
+            "sum": 205,
+            "lost": 0,
+            "loss_pct": 0.0
+          },
+          {
+            "lcz": 16.0,
+            "size": 572,
+            "sum": 572,
+            "lost": 0,
+            "loss_pct": 0.0
+          }
+        ],
+        "class_share_shift": [
+          {
+            "lcz": 17.0,
+            "before_pct": 10.501074913180089,
+            "after_pct": 9.240315277544859,
+            "delta_pp": -1.2607596356352293
+          },
+          {
+            "lcz": 15.0,
+            "before_pct": 0.8475276996857946,
+            "after_pct": 0.8594667113868857,
+            "delta_pp": 0.011939011701091184
+          },
+          {
+            "lcz": 1.0,
+            "before_pct": 1.0997188688605921,
+            "after_pct": 1.1152104645312764,
+            "delta_pp": 0.015491595670684248
+          },
+          {
+            "lcz": 12.0,
+            "before_pct": 1.7901438729948735,
+            "after_pct": 1.815361395270837,
+            "delta_pp": 0.025217522275963397
+          },
+          {
+            "lcz": 7.0,
+            "before_pct": 2.0795435753266083,
+            "after_pct": 2.108837833305383,
+            "delta_pp": 0.029294257978774996
+          },
+          {
+            "lcz": 16.0,
+            "before_pct": 2.364808996196461,
+            "after_pct": 2.398121750796579,
+            "delta_pp": 0.03331275460011808
+          },
+          {
+            "lcz": 5.0,
+            "before_pct": 3.154456755415909,
+            "after_pct": 3.198893174576555,
+            "delta_pp": 0.04443641916064625
+          },
+          {
+            "lcz": 4.0,
+            "before_pct": 3.5430792128328092,
+            "after_pct": 3.5929901056515177,
+            "delta_pp": 0.049910892818708086
+          },
+          {
+            "lcz": 10.0,
+            "before_pct": 3.753927567388788,
+            "after_pct": 3.8068086533624013,
+            "delta_pp": 0.052881085973613406
+          },
+          {
+            "lcz": 13.0,
+            "before_pct": 4.820572184554325,
+            "after_pct": 4.888478953546873,
+            "delta_pp": 0.06790676899254763
+          },
+          {
+            "lcz": 2.0,
+            "before_pct": 5.217463204894989,
+            "after_pct": 5.290960925708536,
+            "delta_pp": 0.0734977208135465
+          },
+          {
+            "lcz": 6.0,
+            "before_pct": 8.003968910203408,
+            "after_pct": 8.116719771926881,
+            "delta_pp": 0.11275086172347487
+          },
+          {
+            "lcz": 9.0,
+            "before_pct": 8.322308582768315,
+            "after_pct": 8.439543853764883,
+            "delta_pp": 0.1172352709965685
+          },
+          {
+            "lcz": 11.0,
+            "before_pct": 9.7899785017364,
+            "after_pct": 9.927888646654369,
+            "delta_pp": 0.1379101449179701
+          },
+          {
+            "lcz": 14.0,
+            "before_pct": 10.066975359682488,
+            "after_pct": 10.208787523058863,
+            "delta_pp": 0.1418121633763758
+          },
+          {
+            "lcz": 3.0,
+            "before_pct": 10.191003803538944,
+            "after_pct": 10.334563139359384,
+            "delta_pp": 0.14355933582043817
+          },
+          {
+            "lcz": 8.0,
+            "before_pct": 14.45344799073921,
+            "after_pct": 14.657051819553915,
+            "delta_pp": 0.20360382881470518
+          }
+        ],
+        "lost_by_family": {
+          "alpha_earth_coop": {
+            "absent": 0,
+            "failed_criteria": 0
+          },
+          "tesserav1.1_global": {
+            "absent": 330,
+            "failed_criteria": 6
+          },
+          "seamless": {
+            "absent": 0,
+            "failed_criteria": 0
+          }
+        },
+        "lost_lcz_counts": {
+          "17": 336
+        },
+        "watch_cities": [
+          {
+            "city": "Mumbai",
+            "size": 2421,
+            "sum": 2420,
+            "lost": 1,
+            "loss_pct": 0.041305245766212306,
+            "held_out": true
+          },
+          {
+            "city": "Guangzhou",
+            "size": 2402,
+            "sum": 2402,
+            "lost": 0,
+            "loss_pct": 0.0,
+            "held_out": true
+          }
+        ]
+      }
+    }
+  }
+}

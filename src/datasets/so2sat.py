@@ -293,6 +293,7 @@ def build_so2sat_items(
     max_invalid_frac: float = 1.0,
     embedding_names: list[str] | None = None,
     invalid_frac_parquet: Path | None = None,
+    patch_manifest: Path | None = None,
 ) -> tuple[list[PatchItem], list[Path]]:
     """Build the full item list plus the city dirs used for per-city inference.
 
@@ -311,6 +312,10 @@ def build_so2sat_items(
     ``max_invalid_frac`` (with ``embedding_names`` and ``invalid_frac_parquet``)
     applies the Task 1.75.1 nodata drop policy to the finished item list, so it
     behaves identically in all three modes. The default of 1.0 is a no-op.
+
+    ``patch_manifest`` restricts the items to the Task 2.0 common manifest — the
+    patches every in-scope family holds — so a cross-family comparison is run on
+    one population. The default of None is a no-op.
 
     Raises SystemExit on missing inputs (CLI-friendly).
     """
@@ -381,6 +386,7 @@ def build_so2sat_items(
     all_items = filter_by_invalid_fraction(
         all_items, max_invalid_frac, embedding_names, invalid_frac_parquet
     )
+    all_items = filter_by_manifest(all_items, patch_manifest)
 
     return all_items, city_dirs
 
@@ -392,6 +398,7 @@ DEFAULT_INVALID_FRAC_PARQUET = (
 )
 
 _SCAN_COMMAND = "python src/diagnostics/nodata_population.py"
+_MANIFEST_COMMAND = "python src/diagnostics/patch_manifest.py"
 
 
 def patch_key(path: Path | tuple) -> tuple[str, str]:
@@ -486,6 +493,89 @@ def filter_by_invalid_fraction(
     if n_unknown:
         logger.warning(
             f"{n_unknown} patches had no entry in {parquet.name} and were kept."
+        )
+    return kept
+
+
+def manifest_sha256(path: Path | None) -> str | None:
+    """SHA-256 of a manifest file, for the run config and the checkpoint.
+
+    Recording the path alone would not survive the file being rebuilt with
+    different thresholds, which is exactly the change a later reader would most
+    need to detect.
+    """
+    if path is None:
+        return None
+    import hashlib
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def filter_by_manifest(
+    items: list[PatchItem],
+    manifest: Path | None,
+) -> list[PatchItem]:
+    """Restrict *items* to the Task 2.0 common manifest.
+
+    The three in-scope families do not hold the same patches — on the training
+    split `tesserav1.1_global` is missing 9,422 that the other two have, and it
+    evaluates on 330 fewer test patches — so a cross-family table built on each
+    family's own coverage compares numbers computed on different data. The
+    manifest is the intersection that removes that confound.
+
+    Three outcomes per item, and the third is the one that needs care:
+
+    * in the manifest as a member — kept;
+    * in the manifest as a non-member — dropped, from training *and* evaluation,
+      since restricting only the training set would report accuracy on patches
+      the model was never allowed to learn from;
+    * **absent from the manifest entirely** — kept, with a warning. The manifest
+      covers the three So2Sat reference splits; unlabeled and pseudo-labelled
+      pools are outside its universe and dropping them would make this filter a
+      silent second coverage restriction. Same rule as
+      ``filter_by_invalid_fraction``.
+
+    ``manifest is None`` returns *items* itself, unchanged and in order. Task
+    2.1's anchor and every Arm B run depend on that being a provable no-op, not
+    merely an equal-valued one.
+    """
+    if manifest is None:
+        return items
+
+    manifest = Path(manifest)
+    if not manifest.exists():
+        logger.error(
+            f"--patch-manifest {manifest} does not exist. Write it with:\n"
+            f"    {_MANIFEST_COMMAND}"
+        )
+        raise SystemExit(1)
+
+    df = pd.read_parquet(manifest, columns=["dataset", "patch_id", "in_manifest"])
+    member = dict(zip(zip(df["dataset"].astype(str), df["patch_id"].astype(str)),
+                      df["in_manifest"].to_numpy()))
+
+    kept: list[PatchItem] = []
+    dropped: dict[str, int] = {}
+    n_unknown = 0
+    for it in items:
+        m = member.get(patch_key(it.path))
+        if m is None:
+            n_unknown += 1
+            kept.append(it)
+        elif m:
+            kept.append(it)
+        else:
+            dropped[it.split] = dropped.get(it.split, 0) + 1
+
+    n_dropped = sum(dropped.values())
+    detail = ", ".join(f"{s} {n}" for s, n in sorted(dropped.items())) or "none"
+    logger.info(
+        f"--patch-manifest {manifest.name}: dropped {n_dropped} of {len(items)} "
+        f"patches ({detail})"
+    )
+    if n_unknown:
+        logger.warning(
+            f"{n_unknown} patches were outside {manifest.name}'s universe and "
+            "were kept."
         )
     return kept
 

@@ -67,7 +67,7 @@ if str(_src) not in sys.path:
 
 from datasets.channel_stats import compute_channel_stats, stats_cache_path
 from datasets.registry import available_embeddings, get_nodata_predicate, provenance
-from datasets.so2sat import PatchDataModule, build_so2sat_items
+from datasets.so2sat import PatchDataModule, build_so2sat_items, manifest_sha256
 from models import build_model, resolve_arch
 from training import (
     LCZResNetModule,
@@ -176,6 +176,12 @@ def main() -> None:
                         "src/diagnostics/nodata_population.py (default: "
                         "diagnostics/invalid_fraction.parquet). Only read when "
                         "--max-invalid-frac < 1.")
+    g.add_argument("--patch-manifest", type=Path, default=None,
+                   help="Task 2.0 common manifest "
+                        "(src/diagnostics/patch_manifest.py): restricts train, "
+                        "val AND test to the patches every in-scope family "
+                        "holds, so a cross-family comparison runs on one "
+                        "population. Unset = each family's own native coverage.")
 
     # ── Training ──────────────────────────────────────────────────────────────
     g = add_training_args(parser, batch_size=64)
@@ -259,7 +265,9 @@ def main() -> None:
         max_invalid_frac=args.max_invalid_frac,
         embedding_names=args.embedding_name,
         invalid_frac_parquet=args.invalid_frac_parquet,
+        patch_manifest=args.patch_manifest,
     )
+    manifest_sha = manifest_sha256(args.patch_manifest)
     n_pseudo = 0
     if args.pseudo_gpkg is not None:
         from datasets.so2sat import (build_patch_index, build_pseudo_items,
@@ -434,6 +442,11 @@ def main() -> None:
         sub_patch_stride=args.sub_patch_stride,
         nodata_mode=args.nodata_mode,
         max_invalid_frac=args.max_invalid_frac,
+        # Which population the run used (Task 2.0). Arm A and Arm B are
+        # otherwise indistinguishable in W&B, and the hash catches a manifest
+        # rebuilt with different thresholds under the same filename.
+        patch_manifest=str(args.patch_manifest) if args.patch_manifest else None,
+        patch_manifest_sha256=manifest_sha,
         normalize=args.normalize,
         noise_sigma=args.noise_sigma,
         noise_prob=args.noise_prob,
@@ -494,10 +507,12 @@ def main() -> None:
                 # infer_roi can refuse a checkpoint pointed at another product.
                 **provenance(args.embedding_name),
                 "year": args.year,
-                # Which population the weights were fitted on (Task 1.75.1) —
-                # a filtered run and an unfiltered one are different experiments
-                # and their checkpoints are otherwise indistinguishable.
+                # Which population the weights were fitted on (Task 1.75.1 and
+                # Task 2.0) — a filtered run and an unfiltered one are different
+                # experiments and their checkpoints are otherwise
+                # indistinguishable.
                 "max_invalid_frac": args.max_invalid_frac,
+                "patch_manifest_sha256": manifest_sha,
             },
         )
     logger.info(f"Best checkpoint: {ckpt_path}")
