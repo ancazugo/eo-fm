@@ -1,9 +1,13 @@
 # RESULTS
 
-Running log of every result produced by `PLAN.md` (Phases 0–1) and `PLAN-V2.md`
-(Phase 1.5 onward). Diagnostics get a section per
+Running log of every result produced by `PLAN.md` (Phases 0–1), `PLAN-V2.md`
+(Phase 1.5) and `PLAN-V3.md` (Phase 1.75 onward). Diagnostics get a section per
 task; training runs get one table row each (phase, run name, W&B id, embedding,
 split, model, seed, OA, macro-F1, kappa, and the one factor that changed).
+
+From `PLAN-V3.md` onward the scope is three families only —
+`tesserav1.1_global`, `alpha_earth_coop`, `seamless`. Rows above that point may
+name others; see Task 1.75.0.
 
 ---
 
@@ -654,3 +658,310 @@ knowing before Task 2.5 tries to compare the two products.
 there is no path by which one run trained on one archive and evaluated on the
 other. The audit's job was labelling, not damage assessment, and nothing needs
 re-running.
+
+---
+
+## Phase 1.75 — Population characterization
+
+Branch `fix/p175-population`, cut from `fix/p15-provenance`. Plan of record:
+`PLAN-V3.md` §Phase 1.75.
+
+Housekeeping first: `PLAN-V2.md` and `PLAN-V3.md` are now tracked (`27b8411`),
+and the uncommitted exact-footprint change in `datasets/tiles.py` is committed
+(`a958a3f`) rather than reverted — see Task 1.75.1's truncation numbers for why.
+
+### Task 1.75.0 — Scope restriction in the registry
+
+`tessera`, `alpha_earth` and `tesserav1.1` are now `deprecated`; `tesserav2` is
+`pending` (extraction in progress, version comparison deferred). A new
+`available_embeddings()` excludes both statuses and feeds `choices=` on
+`patch_classification.py`, `semantic_segmentation.py`, `infer_roi.py` and
+`knn_baseline.py`, so an out-of-scope training run is an argparse error rather
+than a number:
+
+```
+$ python src/patch_classification.py --embedding-name tesserav1.1 ...
+error: argument --embedding-name: invalid choice: 'tesserav1.1'
+(choose from 'alpha_earth_coop', 'aux_struct', 'osm_evidence', 'seamless',
+ 'tesserav1.1_global')
+```
+
+Extraction, coverage-check and diagnostics scripts keep the full registry — the
+`tesserav2` extraction has to finish and the deferred comparison has to read
+every archive. No key was renamed and no entry removed, so every historical W&B
+run and every existing checkpoint still resolves; `is_comparable` and
+`check_checkpoint_provenance` continue to ignore `status` by design.
+
+### Task 1.75.1 — Nodata population on the full cultural split
+
+```bash
+python src/diagnostics/nodata_population.py --workers 8
+```
+
+**1,191,379 patch reads** — every patch of every split for all three families,
+no pairing and no sampling. Artefacts: `diagnostics/nodata_population.json`,
+`diagnostics/nodata_population.md`, `diagnostics/invalid_fraction.parquet`.
+
+One pass, not two: the post-resize masked statistics are provably independent of
+the fill value, because `_resize_valid` marks any output pixel whose
+interpolation touched an invalid input as invalid, so no filled value ever
+enters a masked sum. Verified before relying on it — filling with `0.0` and with
+an absurd `3.7` gives **bit-identical** masked means and stds.
+
+#### Coverage and invalid data per family and split
+
+| family | split | on disk | missing | invalid px | patches w/ any | p99 | max | truncated |
+|---|---|---|---|---|---|---|---|---|
+| `alpha_earth_coop` | training | 352,366 | 0 (0.00%) | 0.4006% | 0.46% | 0.0000% | 100.00% | 22 |
+| `alpha_earth_coop` | validation | 24,119 | 0 (0.00%) | 0.4433% | 0.46% | 0.0000% | 100.00% | 0 |
+| `alpha_earth_coop` | testing | 24,188 | 0 (0.00%) | **0.0000%** | 0.00% | 0.0000% | 0.00% | 0 |
+| `tesserav1.1_global` | training | 342,944 | **9,422 (2.67%)** | 0.1399% | 4.38% | 3.0303% | 77.82% | 560 |
+| `tesserav1.1_global` | validation | 23,878 | 241 (1.00%) | 0.1437% | 4.16% | 3.1142% | 8.22% | 0 |
+| `tesserav1.1_global` | testing | 23,858 | 330 (1.36%) | 0.1362% | 3.86% | 3.6332% | 5.80% | 17 |
+| `seamless` | training | 351,719 | 647 (0.18%) | 0.0000% | 0.00% | 0.0000% | 0.00% | 77 |
+| `seamless` | validation | 24,119 | 0 (0.00%) | 0.0000% | 0.00% | 0.0000% | 0.00% | 0 |
+| `seamless` | testing | 24,188 | 0 (0.00%) | 0.0000% | 0.00% | 0.0000% | 0.00% | 0 |
+
+**The three families have three different, non-overlapping failure modes**, and
+the pairing hid all of them:
+
+* `alpha_earth_coop` — complete on disk, but **bimodal** nodata. 99.54% of
+  training patches are pixel-perfect; the invalid data lives in 1,617 patches,
+  **1,277 of which are 75–100% invalid**. Spot-checked against the pipeline:
+  patches `000002`, `000012`, `000222` are 100% sentinel — labelled samples
+  carrying no data at all.
+* `tesserav1.1_global` — the least nodata but the **most missing data**: 9,422
+  training patches (2.67%) have no npy at all, and its nodata is diffuse
+  (4.38% of patches, mostly 1–5%) rather than catastrophic.
+* `seamless` — zero invalid pixels anywhere, 647 missing training patches.
+
+The parquet's per-patch fractions match `PatchDataset`'s own predicate exactly
+(`|Δ| < 1e-12` on a clean/mid/empty spread).
+
+#### Per-patch invalid-fraction histogram (training)
+
+| bucket | `alpha_earth_coop` | `tesserav1.1_global` | `seamless` |
+|---|---|---|---|
+| exactly 0 | 350,749 | 327,906 | 351,719 |
+| 0–0.1% | 3 | 24 | 0 |
+| 0.1–1% | 12 | 591 | 0 |
+| 1–5% | 27 | 12,881 | 0 |
+| 5–10% | 28 | 1,513 | 0 |
+| 10–25% | 63 | 13 | 0 |
+| 25–50% | 106 | 11 | 0 |
+| 50–75% | 101 | 4 | 0 |
+| 75–100% | **1,277** | 1 | 0 |
+
+#### The coverage-bias answer: yes, and it is city-level
+
+AlphaEarth nodata is not spread across the split — it is four coastal cities and
+one class. Every city not listed is exactly 0.0000%:
+
+| city | held out | coop invalid | coop >25% | tessera missing | tessera truncated |
+|---|---|---|---|---|---|
+| Cape Town | | **8.1781%** | 896 | 983 | 32 |
+| Lisbon | | 3.5652% | 45 | 71 | 0 |
+| **Mumbai** | **yes** | 2.2049% | 108 | 242 | 1 |
+| New York | | 1.5748% | 332 | 2,026 | 0 |
+| Amsterdam | | 0.2684% | 10 | 107 | 3 |
+| Hong Kong | | 0.2037% | 15 | 7 | 22 |
+| **Guangzhou** | **yes** | 0.1860% | 39 | 26 | 99 |
+| Qingdao | | 0.1429% | 14 | 542 | 17 |
+| London | | 0.1158% | 60 | 111 | 120 |
+| Istanbul | | 0.0000% | 0 | **2,617** | 29 |
+| Vancouver | | 0.0000% | 0 | 1,094 | 36 |
+| Melbourne | | 0.0084% | 4 | 914 | 53 |
+| **Sydney** | **yes** | 0.0000% | 0 | 329 | 16 |
+
+By class it is almost entirely **LCZ 17 (water) at 2.6772%** — 14× the next
+highest (LCZ 12 at 0.1866%) and 0.0000% for eight of the seventeen classes. The
+mechanism is coherent: coastal cities, water patches, no AlphaEarth coverage
+over open sea.
+
+**No city exceeds 25% mean invalid** (the worst, Cape Town, is 8.18%), and two
+held-out cities are affected — Mumbai (2.20%) and Guangzhou (0.19%).
+
+**But the split asymmetry matters more than the city concentration.** AlphaEarth
+invalid pixels are 0.4433% of validation and **0.0000% of testing** — not one
+invalid pixel in 24,188 test patches. Mumbai's coastal water fell entirely on
+the validation side of the within-city val/test halving. So the drop policy
+changes what the model trains on and what it is selected on, but cannot change
+the headline test metric by removing test patches.
+
+#### Recommended `--max-invalid-frac`: 0.25
+
+The distribution is bimodal, so the choice is insensitive — anything from 0.10
+to 0.50 drops within 200 patches of the same set (training split):
+
+| threshold | coop dropped | tessera dropped | seamless dropped |
+|---|---|---|---|
+| >5% | 1,575 | 1,542 | 0 |
+| >10% | 1,547 | 29 | 0 |
+| >25% | **1,484** | 16 | 0 |
+| >50% | 1,378 | 5 | 0 |
+
+End to end on the real 400,673-item global list, AlphaEarth:
+
+| threshold | total dropped | train | val | test |
+|---|---|---|---|---|
+| 0.50 | 1,486 | 1,378 | 108 | **0** |
+| **0.25** | **1,592** | 1,484 | 108 | **0** |
+| 0.10 | 1,656 | 1,547 | 109 | **0** |
+
+The test split loses nothing at any threshold, which follows from its 0.0000%
+invalid rate — the drop policy cannot flatter a test metric by removing hard
+patches from it.
+
+`0.25` is the recommendation: it drops 1,484 training patches (0.42%) that are
+more fill than data, keeps every patch with a usable majority, and costs Tessera
+only 16 and `seamless` nothing. `0.05` is rejected — it would drop 1,542 Tessera
+patches whose nodata is a diffuse 1–5%, which is a different phenomenon.
+
+Implemented as `--max-invalid-frac` (default `1.0`) on
+`patch_classification.py`, applied to training **and** evaluation in
+`build_so2sat_items`, reading the parquet keyed on `(dataset, patch_id)` — a
+missing parquet is an error naming the command that writes it, never a silent
+pass. Recorded in `run_cfg` and in the checkpoint beside the provenance fields.
+Task 2.2 runs the AlphaEarth arm both ways.
+
+#### Corrected channel statistics — full unfiltered training population
+
+Supersedes both the Phase 0 (paired, n=5000) and GATE 1 (n=20000) tables.
+
+| family | native unmasked | native masked | resized unmasked | resized masked | sentinel share of variance | `0.05 / median_std` |
+|---|---|---|---|---|---|---|
+| `alpha_earth_coop` | 0.1221 | 0.1050 | 0.1214 | **0.1048** | **26.07%** | **0.477** |
+| `tesserav1.1_global` | 1.1592 | 1.1597 | 1.1339 | **1.1344** | 0.00% | **0.044** |
+| `seamless` | 0.5610 | 0.5610 | 0.5446 | **0.5446** | 0.00% | **0.092** |
+
+The sentinel contributes **26.07%** of AlphaEarth's per-channel variance on the
+real population — close to GATE 1.5's paired-corrected 31.04%, and confirming
+that the paired sample understated it by roughly 1400×.
+
+**This supersedes `PLAN-V3.md`'s pre-registered revision of the effective noise
+ratio to ~0.57.** That figure applied a √0.69 signal-only correction to `0.1054`,
+but `0.1054` was already effectively a masked number — the paired sample it came
+from was almost sentinel-free — so the discount was applied twice. Measured
+directly against the masked std the model actually sees, the ratio is **0.477**,
+which is where Phase 0 had it. The cross-family spread is therefore
+**10.8×** (0.477 / 0.044), not 14×.
+
+### Task 1.75.2 — Crop geometry and the latitude question
+
+```bash
+python src/diagnostics/crop_geometry.py
+```
+
+Full training population (shapes from npy headers only, no pixel data read).
+Artefacts: `diagnostics/crop_geometry.{json,md,png}`.
+
+#### The degree-grid hypothesis is falsified
+
+| family | CRS of an actual tile |
+|---|---|
+| `tesserav1.1_global` | `EPSG:32630`, 10 m (`grid_-0.05_10.05.tiff`) |
+| `alpha_earth_coop` | `EPSG:32610`, 10 m (`x0dyfir8mjpv8ty4m-…tiff`) |
+
+Both are per-zone **projected UTM at exactly 10 m**, not EPSG:4326, so longitude
+pixel size does not vary as cos φ. The variation is reprojection distortion at
+clip time: `crop_patch` reprojects each lon/lat patch rectangle into the tile's
+UTM zone and clips to the **bounding box** of the resulting trapezoid.
+
+#### Correlations — strong per axis, weak in aggregate
+
+| family | h~lat | w~lat | h~\|lat\| | w~\|lat\| | h~merid. dist | w~merid. dist | **res_geo~\|lat\|** |
+|---|---|---|---|---|---|---|---|
+| `tesserav1.1_global` | +0.455 | −0.475 | +0.325 | −0.266 | +0.344 | +0.262 | **+0.199** |
+| `alpha_earth_coop` | +0.505 | −0.519 | +0.397 | −0.303 | +0.303 | +0.193 | **+0.228** |
+
+Height and width move in **opposite directions** with latitude, so neither axis
+alone answers the question. The scale-invariant summary is
+`res_geo = √(h·w)·10/32`, the ground sampling distance per output pixel:
+
+| \|lat\| band | tessera h | tessera w | **tessera res_geo** | coop h | coop w | **coop res_geo** |
+|---|---|---|---|---|---|---|
+| 0–15° | 33.33 | 33.15 | **10.387** | 33.00 | 33.00 | **10.312** |
+| 15–30° | 33.45 | 33.43 | **10.449** | 33.23 | 33.53 | **10.430** |
+| 30–40° | 33.39 | 33.72 | **10.485** | 33.36 | 33.75 | **10.484** |
+| 40–50° | 33.25 | 33.43 | **10.419** | 33.29 | 33.45 | **10.427** |
+| >50° | 34.83 | 33.05 | **10.603** | 34.69 | 33.01 | **10.573** |
+
+| family | mean res_geo | city-mean range res_geo |
+|---|---|---|
+| `tesserav1.1_global` | 10.482 m/px | 10.312–10.663 (**+3.4%**) |
+| `alpha_earth_coop` | 10.474 m/px | 10.312–10.633 (**+3.1%**) |
+
+**Verdict: a real but bounded effect.** Ground sampling distance rises
+monotonically-ish with latitude but only by **~2%** between the equatorial and
+>50° bands, and the full spread across all 51 cities is **3.1–3.4%**. Per-axis
+extent varies more (up to 7.9% on h), but the two axes compensate.
+
+It is a **city-level constant**, not within-city noise: per-city standard
+deviations are 0.00–0.70 px against city means separated by up to 1.7 px. So it
+is exactly the shape of covariate that could confound a cross-city domain-gap
+analysis — which is why Phase 4 should carry it — but at 3% it is far too small
+to be a meaningful component of the cross-city accuracy gap. A null worth
+having, not a finding that changes Phase 2.
+
+#### Truncation is the geometry problem that does matter
+
+| family | n | h range | w range | truncated (<0.85 × family median) |
+|---|---|---|---|---|
+| `tesserav1.1_global` | 339,285 | **2–36** | **2–36** | 484 (0.143%) |
+| `alpha_earth_coop` | 348,217 | 32–36 | 32–35 | 0 (0.000%) |
+
+Tessera crops go down to **2 px on a side**, stretched to 32×32 by the resize.
+These are the patches the bounding-box coverage test wrongly accepted; `a958a3f`
+fixes the test, but the extracted data predates it. 560 in training, 17 in
+testing, concentrated in London (120), Guangzhou (99), Melbourne (53) and
+Shanghai (50). Re-extraction is a separate decision, not taken here.
+
+### Verification
+
+| check | result |
+|---|---|
+| `pytest` | **285 passed, 1 skipped** (was 256/1 at GATE 1.5) |
+| deprecated key on a training CLI | argparse error listing only the 5 available keys |
+| deprecated key on the extraction CLI | still accepted — all 9 keys offered |
+| classification smoke (nano, 1 epoch, Nairobi) | exit 0, OA 0.8802 / κ 0.8411 |
+| segmentation smoke (nano, 1 epoch, Nairobi) | exit 0, through ROI inference and raster output |
+| checkpoint contents | `embedding_name`/`product`/`version`/`source`/`status`/`year`/**`max_invalid_frac`**, loads under `weights_only=True` |
+| provenance guard, wrong embedding | **refused**, exit 1, message naming both products |
+| `--max-invalid-frac 1.0` | returns the item list **object itself** — provable no-op |
+| filter order preservation | exact, on the real 400,673-item list |
+| parquet vs `PatchDataset` predicate | identical, \|Δ\| < 1e-12 |
+| full scan reproducibility | second run reproduces every figure exactly |
+| **GATE 1 regression** | md5 `7c2222b04ad830fe0c08eb4ee686df51` — **unchanged** |
+
+### Behaviour changes to be aware of
+
+- **Four embeddings are no longer selectable** on `patch_classification.py`,
+  `semantic_segmentation.py`, `infer_roi.py` and `knn_baseline.py`. Extraction
+  and diagnostics scripts are unaffected.
+- **`datasets.tiles` indexes exact footprints**, so `_fully_covered` is now
+  strict. A re-extraction would drop patches the previous one accepted; nothing
+  already on disk changed.
+- `--max-invalid-frac` defaults to `1.0` and is inert at that value, but it is
+  now recorded in every checkpoint and W&B config, so filtered and unfiltered
+  runs are distinguishable after the fact.
+
+### Open items for Phase 2 to decide
+
+1. **Whether Task 2.2 restricts to the common patch-id intersection.** The three
+   families do not currently train on the same patches: `tesserav1.1_global` is
+   missing 9,422 training patches that the other two have. Intersecting removes
+   the confound at the cost of ~2.7% of the data; not intersecting keeps each
+   family's full population but leaves a coverage difference in the comparison.
+   Not decided here.
+2. **Whether to re-extract Tessera** now that the coverage test is exact. It
+   would recover some of the 9,422 missing patches and drop the 560 truncated
+   ones, but it invalidates the direct comparison with every existing Tessera
+   number.
+3. **`datasets.so2sat.assign_cities` resolves the Guangzhou/Hong Kong box
+   overlap by first match**, where this audit used smallest-containing-box. The
+   527 affected patches are Hong Kong patches inside the Guangzhou box. Matters
+   for Phase 4's per-city normalization, not for anything before it.
+
+### GATE 1.75 status
+
+Reached. Phase 2 not started.
