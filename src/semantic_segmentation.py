@@ -56,7 +56,7 @@ if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
 from datasets.grid_tiles import GridSegDataModule, build_city_tile_items
-from datasets.registry import EMBEDDING_REGISTRY, provenance
+from datasets.registry import available_embeddings, provenance
 from models import build_model, resolve_arch
 from training import (
     LCZUNetModule,
@@ -156,8 +156,9 @@ def main() -> None:
     # ── Inference ─────────────────────────────────────────────────────────────
     g = add_inference_args(parser)
     g.add_argument("--embedding-name", required=True,
-                   choices=sorted(EMBEDDING_REGISTRY),
-                   help="Embedding registry key for infer_roi.")
+                   choices=available_embeddings(),
+                   help="Embedding registry key for infer_roi. Deprecated and "
+                        "pending entries are excluded (PLAN-v3).")
     g.add_argument("--patch-size", type=int, default=64,
                    help="Sliding-window patch size in pixels for inference (default: 64).")
 

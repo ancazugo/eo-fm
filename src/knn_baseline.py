@@ -79,7 +79,7 @@ _src = Path(__file__).parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from datasets.registry import EMBEDDING_REGISTRY
+from datasets.registry import available_embeddings
 from datasets.so2sat import build_so2sat_items
 from utils.constants import lcz_dict
 from utils.runtime import init_run, resolve_dequantize
@@ -494,8 +494,9 @@ def main() -> None:
     g.add_argument("--year", required=True, help="Year subfolder (e.g. 2017).")
     g.add_argument("--label-col", default="LCZ_class")
     g.add_argument("--embedding-name", required=True,
-                   choices=sorted(EMBEDDING_REGISTRY),
-                   help="Embedding type — controls auto-dequantization.")
+                   choices=available_embeddings(),
+                   help="Embedding type — controls auto-dequantization. "
+                        "Deprecated and pending entries are excluded (PLAN-v3).")
     g.add_argument("--dequantize", action="store_true",
                    help="Force dequantize (auto-applied for alpha_earth_coop and seamless).")
 

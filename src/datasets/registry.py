@@ -19,6 +19,12 @@ built on one and applied to the other. :func:`is_comparable` and
 :func:`check_checkpoint_provenance` are the guards; see RESULTS.md
 "Task 1.5.1 — Tessera product identity".
 
+``status`` additionally gates what the training and inference CLIs offer:
+``deprecated`` and ``pending`` entries keep their key, their paths and their
+run history but drop out of :func:`available_embeddings`. It is metadata about
+trust and scope, never about the data itself, which is why
+:func:`is_comparable` ignores it.
+
 Keys are never renamed. They appear in extraction paths on disk and in the W&B
 config of every historical run, so a rename orphans both.
 """
@@ -36,7 +42,12 @@ VERSIONS = {"v1", "v1.1", "v2", "coop", None}
 SOURCES = {
     "percity_geotessera", "global_0.1deg", "source_coop", "gee_zarr", "local_tif",
 }
-STATUSES = {"canonical", "supported", "deprecated", "untested"}
+STATUSES = {"canonical", "supported", "pending", "deprecated", "untested"}
+
+# Statuses that keep an entry out of the training and inference CLIs. The key,
+# its paths and its W&B history all stay — only the choice list shrinks. See
+# :func:`available_embeddings`.
+UNAVAILABLE_STATUSES = {"deprecated", "pending"}
 
 PROVENANCE_FIELDS = ("product", "version", "source", "status")
 
@@ -48,13 +59,12 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "product": "tessera",
         "version": "v1",
         "source": "gee_zarr",
-        # Untested against the CURRENT code, not never used: 42 W&B runs used
-        # this product (Task 1.5.4), but they predate the open_tile ordering bug
-        # (path.is_dir() tested before path.suffix == ".zarr", which misrouted
-        # every zarr tile to the Tessera NPY reader). Fixed in Task 1.0 and
-        # nothing has been re-run through it since, so it should not look
-        # available until someone exercises it.
-        "status": "untested",
+        # Out of scope from PLAN-v3 onward: superseded by tesserav1.1_global.
+        # 42 W&B runs used it (Task 1.5.4), but all of them predate the
+        # open_tile ordering bug fixed in Task 1.0 (path.is_dir() tested before
+        # path.suffix == ".zarr", misrouting every zarr tile to the Tessera NPY
+        # reader), so nothing has been through the current code either.
+        "status": "deprecated",
         # Zarr fast-path: tiles are named by center coords, 0.1° × 0.1° grid.
         # e.g. grid_0.15_52.05_2024.zarr → center (0.15, 52.05)
         "zarr_tile_size": 0.1,
@@ -69,9 +79,10 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "product": "alphaearth",
         "version": "v1",
         "source": "gee_zarr",
-        # Same open_tile ordering bug as `tessera`, same caveat: used
-        # historically, not verified against the fixed code.
-        "status": "untested",
+        # Out of scope from PLAN-v3 onward: superseded by alpha_earth_coop.
+        # Same open_tile ordering bug as `tessera`, same caveat — 60 historical
+        # runs, none of them through the current code.
+        "status": "deprecated",
         # Zarr fast-path: tiles are named by bottom-left corner, 0.1° × 0.1° grid.
         # e.g. gse_2.2_48.8_2021.zarr → bottom-left (2.2, 48.8)
         "zarr_tile_size": 0.1,
@@ -109,7 +120,10 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         # label, and a different feature basis (Task 1.5.1). 51 cities only:
         # 27,229 of the 352,366 cultural-split training patches.
         "source": "percity_geotessera",
-        "status": "supported",
+        # Out of scope from PLAN-v3 onward: a separate inference run with a
+        # rotated basis rather than a scale variant of the canonical archive,
+        # and it has never produced a cultural-split number (Task 1.5.4).
+        "status": "deprecated",
     },
     "tesserav1.1_global": {
         "in_channels": 128,
@@ -131,7 +145,10 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "product": "tessera",
         "version": "v2",
         "source": "global_0.1deg",
-        "status": "supported",         # 37% So2Sat coverage; version comparison only
+        # Deferred, not cancelled: extraction is still in progress (37% So2Sat
+        # coverage so far). The version comparison moved out of Phase 2 into
+        # PLAN-v3's deferred section and runs once extraction completes.
+        "status": "pending",
     },
     "osm_evidence": {
         "in_channels": 15,
@@ -242,6 +259,26 @@ def provenance(name: str | list[str] | tuple[str, ...]) -> dict:
             str(EMBEDDING_REGISTRY[n].get(field) or "none") for n in names
         )
     return out
+
+
+def available_embeddings() -> list[str]:
+    """Registry keys the training and inference CLIs offer, sorted.
+
+    Excludes ``deprecated`` and ``pending`` entries. PLAN-v3 restricts every
+    remaining experiment to ``tesserav1.1_global``, ``alpha_earth_coop`` and
+    ``seamless``, and a scope restriction that only lives in a document is one
+    stale shell script away from producing an out-of-scope number that looks
+    like an in-scope one.
+
+    Deliberately NOT applied to the extraction, coverage-check and diagnostics
+    scripts: the tesserav2 extraction is still running and the deferred version
+    comparison needs to read every archive. Those keep
+    ``sorted(EMBEDDING_REGISTRY)``.
+    """
+    return sorted(
+        k for k, m in EMBEDDING_REGISTRY.items()
+        if m.get("status") not in UNAVAILABLE_STATUSES
+    )
 
 
 def is_comparable(a: str, b: str) -> bool:

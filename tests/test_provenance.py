@@ -25,7 +25,9 @@ from datasets.registry import (  # noqa: E402
     PROVENANCE_FIELDS,
     SOURCES,
     STATUSES,
+    UNAVAILABLE_STATUSES,
     VERSIONS,
+    available_embeddings,
     check_checkpoint_provenance,
     is_comparable,
     provenance,
@@ -33,6 +35,11 @@ from datasets.registry import (  # noqa: E402
 
 TESSERA_V11 = "tesserav1.1"
 TESSERA_GLOBAL = "tesserav1.1_global"
+
+# PLAN-v3's scope restriction, as data: the only three families any experiment
+# from Phase 2 onward may use.
+IN_SCOPE = {TESSERA_GLOBAL, "alpha_earth_coop", "seamless"}
+OUT_OF_SCOPE = {"tessera", "alpha_earth", TESSERA_V11, "tesserav2"}
 
 
 # ── Schema ───────────────────────────────────────────────────────────────────
@@ -98,10 +105,51 @@ def test_comparability_ignores_status():
     meta = EMBEDDING_REGISTRY[TESSERA_V11]
     original = meta["status"]
     try:
-        meta["status"] = "deprecated"
+        meta["status"] = "canonical"
         assert is_comparable(TESSERA_V11, TESSERA_V11)
+        assert not is_comparable(TESSERA_V11, TESSERA_GLOBAL)
     finally:
         meta["status"] = original
+
+
+# ── Task 1.75.0: the PLAN-v3 scope restriction ───────────────────────────────
+
+def test_the_four_out_of_scope_families_are_marked_unavailable():
+    for name in OUT_OF_SCOPE:
+        assert EMBEDDING_REGISTRY[name]["status"] in UNAVAILABLE_STATUSES, name
+
+
+def test_tesserav2_is_pending_not_deprecated():
+    """Deferred, not cancelled — extraction is still running and the version
+    comparison runs once it completes."""
+    assert EMBEDDING_REGISTRY["tesserav2"]["status"] == "pending"
+
+
+def test_available_embeddings_offers_the_three_in_scope_families():
+    available = set(available_embeddings())
+    assert IN_SCOPE <= available
+    assert not (OUT_OF_SCOPE & available)
+
+
+def test_available_embeddings_is_sorted_and_a_subset_of_the_registry():
+    available = available_embeddings()
+    assert available == sorted(available)
+    assert set(available) <= set(EMBEDDING_REGISTRY)
+
+
+@pytest.mark.parametrize("name", sorted(OUT_OF_SCOPE))
+def test_a_deprecated_entry_keeps_its_key_and_its_provenance(name):
+    """Hiding an entry from the CLI must not orphan its history: the key still
+    resolves, so every W&B run and every checkpoint that names it stays readable."""
+    p = provenance(name)
+    assert p["embedding_name"] == name
+    assert p["product"] and p["source"]
+
+
+@pytest.mark.parametrize("name", sorted(OUT_OF_SCOPE))
+def test_deprecation_does_not_change_comparability(name):
+    """status is about trust and scope, never about the data."""
+    assert is_comparable(name, name)
 
 
 # ── Guard 2: checkpoint binding ──────────────────────────────────────────────

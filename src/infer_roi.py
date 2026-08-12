@@ -616,7 +616,7 @@ def infer_roi(
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
-    from datasets.registry import EMBEDDING_REGISTRY
+    from datasets.registry import available_embeddings
     from models import MODEL_REGISTRY
 
     p = argparse.ArgumentParser(
@@ -644,8 +644,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--num-classes", type=int, default=17,
                    help="Number of LCZ classes (must match training).")
     p.add_argument("--embedding-name", required=True,
-                   choices=sorted(EMBEDDING_REGISTRY),
-                   help="Embedding type key.")
+                   choices=available_embeddings(),
+                   help="Embedding type key. Deprecated and pending entries are "
+                        "excluded (PLAN-v3).")
     p.add_argument("--embedding-dir", required=True, type=Path,
                    help="Directory containing source tile files (.zarr or .tif).")
     p.add_argument("--year", default=None,

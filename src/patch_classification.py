@@ -66,7 +66,7 @@ if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
 from datasets.channel_stats import compute_channel_stats, stats_cache_path
-from datasets.registry import EMBEDDING_REGISTRY, get_nodata_predicate, provenance
+from datasets.registry import available_embeddings, get_nodata_predicate, provenance
 from datasets.so2sat import PatchDataModule, build_so2sat_items
 from models import build_model, resolve_arch
 from training import (
@@ -215,9 +215,10 @@ def main() -> None:
     # ── Inference ─────────────────────────────────────────────────────────────
     g = add_inference_args(parser)
     g.add_argument("--embedding-name", required=True, nargs="+",
-                   choices=sorted(EMBEDDING_REGISTRY),
+                   choices=available_embeddings(),
                    help="Embedding registry key(s), one per --output-name. "
-                        "Also used for infer_roi (single-embedding runs only).")
+                        "Also used for infer_roi (single-embedding runs only). "
+                        "Deprecated and pending entries are excluded (PLAN-v3).")
 
     args = parser.parse_args()
     resolve_overlap(args)
