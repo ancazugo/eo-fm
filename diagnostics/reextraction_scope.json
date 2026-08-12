@@ -1,6 +1,6 @@
 {
   "meta": {
-    "generated": "2026-08-12T14:42:25+00:00",
+    "generated": "2026-08-12T22:25:16+00:00",
     "family": "tesserav1.1_global",
     "year": "2017",
     "embedding_dir": "/tessera/v1.1",
@@ -24,20 +24,20 @@
       "absent": {
         "category": "absent",
         "n": 9422,
-        "n_recoverable": 223,
+        "n_recoverable": 191,
         "n_correctly_rejected": 9199,
-        "n_blocked_by_corrupt_tile": 0,
+        "n_blocked_by_corrupt_tile": 32,
         "n_no_tile_at_all": 9144,
-        "frac_recoverable": 0.02366801103799618
+        "frac_recoverable": 0.02027170452133305
       },
       "truncated": {
         "category": "truncated",
         "n": 560,
-        "n_recoverable": 302,
+        "n_recoverable": 294,
         "n_correctly_rejected": 258,
-        "n_blocked_by_corrupt_tile": 0,
+        "n_blocked_by_corrupt_tile": 8,
         "n_no_tile_at_all": 0,
-        "frac_recoverable": 0.5392857142857143
+        "frac_recoverable": 0.525
       }
     },
     "validation": {
@@ -103,20 +103,20 @@
     "absent": {
       "category": "absent (all splits)",
       "n": 9993,
-      "n_recoverable": 223,
+      "n_recoverable": 191,
       "n_correctly_rejected": 9770,
-      "n_blocked_by_corrupt_tile": 0,
+      "n_blocked_by_corrupt_tile": 32,
       "n_no_tile_at_all": 9704,
-      "frac_recoverable": 0.022315620934654258
+      "frac_recoverable": 0.019113379365555887
     },
     "truncated": {
       "category": "truncated (all splits)",
       "n": 577,
-      "n_recoverable": 302,
+      "n_recoverable": 294,
       "n_correctly_rejected": 275,
-      "n_blocked_by_corrupt_tile": 0,
+      "n_blocked_by_corrupt_tile": 8,
       "n_no_tile_at_all": 0,
-      "frac_recoverable": 0.5233968804159446
+      "frac_recoverable": 0.5095320623916811
     }
   },
   "by_city": [
@@ -125,12 +125,6 @@
       "n": 111,
       "recoverable": 111,
       "frac": 1.0
-    },
-    {
-      "city": "Shanghai",
-      "n": 358,
-      "recoverable": 32,
-      "frac": 0.0893854748603352
     },
     {
       "city": "Qingdao",
@@ -157,6 +151,12 @@
       "frac": 1.0
     },
     {
+      "city": "Istanbul",
+      "n": 2617,
+      "recoverable": 0,
+      "frac": 0.0
+    },
+    {
       "city": "Amsterdam",
       "n": 107,
       "recoverable": 0,
@@ -181,12 +181,6 @@
       "frac": 0.0
     },
     {
-      "city": "Istanbul",
-      "n": 2617,
-      "recoverable": 0,
-      "frac": 0.0
-    },
-    {
       "city": "New York",
       "n": 2026,
       "recoverable": 0,
@@ -195,6 +189,12 @@
     {
       "city": "Mumbai",
       "n": 242,
+      "recoverable": 0,
+      "frac": 0.0
+    },
+    {
+      "city": "Shanghai",
+      "n": 358,
       "recoverable": 0,
       "frac": 0.0
     },
@@ -231,12 +231,6 @@
       "frac": 1.0
     },
     {
-      "lcz": 2,
-      "n": 38,
-      "recoverable": 38,
-      "frac": 1.0
-    },
-    {
       "lcz": 4,
       "n": 33,
       "recoverable": 33,
@@ -255,16 +249,22 @@
       "frac": 1.0
     },
     {
+      "lcz": 17,
+      "n": 9690,
+      "recoverable": 9,
+      "frac": 0.0009287925696594427
+    },
+    {
       "lcz": 12,
       "n": 9,
       "recoverable": 9,
       "frac": 1.0
     },
     {
-      "lcz": 17,
-      "n": 9690,
-      "recoverable": 9,
-      "frac": 0.0009287925696594427
+      "lcz": 2,
+      "n": 38,
+      "recoverable": 6,
+      "frac": 0.15789473684210525
     },
     {
       "lcz": 16,

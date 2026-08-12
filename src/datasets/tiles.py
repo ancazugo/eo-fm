@@ -22,6 +22,31 @@ from shapely.strtree import STRtree
 TESSERA_GRID_RE = re.compile(r"grid_(?P<lon>-?[\d.]+)_(?P<lat>-?[\d.]+)$")
 
 
+def tile_index_name(path: Path) -> str:
+    """The tile name for an entry returned by :func:`build_tile_index`.
+
+    `Path.stem` is the obvious choice and is wrong here. Tessera names a tile
+    after a fractional coordinate — ``grid_121.35_31.25`` — and
+    `build_tile_index` returns the NPY *directory* for the global archive, so
+    `Path` reads the trailing ``.25`` as a suffix and `stem` silently returns
+    ``grid_121.35_31``. All 8,108 v1.1 global tiles are affected. The truncated
+    latitude usually still yields the right UTM zone, because the zone is set by
+    longitude, but it flips the hemisphere for the six tiles whose latitude lies
+    in (-1, 0) — ``grid_-46.15_-0.95`` becomes ``grid_-46.15_-0`` and
+    ``float("-0") >= 0`` is True — and it can never match a tile referenced by
+    its full name.
+
+    Handles both index layouts: a directory (v1.1 global, v2) and a file whose
+    parent is the tile directory (``.npy``) or which is itself the tile
+    (geoinfo ``.tiff``).
+    """
+    if path.is_dir():
+        return path.name
+    if path.suffix == ".npy":
+        return path.parent.name
+    return path.stem
+
+
 @functools.lru_cache(maxsize=None)
 def tessera_grid_geometry(tile_name: str):
     """CRS + affine transform of a tessera 0.1° tile, derived from its name.

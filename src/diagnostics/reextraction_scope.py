@@ -71,9 +71,13 @@ def classify_patches(
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from extract_so2sat_embeddings import _fully_covered
 
-    from datasets.tiles import tessera_grid_geometry
+    from datasets.tiles import tessera_grid_geometry, tile_index_name
 
-    names = [p.parent.name if p.suffix == ".npy" else p.stem for p in tile_paths]
+    # Not p.stem: build_tile_index returns the NPY *directory* and Path reads the
+    # fractional latitude's ".25" as a suffix, so stem returns grid_121.35_31 and
+    # the CORRUPT_TILES membership test below could never match. See
+    # tiles.tile_index_name.
+    names = [tile_index_name(p) for p in tile_paths]
 
     rows = []
     for row in tqdm(gdf.itertuples(index=False), total=len(gdf), unit="patch",

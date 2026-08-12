@@ -127,3 +127,59 @@ def test_distortion_grows_with_latitude():
     assert over_claim(EQUATORIAL_TILE) < 0.01
     assert over_claim(POLAR_TILE) > 0.05
     assert over_claim(POLAR_TILE) > 10 * over_claim(EQUATORIAL_TILE)
+
+
+# ── tile_index_name ──────────────────────────────────────────────────────────
+#
+# build_tile_index returns the NPY *directory* for tesserav1.1_global, and
+# Tessera names a tile after a fractional coordinate. Path therefore reads the
+# trailing ".25" as a suffix, so `stem` truncates the latitude. All 8,108 v1.1
+# global tiles are affected. It usually still yields the right UTM zone (set by
+# longitude) but it flips the hemisphere just below the equator, and it can
+# never match a tile referenced by its full name — which is how the corrupt-tile
+# check in Task 2.0d silently measured nothing.
+
+
+def test_stem_truncates_a_fractional_tile_name(tmp_path):
+    """The precondition. If this ever fails, Path changed and the helper can go."""
+    d = tmp_path / "grid_121.35_31.25"
+    d.mkdir()
+    assert d.stem == "grid_121.35_31"
+    assert d.suffix == ".25"
+
+
+def test_tile_index_name_keeps_the_full_name_for_a_tile_directory(tmp_path):
+    from datasets.tiles import tile_index_name
+
+    d = tmp_path / "grid_121.35_31.25"
+    d.mkdir()
+    assert tile_index_name(d) == "grid_121.35_31.25"
+
+
+def test_tile_index_name_handles_the_npy_and_geoinfo_layouts(tmp_path):
+    from datasets.tiles import tile_index_name
+
+    d = tmp_path / "grid_121.35_31.25"
+    d.mkdir()
+    npy = d / "grid_121.35_31.25.npy"
+    npy.touch()
+    assert tile_index_name(npy) == "grid_121.35_31.25"
+
+    tiff = tmp_path / "grid_0.15_52.05.tiff"
+    tiff.touch()
+    assert tile_index_name(tiff) == "grid_0.15_52.05"
+
+
+def test_the_truncated_name_flips_the_hemisphere_just_below_the_equator(tmp_path):
+    """The case that makes this a correctness bug and not just cosmetics:
+    float("-0") >= 0 is True, so a southern tile is handed a northern EPSG."""
+    from datasets.tiles import tessera_grid_geometry, tile_index_name
+
+    d = tmp_path / "grid_-46.15_-0.95"
+    d.mkdir()
+
+    truncated = tessera_grid_geometry(d.stem)[0].to_epsg()
+    correct = tessera_grid_geometry(tile_index_name(d))[0].to_epsg()
+
+    assert truncated == 32623        # northern hemisphere, wrong
+    assert correct == 32723          # southern hemisphere, right

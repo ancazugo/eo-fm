@@ -1,0 +1,164 @@
+{
+  "meta": {
+    "generated": "2026-08-12T22:21:56+00:00",
+    "family": "tesserav1.1_global",
+    "year": "2017",
+    "embedding_dir": "/tessera/v1.1",
+    "n_reference": 400673,
+    "n_on_disk": 390680,
+    "n_tiles_indexed": 8108,
+    "expected_native_area": 1122.0,
+    "denominator_split": "training",
+    "min_native_frac": 0.5,
+    "per_side_thresholds": {
+      "training": {
+        "min_h": 28.05,
+        "min_w": 28.05
+      },
+      "validation": {
+        "min_h": 28.05,
+        "min_w": 28.05
+      },
+      "testing": {
+        "min_h": 28.05,
+        "min_w": 28.05
+      }
+    },
+    "n_patches": 400673,
+    "n_city_assigned": 396449,
+    "n_ambiguous_city_matches": 527,
+    "n_cities": 51
+  },
+  "ratios": {
+    "per_side": {
+      "all": {
+        "n": 390680,
+        "n_truncated": 577,
+        "frac_truncated": 0.0014769120507832497
+      },
+      "single_tile": {
+        "n": 353386,
+        "n_truncated": 272,
+        "frac_truncated": 0.0007696965923947185
+      },
+      "multi_tile": {
+        "n": 37294,
+        "n_truncated": 305,
+        "frac_truncated": 0.008178259237410843
+      },
+      "multi_tile_same_zone": {
+        "n": 36534,
+        "n_truncated": 9,
+        "frac_truncated": 0.0002463458696009197
+      },
+      "zone_straddling": {
+        "n": 760,
+        "n_truncated": 296,
+        "frac_truncated": 0.3894736842105263
+      },
+      "frac_of_truncated_that_straddle": 0.512998266897747,
+      "frac_of_truncated_that_are_multi_tile": 0.5285961871750433
+    },
+    "native_frac": {
+      "all": {
+        "n": 390680,
+        "n_truncated": 320,
+        "frac_truncated": 0.0008190846728780588
+      },
+      "single_tile": {
+        "n": 353386,
+        "n_truncated": 149,
+        "frac_truncated": 0.00042163526568681273
+      },
+      "multi_tile": {
+        "n": 37294,
+        "n_truncated": 171,
+        "frac_truncated": 0.004585187965892637
+      },
+      "multi_tile_same_zone": {
+        "n": 36534,
+        "n_truncated": 3,
+        "frac_truncated": 8.211528986697323e-05
+      },
+      "zone_straddling": {
+        "n": 760,
+        "n_truncated": 168,
+        "frac_truncated": 0.22105263157894736
+      },
+      "frac_of_truncated_that_straddle": 0.525,
+      "frac_of_truncated_that_are_multi_tile": 0.534375
+    }
+  },
+  "by_split": {
+    "training": {
+      "n": 760,
+      "n_truncated": 168,
+      "frac_truncated": 0.22105263157894736
+    },
+    "validation": {
+      "n": 0,
+      "n_truncated": 0,
+      "frac_truncated": 0.0
+    },
+    "testing": {
+      "n": 0,
+      "n_truncated": 0,
+      "frac_truncated": 0.0
+    }
+  },
+  "by_city": [
+    {
+      "city": "London",
+      "straddling": 271,
+      "truncated": 75,
+      "frac": 0.2767527675276753
+    },
+    {
+      "city": "Guangzhou",
+      "straddling": 139,
+      "truncated": 24,
+      "frac": 0.17266187050359713
+    },
+    {
+      "city": "Hong Kong",
+      "straddling": 68,
+      "truncated": 16,
+      "frac": 0.23529411764705882
+    },
+    {
+      "city": "Qingdao",
+      "straddling": 49,
+      "truncated": 11,
+      "frac": 0.22448979591836735
+    },
+    {
+      "city": "Wuhan",
+      "straddling": 20,
+      "truncated": 1,
+      "frac": 0.05
+    }
+  ],
+  "multi_tile_only": {
+    "n": 3,
+    "by_city": {
+      "Shanghai": 3
+    },
+    "by_split": {
+      "training": 3
+    },
+    "shapes": [
+      "7x33"
+    ],
+    "n_tiles_values": {
+      "2": 3
+    },
+    "native_frac_median": 0.20588235294117646,
+    "lat_range": null
+  },
+  "absent": {
+    "n": 9993,
+    "n_straddling": 3,
+    "n_no_tile": 9770
+  },
+  "verdict": "**Straddling a zone truncates a minority of crops** \u2014 22.1% against a 0.04% baseline for single-tile patches. Elevated by orders of magnitude but not deterministic, so a further trigger selects which straddling patches fail; identifying it is the Phase 4 prerequisite."
+}
