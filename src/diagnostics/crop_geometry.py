@@ -304,6 +304,13 @@ def markdown_report(payload: dict) -> str:
         "failure is not the drift being measured and a handful of 12 px crops "
         "would dominate a rank correlation.",
         "",
+        "**`n` counts only patches that fall inside one of the 51 city boxes**, "
+        "because everything below is grouped by city. Truncated crops outside "
+        "every box are therefore missing from this table — all 22 of "
+        "`alpha_earth_coop`'s truncated training patches are such, which is why "
+        "its count reads 0 here against 22 in `nodata_population.md`. That table "
+        "is the one to trust for coverage totals; this one for geometry.",
+        "",
         "#### Spearman correlations",
         "",
         "| family | h~lat | w~lat | h~\\|lat\\| | w~\\|lat\\| | h~merid. dist | "

@@ -1,9 +1,11 @@
 # RESULTS
 
 Running log of every result produced by `PLAN.md` (Phases 0–1), `PLAN-V2.md`
-(Phase 1.5) and `PLAN-V3.md` (Phase 1.75 onward). Diagnostics get a section per
-task; training runs get one table row each (phase, run name, W&B id, embedding,
-split, model, seed, OA, macro-F1, kappa, and the one factor that changed).
+(Phase 1.5), `PLAN-V3.md` (Phase 1.75 onward) and `PLAN-v3-phase2-revA.md`,
+which replaces `PLAN-V3.md`'s Phase 2 section in full. Diagnostics get a section
+per task; training runs get one table row each (phase, run name, W&B id,
+embedding, split, model, seed, OA, macro-F1, kappa, and the one factor that
+changed).
 
 From `PLAN-V3.md` onward the scope is three families only —
 `tesserav1.1_global`, `alpha_earth_coop`, `seamless`. Rows above that point may
@@ -947,16 +949,14 @@ Shanghai (50). Re-extraction is a separate decision, not taken here.
 
 ### Open items for Phase 2 to decide
 
-1. **Whether Task 2.2 restricts to the common patch-id intersection.** The three
-   families do not currently train on the same patches: `tesserav1.1_global` is
-   missing 9,422 training patches that the other two have. Intersecting removes
-   the confound at the cost of ~2.7% of the data; not intersecting keeps each
-   family's full population but leaves a coverage difference in the comparison.
-   Not decided here.
-2. **Whether to re-extract Tessera** now that the coverage test is exact. It
-   would recover some of the 9,422 missing patches and drop the 560 truncated
-   ones, but it invalidates the direct comparison with every existing Tessera
-   number.
+1. ~~**Whether Task 2.2 restricts to the common patch-id intersection.**~~
+   **Settled by Rev A: both.** Arm A runs the manifest intersection (headline,
+   the only arm cross-family claims may be drawn from), Arm B each family's
+   native coverage, and the A−B difference is itself a deliverable. See Task 2.0.
+2. ~~**Whether to re-extract Tessera.**~~ **Deferred to GATE 3 by Rev A, and
+   Task 2.0d now measures what it would buy: 223 of 9,422 absent training
+   patches, and zero of the 571 absent validation and test patches.** See Task
+   2.0d.
 3. **`datasets.so2sat.assign_cities` resolves the Guangzhou/Hong Kong box
    overlap by first match**, where this audit used smallest-containing-box. The
    527 affected patches are Hong Kong patches inside the Guangzhou box. Matters
@@ -965,3 +965,208 @@ Shanghai (50). Re-extraction is a separate decision, not taken here.
 ### GATE 1.75 status
 
 Reached. Phase 2 not started.
+
+---
+
+## Phase 2 — Revalidation (`PLAN-v3-phase2-revA.md`)
+
+Branch `exp/p2-revalidation`, cut from `master` after Phases 1, 1.5 and 1.75 were
+merged (`30092a6`). No changes to model or training logic in this phase.
+
+### Pre-registration
+
+Committed before any Phase 2 run launched, verbatim from Rev A:
+
+- `tesserav1.1_global` moves less than 1 point either way from the Phase 1 fixes.
+- `alpha_earth_coop` improves most, and largely via the noise-ratio change
+  (0.477 → 0.05).
+- `seamless` improves modestly.
+- B − A ≈ 0; D − B carries the effect.
+- **Nodata masking: near-null on the test metric by construction.** GATE 1.5's
+  "matters more than we thought" is withdrawn — it rested on a population that
+  includes no test patches. Any effect arrives through training and selection,
+  and should be under a point.
+- Resize mode near-neutral for the 10 m families.
+- Arm A versus Arm B: within noise for AlphaEarth and seamless; genuinely
+  uncertain for Tessera, since its extra native patches are disproportionately
+  the hard tile-edge cases.
+- The AlphaEarth–Tessera gap closes by 1–6 of its 9 points; ranking flip
+  genuinely uncertain.
+- If AlphaEarth does not improve at all, the noise was never the binding
+  constraint and the gap needs a different explanation — most likely that 64-d
+  annual composites carry less LCZ-relevant structure than 128-d time-series
+  representations.
+
+### Task 2.0 — Common manifest and coverage control
+
+Full artefacts: `diagnostics/patch_manifest.md` /
+`diagnostics/patch_manifest_v1.json`, `diagnostics/reextraction_scope.md`.
+
+**The manifest.** `diagnostics/patch_manifest_v1.parquet`, sha256
+`ad7fdae39ae75b77d0b9c477fdf051aaf12ce9894615b05c74b39399f37ca728`. One row per
+reference patch (400,673), membership requiring — for **all three** families —
+present on disk, `invalid_frac <= 0.25`, `native_frac >= 0.5`. Non-members are
+kept in the table with `in_manifest = False`, so the loader can tell "excluded"
+from "outside the manifest's universe".
+
+| split | reference | manifest | retained |
+|---|---|---|---|
+| training | 352,366 | 341,754 | 96.99% |
+| validation | 24,119 | 23,878 | 99.00% |
+| testing | 24,188 | 23,852 | 98.61% |
+
+#### 2.0a — The native-fraction filter is relative, and it found a third tail
+
+`native_frac = (h·w) / expected_native_area[family]`, the denominator being each
+family's own median native crop area on the training split. An absolute pixel
+threshold would erase `seamless`, which is 30 m data.
+
+| family | expected native area | median shape | area min | below `native_frac` 0.5 (train) | below 0.85-per-side (train) |
+|---|---|---|---|---|---|
+| `alpha_earth_coop` | 1122 | 33×33 | 99 | 20 | 22 |
+| `tesserav1.1_global` | 1122 | 33×33 | 12 | 314 | 560 |
+| `seamless` | 144 | 12×12 | 33 | 30 | 77 |
+
+Two things Phase 1.75 did not have:
+
+- **`seamless` has its own truncated tail** — 77 training patches under the
+  per-side rule, 30 under `native_frac`, smallest 3×11. It was never checked
+  because `crop_geometry.py` covered only the two 10 m families.
+- **`alpha_earth_coop` has 22 truncated training patches**, which
+  `crop_geometry.md` reports as 0. That table drops patches with no city
+  assignment and all 22 sit outside every city box. `nodata_population.md`'s
+  headline table had it right.
+
+The two rules disagree by design: `native_frac >= 0.5` keeps a 33×17 crop that
+the per-side rule calls truncated, so the area rule is the more permissive of the
+two. Both counts are reported so the gap is visible rather than implicit.
+
+#### 2.0b — What the manifest costs each family
+
+| split | family | on disk | own filtered | manifest | loss vs own |
+|---|---|---|---|---|---|
+| training | `alpha_earth_coop` | 352,366 | 350,862 | 341,754 | 2.60% |
+| training | `tesserav1.1_global` | 342,944 | 342,614 | 341,754 | 0.25% |
+| training | `seamless` | 351,719 | 351,689 | 341,754 | 2.82% |
+| testing | `alpha_earth_coop` | 24,188 | 24,188 | 23,852 | 1.39% |
+| testing | `tesserav1.1_global` | 23,858 | 23,852 | 23,852 | 0.00% |
+| testing | `seamless` | 24,188 | 24,188 | 23,852 | 1.39% |
+
+Tessera gives up almost nothing because it is the binding constraint; the other
+two pay for matching it.
+
+#### 2.0c — The intersection and the nodata policy are the same filter
+
+**All 1,277** of AlphaEarth's >75%-invalid training patches are *also* absent
+from Tessera, against a 2.67% base rate of Tessera absence — and **none** are
+absent from `seamless`. The same holds on validation (105 of 105). After a
+coverage-only intersection, just **178** high-invalid training patches remain for
+`--max-invalid-frac` to remove, and **zero** on validation and testing.
+
+So Arm A's coverage restriction has already applied the drop policy. The two
+levers cannot be reasoned about as independent, and Rev A's instruction to report
+this rather than discover it later is the reason it is stated here.
+
+**Both failure modes are one phenomenon: water.** AlphaEarth's sentinel sits over
+ocean; Tessera has no tile over ocean.
+
+| split | class losing >5% | loss | cities losing >5% |
+|---|---|---|---|
+| training | LCZ 17 | 18.88% | Istanbul 12.89, Qingdao 12.62, New York 9.95, Cape Town 8.97, Lisbon 5.64, Shanghai 5.19 |
+| validation | LCZ 17 | 9.24% | **Mumbai** 9.99 |
+| testing | LCZ 17 | 13.23% | **Sydney** 13.85 |
+
+No other class loses more than 2.1%. LCZ 17 is 87.8% of all excluded training
+patches and its training share falls 14.01% → 11.72% (−2.29 pp); every other
+class gains at most +0.32 pp.
+
+**The entire Tessera evaluation-coverage hole is LCZ 17** — 330 of 330 absent
+test patches and 241 of 241 absent validation patches, concentrated in two
+held-out cities. This is the finding that most affects Task 2.2: Arm A's headline
+test set is common by construction, but it is *not* the same test set the 0.6190
+anchor was computed on. Per the decision taken at planning, every Arm A
+checkpoint will therefore be evaluated **twice** — on the common manifest test
+set (headline, cross-family comparable) and on each family's full native test set
+(anchor-comparable) — so the size of that shift is measured rather than assumed.
+
+Attribution of the 10,612 training exclusions: `tesserav1.1_global` absent 9,422
+/ failed 330; `alpha_earth_coop` absent 0 / failed 1,504; `seamless` absent 647 /
+failed 30.
+
+#### 2.0d — Re-extraction scoping (measure only, nothing re-extracted)
+
+The fixed `_fully_covered` (a958a3f) replayed over the 9,993 absent and 577
+truncated patches against 8,108 exact tile footprints.
+
+| split | absent | would recover | correctly rejected | no tile at all |
+|---|---|---|---|---|
+| training | 9,422 | 223 (2.4%) | 9,199 | 9,144 |
+| validation | 241 | 0 (0.0%) | 241 | 241 |
+| testing | 330 | 0 (0.0%) | 330 | 319 |
+
+**The evaluation-coverage hole is permanent.** Sydney's 329 missing test patches
+and Mumbai's 241 missing validation patches are ground Tessera does not cover, so
+re-extraction cannot restore test-split comparability. The 223 recoverable
+training patches are ordinary urban classes in London (111), Shanghai (32),
+Qingdao (26) and Guangzhou (22) — of the 9,690 absent LCZ 17 patches, 9 are
+recoverable.
+
+Truncation splits in two, and the second half is not what it looks like. 258 of
+560 truncated training patches are now correctly rejected (and 17 of 17 on test).
+The remaining **302 are still accepted, and the coverage test is right about
+them**: 294 (97.4%) straddle a UTM zone boundary and all 302 span multiple tiles.
+The ground is covered; the truncation happens downstream in `crop_patch`'s
+multi-tile mosaic — the known multi-UTM-zone defect, not anything the footprint
+fix touches. Their shapes show it (full extent on one axis, 5–8 px on the other)
+and their cities are the seams: London, Guangzhou, Hong Kong (114°E), Qingdao and
+Shanghai (120°E). **A re-extraction on today's code would reproduce those 302
+rather than remove them.**
+
+### Verification
+
+| check | result |
+|---|---|
+| `pytest` | **303 passed, 1 skipped** (285 + 18 new manifest tests) |
+| `--patch-manifest` unset | returns the item-list **object itself** on the real 400,673-item list |
+| manifest filtering | 341,754 / 23,878 / 23,852 kept, matching the parquet exactly; order preserved |
+| manifest reproducibility | second run byte-identical, sha256 `ad7fdae3…` unchanged |
+| independent recomputation | 389,484 members, **set-identical** to the manifest |
+| flag attribution | every non-member has a failing family; every member passes all three |
+| smoke (`--preset nano`, Nairobi, manifest) | exit 0; drops 0 patches, as the audit predicts for Nairobi |
+| checkpoint | carries `patch_manifest_sha256` beside the five provenance fields and `max_invalid_frac`; loads under `weights_only=True` |
+| 2.0d wrote nothing | Tessera extraction dir 342,944 files before and after |
+| **GATE 1 regression** | md5 `7c2222b04ad830fe0c08eb4ee686df51` — **unchanged** |
+
+### Behaviour changes to be aware of
+
+- **`--patch-manifest` is new and unset by default.** Unset reproduces current
+  behaviour exactly (native per-family coverage); `filter_by_manifest(items,
+  None)` returns the input object, which is what makes Task 2.1's anchor and
+  every Arm B run provably unfiltered.
+- The manifest applies to **train, val and test alike**. Restricting only
+  training would report accuracy on patches the model was never allowed to learn
+  from.
+- Patches outside the manifest's universe (unlabeled and pseudo-label pools) are
+  **kept with a warning**, matching `--max-invalid-frac`'s rule, so the filter
+  never becomes a silent second coverage restriction.
+- `run_cfg` and the checkpoint gain `patch_manifest` and
+  `patch_manifest_sha256`, so Arm A and Arm B are distinguishable in W&B and a
+  manifest rebuilt with different thresholds under the same filename is caught.
+
+### Open items
+
+1. **The multi-UTM-zone `crop_patch` defect** is now quantified on
+   `tesserav1.1_global`: 302 training patches truncated at a zone seam, plus
+   whatever it costs the other families (unmeasured). It is out of Phase 2 scope
+   — no training or model logic changes here — but it belongs in the GATE 3
+   re-extraction decision, since re-extracting without fixing it reproduces the
+   same 302.
+2. **Whether Arm B should use `--max-invalid-frac 0.25 --min-native-frac 0.5`
+   per family as Rev A specifies** is already settled; noted only because 2.0c
+   shows the nodata criterion does independent work on just 178 training patches
+   once coverage is held common, so Arm A's two criteria are nearly the same
+   filter while Arm B's are not.
+
+### GATE 2.0 status
+
+Reached. Tasks 2.1–2.5 not started.

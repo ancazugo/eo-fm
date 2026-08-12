@@ -1,6 +1,6 @@
 ### Task 1.75.2 — Crop geometry and the latitude question
 
-Native crop shapes from npy headers only (no pixel data read), full training population from invalid_fraction.parquet. Generated 2026-08-12T01:17:10+00:00.
+Native crop shapes from npy headers only (no pixel data read), full training population from invalid_fraction.parquet. Generated 2026-08-12T14:52:09+00:00.
 
 #### Tile CRS — the degree-grid hypothesis, checked rather than inferred
 
@@ -17,6 +17,8 @@ Native crop shapes from npy headers only (no pixel data read), full training pop
 | `alpha_earth_coop` | 348,217 | 32-36 | 32-35 | 33x34 (120,984), 34x33 (91,767), 33x33 (58,667), 35x33 (43,868) | 0 (0.000%) |
 
 `truncated` = below 0.85 x the family's own median native size; excluded from the correlations below, since a coverage failure is not the drift being measured and a handful of 12 px crops would dominate a rank correlation.
+
+**`n` counts only patches that fall inside one of the 51 city boxes**, because everything below is grouped by city. Truncated crops outside every box are therefore missing from this table — all 22 of `alpha_earth_coop`'s truncated training patches are such, which is why its count reads 0 here against 22 in `nodata_population.md`. That table is the one to trust for coverage totals; this one for geometry.
 
 #### Spearman correlations
 
