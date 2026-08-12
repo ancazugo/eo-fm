@@ -1,0 +1,276 @@
+{
+  "meta": {
+    "generated": "2026-08-12T14:42:25+00:00",
+    "family": "tesserav1.1_global",
+    "year": "2017",
+    "embedding_dir": "/tessera/v1.1",
+    "n_tiles": 8108,
+    "n_target": 10570,
+    "corrupt_tiles": [
+      "grid_121.35_31.25"
+    ],
+    "truncated_per_split": {
+      "training": 560,
+      "validation": 0,
+      "testing": 17
+    },
+    "n_patches": 400673,
+    "n_city_assigned": 396449,
+    "n_ambiguous_city_matches": 527,
+    "n_cities": 51
+  },
+  "by_split": {
+    "training": {
+      "absent": {
+        "category": "absent",
+        "n": 9422,
+        "n_recoverable": 223,
+        "n_correctly_rejected": 9199,
+        "n_blocked_by_corrupt_tile": 0,
+        "n_no_tile_at_all": 9144,
+        "frac_recoverable": 0.02366801103799618
+      },
+      "truncated": {
+        "category": "truncated",
+        "n": 560,
+        "n_recoverable": 302,
+        "n_correctly_rejected": 258,
+        "n_blocked_by_corrupt_tile": 0,
+        "n_no_tile_at_all": 0,
+        "frac_recoverable": 0.5392857142857143
+      }
+    },
+    "validation": {
+      "absent": {
+        "category": "absent",
+        "n": 241,
+        "n_recoverable": 0,
+        "n_correctly_rejected": 241,
+        "n_blocked_by_corrupt_tile": 0,
+        "n_no_tile_at_all": 241,
+        "frac_recoverable": 0.0
+      }
+    },
+    "testing": {
+      "absent": {
+        "category": "absent",
+        "n": 330,
+        "n_recoverable": 0,
+        "n_correctly_rejected": 330,
+        "n_blocked_by_corrupt_tile": 0,
+        "n_no_tile_at_all": 319,
+        "frac_recoverable": 0.0
+      },
+      "truncated": {
+        "category": "truncated",
+        "n": 17,
+        "n_recoverable": 0,
+        "n_correctly_rejected": 17,
+        "n_blocked_by_corrupt_tile": 0,
+        "n_no_tile_at_all": 0,
+        "frac_recoverable": 0.0
+      }
+    }
+  },
+  "truncation_check": {
+    "training": {
+      "n": 560,
+      "n_rejected": 258,
+      "n_still_accepted": 302,
+      "frac_rejected": 0.4607142857142857
+    },
+    "testing": {
+      "n": 17,
+      "n_rejected": 17,
+      "n_still_accepted": 0,
+      "frac_rejected": 1.0
+    }
+  },
+  "still_accepted_cause": {
+    "n": 302,
+    "multi_utm_zone": 294,
+    "multi_tile": 302,
+    "by_city": {
+      "London": 118,
+      "Guangzhou": 65,
+      "Hong Kong": 22,
+      "Qingdao": 17,
+      "Shanghai": 8,
+      "Wuhan": 3
+    }
+  },
+  "totals": {
+    "absent": {
+      "category": "absent (all splits)",
+      "n": 9993,
+      "n_recoverable": 223,
+      "n_correctly_rejected": 9770,
+      "n_blocked_by_corrupt_tile": 0,
+      "n_no_tile_at_all": 9704,
+      "frac_recoverable": 0.022315620934654258
+    },
+    "truncated": {
+      "category": "truncated (all splits)",
+      "n": 577,
+      "n_recoverable": 302,
+      "n_correctly_rejected": 275,
+      "n_blocked_by_corrupt_tile": 0,
+      "n_no_tile_at_all": 0,
+      "frac_recoverable": 0.5233968804159446
+    }
+  },
+  "by_city": [
+    {
+      "city": "London",
+      "n": 111,
+      "recoverable": 111,
+      "frac": 1.0
+    },
+    {
+      "city": "Shanghai",
+      "n": 358,
+      "recoverable": 32,
+      "frac": 0.0893854748603352
+    },
+    {
+      "city": "Qingdao",
+      "n": 542,
+      "recoverable": 26,
+      "frac": 0.04797047970479705
+    },
+    {
+      "city": "Guangzhou",
+      "n": 26,
+      "recoverable": 22,
+      "frac": 0.8461538461538461
+    },
+    {
+      "city": "Hong Kong",
+      "n": 7,
+      "recoverable": 7,
+      "frac": 1.0
+    },
+    {
+      "city": "Wuhan",
+      "n": 6,
+      "recoverable": 6,
+      "frac": 1.0
+    },
+    {
+      "city": "Amsterdam",
+      "n": 107,
+      "recoverable": 0,
+      "frac": 0.0
+    },
+    {
+      "city": "Cape Town",
+      "n": 983,
+      "recoverable": 0,
+      "frac": 0.0
+    },
+    {
+      "city": "Melbourne",
+      "n": 914,
+      "recoverable": 0,
+      "frac": 0.0
+    },
+    {
+      "city": "Lisbon",
+      "n": 71,
+      "recoverable": 0,
+      "frac": 0.0
+    },
+    {
+      "city": "Istanbul",
+      "n": 2617,
+      "recoverable": 0,
+      "frac": 0.0
+    },
+    {
+      "city": "New York",
+      "n": 2026,
+      "recoverable": 0,
+      "frac": 0.0
+    },
+    {
+      "city": "Mumbai",
+      "n": 242,
+      "recoverable": 0,
+      "frac": 0.0
+    },
+    {
+      "city": "Sydney",
+      "n": 329,
+      "recoverable": 0,
+      "frac": 0.0
+    },
+    {
+      "city": "Vancouver",
+      "n": 1094,
+      "recoverable": 0,
+      "frac": 0.0
+    },
+    {
+      "city": "\u4e1c\u8425\u533a",
+      "n": 70,
+      "recoverable": 0,
+      "frac": 0.0
+    }
+  ],
+  "by_lcz": [
+    {
+      "lcz": 14,
+      "n": 51,
+      "recoverable": 51,
+      "frac": 1.0
+    },
+    {
+      "lcz": 6,
+      "n": 43,
+      "recoverable": 43,
+      "frac": 1.0
+    },
+    {
+      "lcz": 2,
+      "n": 38,
+      "recoverable": 38,
+      "frac": 1.0
+    },
+    {
+      "lcz": 4,
+      "n": 33,
+      "recoverable": 33,
+      "frac": 1.0
+    },
+    {
+      "lcz": 8,
+      "n": 26,
+      "recoverable": 26,
+      "frac": 1.0
+    },
+    {
+      "lcz": 11,
+      "n": 14,
+      "recoverable": 14,
+      "frac": 1.0
+    },
+    {
+      "lcz": 12,
+      "n": 9,
+      "recoverable": 9,
+      "frac": 1.0
+    },
+    {
+      "lcz": 17,
+      "n": 9690,
+      "recoverable": 9,
+      "frac": 0.0009287925696594427
+    },
+    {
+      "lcz": 16,
+      "n": 89,
+      "recoverable": 0,
+      "frac": 0.0
+    }
+  ]
+}
