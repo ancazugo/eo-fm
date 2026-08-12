@@ -166,6 +166,16 @@ def main() -> None:
                         "'valid' channel and fills invalid pixels, 'zero' keeps the "
                         "pre-Phase-1 behaviour of passing them straight through "
                         "(default: mask).")
+    g.add_argument("--max-invalid-frac", type=float, default=1.0,
+                   help="Drop patches whose nodata fraction exceeds this, from "
+                        "training AND evaluation. Fractions are read from the "
+                        "Task 1.75.1 parquet (--invalid-frac-parquet). Default "
+                        "1.0 keeps everything and is an exact no-op.")
+    g.add_argument("--invalid-frac-parquet", type=Path, default=None,
+                   help="Per-patch nodata fractions written by "
+                        "src/diagnostics/nodata_population.py (default: "
+                        "diagnostics/invalid_fraction.parquet). Only read when "
+                        "--max-invalid-frac < 1.")
 
     # ── Training ──────────────────────────────────────────────────────────────
     g = add_training_args(parser, batch_size=64)
@@ -246,6 +256,9 @@ def main() -> None:
         cities=args.cities,
         label_col=args.label_col,
         orig_test=args.orig_test,
+        max_invalid_frac=args.max_invalid_frac,
+        embedding_names=args.embedding_name,
+        invalid_frac_parquet=args.invalid_frac_parquet,
     )
     n_pseudo = 0
     if args.pseudo_gpkg is not None:
@@ -420,6 +433,7 @@ def main() -> None:
         sub_patch_size=args.sub_patch_size,
         sub_patch_stride=args.sub_patch_stride,
         nodata_mode=args.nodata_mode,
+        max_invalid_frac=args.max_invalid_frac,
         normalize=args.normalize,
         noise_sigma=args.noise_sigma,
         noise_prob=args.noise_prob,
@@ -480,6 +494,10 @@ def main() -> None:
                 # infer_roi can refuse a checkpoint pointed at another product.
                 **provenance(args.embedding_name),
                 "year": args.year,
+                # Which population the weights were fitted on (Task 1.75.1) —
+                # a filtered run and an unfiltered one are different experiments
+                # and their checkpoints are otherwise indistinguishable.
+                "max_invalid_frac": args.max_invalid_frac,
             },
         )
     logger.info(f"Best checkpoint: {ckpt_path}")

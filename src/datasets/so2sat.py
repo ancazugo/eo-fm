@@ -16,6 +16,7 @@ from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F
 from loguru import logger
@@ -289,6 +290,9 @@ def build_so2sat_items(
     cities: list[str] | None = None,
     label_col: str = "LCZ_class",
     orig_test: bool = False,
+    max_invalid_frac: float = 1.0,
+    embedding_names: list[str] | None = None,
+    invalid_frac_parquet: Path | None = None,
 ) -> tuple[list[PatchItem], list[Path]]:
     """Build the full item list plus the city dirs used for per-city inference.
 
@@ -303,6 +307,10 @@ def build_so2sat_items(
     Hybrid mode (``orig_test``): trains on ALL cities' grid splits but keeps the
     original So2Sat testing patches as the test set; like global mode, ``cities``
     selects cities for inference only.
+
+    ``max_invalid_frac`` (with ``embedding_names`` and ``invalid_frac_parquet``)
+    applies the Task 1.75.1 nodata drop policy to the finished item list, so it
+    behaves identically in all three modes. The default of 1.0 is a no-op.
 
     Raises SystemExit on missing inputs (CLI-friendly).
     """
@@ -370,7 +378,116 @@ def build_so2sat_items(
         logger.error("No items found. Check --so2sat-dir, --output-name, --year.")
         raise SystemExit(1)
 
+    all_items = filter_by_invalid_fraction(
+        all_items, max_invalid_frac, embedding_names, invalid_frac_parquet
+    )
+
     return all_items, city_dirs
+
+
+# ── Drop policy (Task 1.75.1) ────────────────────────────────────────────────
+
+DEFAULT_INVALID_FRAC_PARQUET = (
+    Path(__file__).resolve().parents[2] / "diagnostics" / "invalid_fraction.parquet"
+)
+
+_SCAN_COMMAND = "python src/diagnostics/nodata_population.py"
+
+
+def patch_key(path: Path | tuple) -> tuple[str, str]:
+    """``(dataset, patch_id)`` for a patch path, the only key that is unique.
+
+    Extraction writes ``{so2sat_dir}/{split}/{output_name}/{year}/patch_{id}.npy``
+    and each original split restarts patch_id at 000000, so the id alone
+    resolves validation and testing patches to the wrong rows. Fused items carry
+    a tuple of paths, one per source; they all describe the same patch, so the
+    first is enough.
+    """
+    p = Path(path[0] if isinstance(path, tuple) else path)
+    return p.parents[2].name, p.stem[len("patch_"):]
+
+
+def filter_by_invalid_fraction(
+    items: list[PatchItem],
+    max_invalid_frac: float,
+    embedding_names: list[str] | None,
+    parquet: Path | None = None,
+) -> list[PatchItem]:
+    """Drop patches whose nodata fraction exceeds *max_invalid_frac*.
+
+    Applied to training *and* evaluation alike: a threshold that filtered only
+    the training set would report accuracy on data the model was never allowed
+    to learn from, which is a different experiment from the one being run.
+
+    The fractions come from the Task 1.75.1 parquet rather than being measured
+    here. Measuring them would mean reading all 352,366 training files at the
+    start of every run; the parquet turns that into one lookup. A missing
+    parquet is an error naming the command that writes it, never a silent
+    fallback to no filtering.
+
+    For a fused run the **maximum** fraction across the requested sources
+    decides, since fusion concatenates them and one bad source contaminates the
+    whole sample.
+
+    ``max_invalid_frac >= 1.0`` returns *items* itself, unchanged and in order —
+    the default has to be a provable no-op because every Phase 2 baseline
+    depends on it.
+    """
+    if max_invalid_frac >= 1.0:
+        return items
+
+    parquet = Path(parquet) if parquet is not None else DEFAULT_INVALID_FRAC_PARQUET
+    if not parquet.exists():
+        logger.error(
+            f"--max-invalid-frac {max_invalid_frac} needs per-patch nodata "
+            f"fractions, but {parquet} does not exist. Write it with:\n"
+            f"    {_SCAN_COMMAND}"
+        )
+        raise SystemExit(1)
+
+    df = pd.read_parquet(parquet, columns=["family", "dataset", "patch_id",
+                                           "invalid_frac"])
+    if embedding_names:
+        known = set(df["family"].unique())
+        missing = [n for n in embedding_names if n not in known]
+        if missing:
+            logger.error(
+                f"{parquet.name} has no rows for {missing}. It covers "
+                f"{sorted(known)}; re-run `{_SCAN_COMMAND} --families "
+                f"{' '.join(embedding_names)}`."
+            )
+            raise SystemExit(1)
+        df = df[df["family"].isin(embedding_names)]
+
+    frac = (df.groupby(["dataset", "patch_id"])["invalid_frac"].max().to_dict())
+
+    kept: list[PatchItem] = []
+    dropped: dict[str, int] = {}
+    n_unknown = 0
+    for it in items:
+        f = frac.get(patch_key(it.path))
+        if f is None:
+            # Not in the audit (e.g. an unlabeled or pseudo-labelled patch).
+            # Keeping it is the conservative choice: the filter must not become
+            # an accidental second coverage restriction.
+            n_unknown += 1
+            kept.append(it)
+        elif f <= max_invalid_frac:
+            kept.append(it)
+        else:
+            dropped[it.split] = dropped.get(it.split, 0) + 1
+
+    n_dropped = sum(dropped.values())
+    detail = ", ".join(f"{s} {n}" for s, n in sorted(dropped.items())) or "none"
+    logger.info(
+        f"--max-invalid-frac {max_invalid_frac}: dropped {n_dropped} of "
+        f"{len(items)} patches ({detail})"
+    )
+    if n_unknown:
+        logger.warning(
+            f"{n_unknown} patches had no entry in {parquet.name} and were kept."
+        )
+    return kept
 
 
 class PackedPatchStore:
