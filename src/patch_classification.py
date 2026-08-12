@@ -65,7 +65,8 @@ _src = Path(__file__).parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from datasets.registry import EMBEDDING_REGISTRY
+from datasets.channel_stats import compute_channel_stats, stats_cache_path
+from datasets.registry import available_embeddings, get_nodata_predicate, provenance
 from datasets.so2sat import PatchDataModule, build_so2sat_items
 from models import build_model, resolve_arch
 from training import (
@@ -146,16 +147,56 @@ def main() -> None:
                         "i.e. non-overlapping).")
     g.add_argument("--head-dropout", type=float, default=0.0,
                    help="Dropout before the final FC layer (default: 0.0).")
+    g.add_argument("--normalize", choices=["none", "channel"], default="channel",
+                   help="Per-channel input standardisation using train-split "
+                        "statistics over valid pixels (default: channel). 'none' "
+                        "reproduces the pre-Phase-1 unnormalised path.")
+    g.add_argument("--stats-sample", type=int, default=20000,
+                   help="Patches sampled to estimate channel statistics (default: 20000).")
+    g.add_argument("--packed-dir", type=Path, default=None,
+                   help="Read patches from memory-mapped shards written by "
+                        "src/pack_patches.py instead of one file per patch. "
+                        "Falls back to the per-file path for any patch not in "
+                        "the pack.")
+    g.add_argument("--recompute-stats", action="store_true",
+                   help="Ignore any cached channel statistics and recompute them.")
+    g.add_argument("--nodata-mode", choices=["zero", "mask"], default="mask",
+                   help="How to treat per-family nodata sentinels (see "
+                        "datasets.registry.get_nodata_predicate): 'mask' emits a "
+                        "'valid' channel and fills invalid pixels, 'zero' keeps the "
+                        "pre-Phase-1 behaviour of passing them straight through "
+                        "(default: mask).")
+    g.add_argument("--max-invalid-frac", type=float, default=1.0,
+                   help="Drop patches whose nodata fraction exceeds this, from "
+                        "training AND evaluation. Fractions are read from the "
+                        "Task 1.75.1 parquet (--invalid-frac-parquet). Default "
+                        "1.0 keeps everything and is an exact no-op.")
+    g.add_argument("--invalid-frac-parquet", type=Path, default=None,
+                   help="Per-patch nodata fractions written by "
+                        "src/diagnostics/nodata_population.py (default: "
+                        "diagnostics/invalid_fraction.parquet). Only read when "
+                        "--max-invalid-frac < 1.")
 
     # ── Training ──────────────────────────────────────────────────────────────
     g = add_training_args(parser, batch_size=64)
     g.add_argument("--class-weights", choices=["none", "inv_freq", "sqrt_inv_freq"],
                    default="none",
                    help="Per-class CE weights from train-split frequencies (default: none).")
+    g.add_argument("--noise-sigma", type=float, default=0.05,
+                   help="Gaussian augmentation noise, in units of the normalised "
+                        "per-channel std (default: 0.05, the historical value — "
+                        "untuned; 0 disables).")
+    g.add_argument("--noise-prob", type=float, default=0.5,
+                   help="Probability of adding augmentation noise to a sample "
+                        "(default: 0.5).")
     g.add_argument("--label-smoothing", type=float, default=0.0,
                    help="CE label smoothing (default: 0.0).")
     g.add_argument("--mixup-alpha", type=float, default=0.0,
                    help="Mixup Beta(alpha, alpha) on training batches (default: 0.0 = off).")
+    g.add_argument("--mixup-renorm", action="store_true",
+                   help="L2-renormalise mixed pixels across channels, in raw units. "
+                        "Only meaningful for AlphaEarth (unit-norm 64-d embeddings); "
+                        "requires --normalize channel and --mixup-alpha > 0.")
     g.add_argument("--sampler", choices=["none", "balanced", "sqrt_balanced"],
                    default="none",
                    help="Class-balanced train sampling: per-sample weight 1/count "
@@ -184,9 +225,10 @@ def main() -> None:
     # ── Inference ─────────────────────────────────────────────────────────────
     g = add_inference_args(parser)
     g.add_argument("--embedding-name", required=True, nargs="+",
-                   choices=sorted(EMBEDDING_REGISTRY),
+                   choices=available_embeddings(),
                    help="Embedding registry key(s), one per --output-name. "
-                        "Also used for infer_roi (single-embedding runs only).")
+                        "Also used for infer_roi (single-embedding runs only). "
+                        "Deprecated and pending entries are excluded (PLAN-v3).")
 
     args = parser.parse_args()
     resolve_overlap(args)
@@ -214,6 +256,9 @@ def main() -> None:
         cities=args.cities,
         label_col=args.label_col,
         orig_test=args.orig_test,
+        max_invalid_frac=args.max_invalid_frac,
+        embedding_names=args.embedding_name,
+        invalid_frac_parquet=args.invalid_frac_parquet,
     )
     n_pseudo = 0
     if args.pseudo_gpkg is not None:
@@ -228,7 +273,7 @@ def main() -> None:
         n_pseudo = len(pseudo_items)
         all_items = all_items + pseudo_items
 
-    split_counts = {s: sum(1 for it in all_items if it[2] == s)
+    split_counts = {s: sum(1 for it in all_items if it.split == s)
                     for s in ("train", "val", "test")}
     logger.info(f"Total patches: {len(all_items)}  splits: {split_counts}"
                 + (f"  (incl. {n_pseudo} pseudo-labeled)" if n_pseudo else ""))
@@ -236,7 +281,7 @@ def main() -> None:
     deq = [resolve_dequantize(e, force=args.dequantize) for e in args.embedding_name]
     if fused:
         dequantize_fn = [fn for fn, _ in deq]
-        first_paths = all_items[0][0]
+        first_paths = all_items[0].path
         in_channels = sum(
             detect_in_channels(p, override)
             for p, (_, override) in zip(first_paths, deq)
@@ -244,7 +289,62 @@ def main() -> None:
         logger.info(f"Fused in_channels = {in_channels} ({output_label})")
     else:
         dequantize_fn, in_channels_override = deq[0]
-        in_channels = detect_in_channels(all_items[0][0], in_channels_override)
+        in_channels = detect_in_channels(all_items[0].path, in_channels_override)
+
+    # ── DataModule ────────────────────────────────────────────────────────────
+    nodata_predicate = [get_nodata_predicate(e) for e in args.embedding_name]
+    if not fused:
+        nodata_predicate = nodata_predicate[0]
+
+    if args.mixup_renorm:
+        if args.mixup_alpha <= 0:
+            parser.error("--mixup-renorm has no effect without --mixup-alpha > 0")
+        if args.normalize != "channel":
+            parser.error(
+                "--mixup-renorm requires --normalize channel: the renorm is applied "
+                "in raw units, which means undoing the channel statistics first."
+            )
+        if any(e != "alpha_earth_coop" for e in args.embedding_name):
+            logger.warning(
+                f"--mixup-renorm with {args.embedding_name}: projecting onto the unit "
+                "sphere is only meaningful for AlphaEarth, whose embeddings are "
+                "unit-norm 64-d vectors. For other families this distorts the inputs."
+            )
+
+    if args.class_weights != "none" and args.logit_adjustment > 0:
+        parser.error(
+            "--class-weights and --logit-adjustment are mutually exclusive: both "
+            "reweight the same class imbalance, one in the loss and one in the "
+            "logits, so combining them double-corrects it. Pick one."
+        )
+
+    if args.normalize == "none" and args.noise_sigma > 0:
+        logger.warning(
+            f"--normalize none with --noise-sigma {args.noise_sigma} reintroduces "
+            "the Phase 0 confound: absolute noise on unnormalised inputs means a "
+            "different relative perturbation per embedding family (0.05 was 4.4% "
+            "of a channel std for Tessera but 47.4% for AlphaEarth). Fine as a "
+            "deliberate ablation, wrong for a cross-family comparison."
+        )
+
+    _split_source = ("grid_orig_test" if args.orig_test
+                     else "global_so2sat" if args.global_split else "grid")
+    channel_mean = channel_std = None
+    if args.normalize == "channel":
+        train_items = [it for it in all_items if it.split == "train"]
+        cache_path = stats_cache_path(
+            output_label, args.year, _split_source,
+            embedding_name=args.embedding_name, items=train_items,
+            n_sample=args.stats_sample, seed=args.seed,
+            patch_size=args.patch_size, nodata_mode=args.nodata_mode,
+        )
+        channel_mean, channel_std = compute_channel_stats(
+            train_items, dequantize_fn, nodata_predicate,
+            patch_size=args.patch_size, n_sample=args.stats_sample,
+            seed=args.seed, nodata_mode=args.nodata_mode,
+            cache_path=cache_path, recompute=args.recompute_stats,
+        )
+
 
     # ── Model ─────────────────────────────────────────────────────────────────
     arch = resolve_arch(args.family, args.preset, args.arch)
@@ -259,7 +359,7 @@ def main() -> None:
     class_priors = None
     if args.class_weights != "none" or args.logit_adjustment > 0:
         counts = np.bincount(
-            [it[1] for it in all_items if it[2] == "train"],
+            [it.label for it in all_items if it.split == "train"],
             minlength=args.num_classes,
         ).astype(np.float64)
     if args.class_weights != "none":
@@ -284,6 +384,11 @@ def main() -> None:
         class_weights=class_weights,
         label_smoothing=args.label_smoothing,
         mixup_alpha=args.mixup_alpha,
+        noise_sigma=args.noise_sigma,
+        noise_prob=args.noise_prob,
+        mixup_renorm=args.mixup_renorm,
+        channel_mean=channel_mean,
+        channel_std=channel_std,
         monitor=args.monitor,
         logit_adjustment_tau=args.logit_adjustment,
         class_priors=class_priors,
@@ -291,13 +396,20 @@ def main() -> None:
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"'{args.family}/{args.preset}' ({arch}): params={n_params:,}")
 
-    # ── DataModule ────────────────────────────────────────────────────────────
     datamodule = PatchDataModule(
         all_items, args.patch_size, args.batch_size, args.num_workers,
         sub_patch_size=args.sub_patch_size,
         sub_patch_stride=args.sub_patch_stride,
         dequantize_fn=dequantize_fn,
         sampler=args.sampler,
+        nodata_mode=args.nodata_mode,
+        nodata_predicate=nodata_predicate,
+        normalize=args.normalize,
+        channel_mean=channel_mean,
+        channel_std=channel_std,
+        noise_sigma=args.noise_sigma,
+        noise_prob=args.noise_prob,
+        packed_dir=args.packed_dir,
     )
 
     # ── WandB ─────────────────────────────────────────────────────────────────
@@ -306,7 +418,10 @@ def main() -> None:
     run_cfg = dict(
         task="patch_classification",
         embedding=output_label,
-        embedding_name="+".join(args.embedding_name),
+        # Provenance on every run (Task 1.5.3, guard 3) so the RESULTS.md table
+        # can be rebuilt from W&B alone with no row ambiguous about which
+        # Tessera it used.
+        **provenance(args.embedding_name),
         cities="all_so2sat" if _global_like else city_names,
         year=args.year,
         family=args.family,
@@ -317,12 +432,20 @@ def main() -> None:
         patch_size=args.patch_size,
         sub_patch_size=args.sub_patch_size,
         sub_patch_stride=args.sub_patch_stride,
+        nodata_mode=args.nodata_mode,
+        max_invalid_frac=args.max_invalid_frac,
+        normalize=args.normalize,
+        noise_sigma=args.noise_sigma,
+        noise_prob=args.noise_prob,
+        stats_sample=args.stats_sample if args.normalize == 'channel' else None,
+        packed_dir=str(args.packed_dir) if args.packed_dir else None,
         batch_size=args.batch_size,
         lr=args.lr,
         weight_decay=args.weight_decay,
         class_weights=args.class_weights,
         label_smoothing=args.label_smoothing,
         mixup_alpha=args.mixup_alpha,
+        mixup_renorm=args.mixup_renorm,
         sampler=args.sampler,
         logit_adjustment=args.logit_adjustment,
         pseudo_gpkg=str(args.pseudo_gpkg) if args.pseudo_gpkg else None,
@@ -336,8 +459,7 @@ def main() -> None:
         seed=args.seed,
         n_params=n_params,
         data_source="so2sat_patches",
-        split_source=("grid_orig_test" if args.orig_test
-                      else "global_so2sat" if args.global_split else "grid"),
+        split_source=_split_source,
         **{f"{s}_patches": split_counts[s] for s in ("train", "val", "test")},
     )
 
@@ -364,6 +486,19 @@ def main() -> None:
             run_dir=run_dir,
             model_name=model_name,
             warmup_epochs=args.warmup_epochs,
+            norm_meta={
+                "normalize": args.normalize,
+                "channel_mean": channel_mean,
+                "channel_std": channel_std,
+                # Provenance travels with the weights (Task 1.5.3, guard 2), so
+                # infer_roi can refuse a checkpoint pointed at another product.
+                **provenance(args.embedding_name),
+                "year": args.year,
+                # Which population the weights were fitted on (Task 1.75.1) —
+                # a filtered run and an unfiltered one are different experiments
+                # and their checkpoints are otherwise indistinguishable.
+                "max_invalid_frac": args.max_invalid_frac,
+            },
         )
     logger.info(f"Best checkpoint: {ckpt_path}")
 
@@ -388,6 +523,7 @@ def main() -> None:
     run_city_inference(
         task.model, args.family, "classification", args.preset,
         city_dirs, run_dir, device, dequantize_fn,
+        normalize=(channel_mean, channel_std) if args.normalize == "channel" else None,
         embedding_name=args.embedding_name[0],
         embedding_dir=args.embedding_dir,
         num_classes=args.num_classes,

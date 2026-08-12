@@ -100,7 +100,7 @@ def main() -> None:
         cities_dir=args.cities_dir, cities=args.cities,
         label_col=args.label_col, orig_test=args.orig_test,
     )
-    test_items = [it for it in all_items if it[2] == "test"]
+    test_items = [it for it in all_items if it.split == "test"]
     if not test_items:
         raise SystemExit("No test items found.")
     logger.info(f"Test patches: {len(test_items)}")

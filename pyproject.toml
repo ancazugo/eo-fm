@@ -59,4 +59,4 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["lcz_labels/tests", "lcz_train/tests"]
+testpaths = ["lcz_labels/tests", "lcz_train/tests", "tests"]

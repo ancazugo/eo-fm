@@ -1,0 +1,149 @@
+{
+  "meta": {
+    "generated": "2026-08-11T17:53:21+00:00",
+    "split": "training",
+    "year": "2017",
+    "n_sample": 2000,
+    "seed": 0
+  },
+  "pairs": {
+    "tesserav1.1 vs tesserav1.1_global": {
+      "n_common_ids": 27229,
+      "n_compared": 2000,
+      "n_shape_mismatch": 0,
+      "native_shapes": {
+        "35x33": 1103,
+        "36x33": 622,
+        "36x32": 121,
+        "35x32": 99,
+        "36x34": 28
+      },
+      "stats": {
+        "n_channels": 128,
+        "n_pixels": 2323644,
+        "pearson_r_matched_channels": {
+          "median": -0.004947684073680854,
+          "min": -0.7559290737189945,
+          "max": 0.7250900238011078,
+          "frac_above_0.9": 0.0
+        },
+        "pearson_r_best_cross_channel": {
+          "median": 0.6503040646958055,
+          "min": 0.3091090117190065,
+          "max": 0.8456637111876947
+        },
+        "pearson_r_pooled": 0.0023596974945924044,
+        "rmse": 1.9300186795892575,
+        "rms_a": 1.2012010211179431,
+        "rms_b": 1.5157552949087596,
+        "std_ratio_b_over_a": {
+          "median": 1.2590927836438794,
+          "min": 0.6465888952657057,
+          "max": 4.2342622661873905,
+          "cv": 0.3966304037660825
+        },
+        "median_std_a": 0.8060485605138279,
+        "median_std_b": 1.0047004018443486,
+        "linear_map_r2_heldout": 0.892402536453562,
+        "linear_map_r2_shuffled_null": -0.01628361823931357,
+        "l2_norm_correlation": 0.8314660759110507,
+        "l2_norm_median_a": 12.734138807709916,
+        "l2_norm_median_b": 14.91056023678625
+      },
+      "verdict": "distinct_products_shared_information",
+      "verdict_reason": "Matched channels are uncorrelated but a linear map recovers most of one from the other: same scene, different feature basis, i.e. different inference passes sharing a version label. Treat as distinct products, keep both registry keys, pick one canonical."
+    },
+    "tesserav1.1_global vs tesserav2": {
+      "n_common_ids": 131086,
+      "n_compared": 1956,
+      "n_shape_mismatch": 44,
+      "native_shapes": {
+        "33x34": 500,
+        "34x33": 442,
+        "33x33": 373,
+        "35x33": 297,
+        "36x33": 144
+      },
+      "stats": {
+        "n_channels": 128,
+        "n_pixels": 2207529,
+        "pearson_r_matched_channels": {
+          "median": -0.006432311112756474,
+          "min": -0.63163276593023,
+          "max": 0.5149648926881615,
+          "frac_above_0.9": 0.0
+        },
+        "pearson_r_best_cross_channel": {
+          "median": 0.4824321148574209,
+          "min": 0.30681240488061357,
+          "max": 0.7222088454214297
+        },
+        "pearson_r_pooled": -0.06155578983752492,
+        "rmse": 1.9295416645326564,
+        "rms_a": 1.5902956625224771,
+        "rms_b": 0.9996484976407591,
+        "std_ratio_b_over_a": {
+          "median": 0.3432077631246151,
+          "min": 0.1788246996671141,
+          "max": 1.814889977333461,
+          "cv": 0.648287411268264
+        },
+        "median_std_a": 1.1447240403846748,
+        "median_std_b": 0.39499674036528776,
+        "linear_map_r2_heldout": 0.8871682158845136,
+        "linear_map_r2_shuffled_null": -0.027123554574037145,
+        "l2_norm_correlation": 0.07592021810357731,
+        "l2_norm_median_a": 15.564585681030135,
+        "l2_norm_median_b": 11.314083538802189
+      },
+      "verdict": "distinct_products_shared_information",
+      "verdict_reason": "Matched channels are uncorrelated but a linear map recovers most of one from the other: same scene, different feature basis, i.e. different inference passes sharing a version label. Treat as distinct products, keep both registry keys, pick one canonical."
+    },
+    "tesserav1.1 vs tesserav2": {
+      "n_common_ids": 27229,
+      "n_compared": 1993,
+      "n_shape_mismatch": 7,
+      "native_shapes": {
+        "35x33": 1101,
+        "36x33": 632,
+        "36x32": 120,
+        "35x32": 102,
+        "36x34": 23
+      },
+      "stats": {
+        "n_channels": 128,
+        "n_pixels": 2320953,
+        "pearson_r_matched_channels": {
+          "median": -0.016381432982228536,
+          "min": -0.719028446183974,
+          "max": 0.6287435060742753,
+          "frac_above_0.9": 0.0
+        },
+        "pearson_r_best_cross_channel": {
+          "median": 0.6615338747985702,
+          "min": 0.3454111567014177,
+          "max": 0.8839891219575488
+        },
+        "pearson_r_pooled": 0.06901170188793,
+        "rmse": 1.5044019008170109,
+        "rms_a": 1.1956019393235107,
+        "rms_b": 0.999312034131856,
+        "std_ratio_b_over_a": {
+          "median": 0.4690422832524245,
+          "min": 0.1774708368990605,
+          "max": 3.543433014849028,
+          "cv": 0.749182401368826
+        },
+        "median_std_a": 0.8002534325202131,
+        "median_std_b": 0.3719786072378245,
+        "linear_map_r2_heldout": 0.908074171664854,
+        "linear_map_r2_shuffled_null": -0.01478929200773571,
+        "l2_norm_correlation": 0.12241557946370617,
+        "l2_norm_median_a": 12.796304994764256,
+        "l2_norm_median_b": 11.314119765372432
+      },
+      "verdict": "distinct_products_shared_information",
+      "verdict_reason": "Matched channels are uncorrelated but a linear map recovers most of one from the other: same scene, different feature basis, i.e. different inference passes sharing a version label. Treat as distinct products, keep both registry keys, pick one canonical."
+    }
+  }
+}

@@ -9,6 +9,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from models.pooling import pool_mean_std
 from models.registry import ModelFamily, register
 
 MLP_PRESETS: dict[str, str] = {
@@ -48,9 +49,11 @@ class MLPModel(nn.Module):
         layers.append(nn.Linear(prev, num_classes))
         self.mlp = nn.Sequential(*layers)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    accepts_valid_mask = True
+
+    def forward(self, x: torch.Tensor, valid: torch.Tensor | None = None) -> torch.Tensor:
         if x.dim() == 4:
-            x = x.mean(dim=(-2, -1))   # GAP: (B, C, H, W) → (B, C)
+            x, _ = pool_mean_std(x, valid)   # GAP: (B, C, H, W) → (B, C)
         return self.mlp(x)
 
 

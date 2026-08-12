@@ -15,6 +15,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from models.pooling import pool_mean_std
 from models.registry import ModelFamily, register
 
 LINEAR_PROBE_PRESETS: dict[str, str] = {
@@ -48,14 +49,12 @@ class LinearProbeModel(nn.Module):
         self.norm = nn.BatchNorm1d(feature_dim, affine=False)
         self.fc = nn.Linear(feature_dim, num_classes)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    accepts_valid_mask = True
+
+    def forward(self, x: torch.Tensor, valid: torch.Tensor | None = None) -> torch.Tensor:
         if x.dim() == 4:
-            mean = x.mean(dim=(-2, -1))
-            if self.pooling == "gap":
-                x = mean
-            else:
-                # unbiased=False matches numpy's default ddof=0 used previously
-                x = torch.cat([mean, x.std(dim=(-2, -1), unbiased=False)], dim=1)
+            mean, std = pool_mean_std(x, valid)
+            x = mean if self.pooling == "gap" else torch.cat([mean, std], dim=1)
         return self.fc(self.norm(x))
 
 

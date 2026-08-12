@@ -1,0 +1,1470 @@
+{
+  "meta": {
+    "generated": "2026-08-12T02:06:06+00:00",
+    "so2sat_dir": "/maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4",
+    "year": "2017",
+    "families": [
+      "alpha_earth_coop",
+      "tesserav1.1_global",
+      "seamless"
+    ],
+    "splits": [
+      "training",
+      "validation",
+      "testing"
+    ],
+    "patch_size": 32,
+    "truncation_ratio": 0.85,
+    "focus_split": "training",
+    "augment_noise_sigma": 0.05,
+    "n_patches_scanned": 1191379,
+    "reference_counts": {
+      "testing": 24188,
+      "training": 352366,
+      "validation": 24119
+    },
+    "n_patches": 400673,
+    "n_city_assigned": 396449,
+    "n_ambiguous_city_matches": 527,
+    "n_cities": 51
+  },
+  "per_family_split": {
+    "alpha_earth_coop": {
+      "training": {
+        "n_on_disk": 352366,
+        "n_in_reference": 352366,
+        "n_missing": 0,
+        "frac_missing": 0.0,
+        "total_invalid_px_frac": 0.004005997915188535,
+        "frac_patches_with_any_invalid": 0.004588978505304144,
+        "per_patch_invalid_frac": {
+          "p50": 0.0,
+          "p90": 0.0,
+          "p99": 0.0,
+          "max": 1.0
+        },
+        "n_above": {
+          "0.05": 1575,
+          "0.10": 1547,
+          "0.25": 1484,
+          "0.50": 1378
+        },
+        "n_truncated": 22,
+        "median_shape": [
+          33.0,
+          33.0
+        ],
+        "truncation_threshold": [
+          28.05,
+          28.05
+        ]
+      },
+      "validation": {
+        "n_on_disk": 24119,
+        "n_in_reference": 24119,
+        "n_missing": 0,
+        "frac_missing": 0.0,
+        "total_invalid_px_frac": 0.004432634365653916,
+        "frac_patches_with_any_invalid": 0.004560719764501016,
+        "per_patch_invalid_frac": {
+          "p50": 0.0,
+          "p90": 0.0,
+          "p99": 0.0,
+          "max": 1.0
+        },
+        "n_above": {
+          "0.05": 109,
+          "0.10": 109,
+          "0.25": 108,
+          "0.50": 108
+        },
+        "n_truncated": 0,
+        "median_shape": [
+          33.0,
+          33.0
+        ],
+        "truncation_threshold": [
+          28.05,
+          28.05
+        ]
+      },
+      "testing": {
+        "n_on_disk": 24188,
+        "n_in_reference": 24188,
+        "n_missing": 0,
+        "frac_missing": 0.0,
+        "total_invalid_px_frac": 0.0,
+        "frac_patches_with_any_invalid": 0.0,
+        "per_patch_invalid_frac": {
+          "p50": 0.0,
+          "p90": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "n_above": {
+          "0.05": 0,
+          "0.10": 0,
+          "0.25": 0,
+          "0.50": 0
+        },
+        "n_truncated": 0,
+        "median_shape": [
+          33.0,
+          33.0
+        ],
+        "truncation_threshold": [
+          28.05,
+          28.05
+        ]
+      }
+    },
+    "tesserav1.1_global": {
+      "training": {
+        "n_on_disk": 342944,
+        "n_in_reference": 352366,
+        "n_missing": 9422,
+        "frac_missing": 0.026739242719218084,
+        "total_invalid_px_frac": 0.0013994287579776241,
+        "frac_patches_with_any_invalid": 0.043849724736400114,
+        "per_patch_invalid_frac": {
+          "p50": 0.0,
+          "p90": 0.0,
+          "p99": 0.030303030303030304,
+          "max": 0.7781512605042017
+        },
+        "n_above": {
+          "0.05": 1542,
+          "0.10": 29,
+          "0.25": 16,
+          "0.50": 5
+        },
+        "n_truncated": 560,
+        "median_shape": [
+          33.0,
+          33.0
+        ],
+        "truncation_threshold": [
+          28.05,
+          28.05
+        ]
+      },
+      "validation": {
+        "n_on_disk": 23878,
+        "n_in_reference": 24119,
+        "n_missing": 241,
+        "frac_missing": 0.009992122393134044,
+        "total_invalid_px_frac": 0.0014369789487762713,
+        "frac_patches_with_any_invalid": 0.04162827707513192,
+        "per_patch_invalid_frac": {
+          "p50": 0.0,
+          "p90": 0.0,
+          "p99": 0.031141868512110725,
+          "max": 0.08217993079584775
+        },
+        "n_above": {
+          "0.05": 165,
+          "0.10": 0,
+          "0.25": 0,
+          "0.50": 0
+        },
+        "n_truncated": 0,
+        "median_shape": [
+          33.0,
+          33.0
+        ],
+        "truncation_threshold": [
+          28.05,
+          28.05
+        ]
+      },
+      "testing": {
+        "n_on_disk": 23858,
+        "n_in_reference": 24188,
+        "n_missing": 330,
+        "frac_missing": 0.013643128824210352,
+        "total_invalid_px_frac": 0.0013624849594902687,
+        "frac_patches_with_any_invalid": 0.038645318132282676,
+        "per_patch_invalid_frac": {
+          "p50": 0.0,
+          "p90": 0.0,
+          "p99": 0.03633217993079585,
+          "max": 0.05800865800865801
+        },
+        "n_above": {
+          "0.05": 191,
+          "0.10": 0,
+          "0.25": 0,
+          "0.50": 0
+        },
+        "n_truncated": 17,
+        "median_shape": [
+          33.0,
+          33.0
+        ],
+        "truncation_threshold": [
+          28.05,
+          28.05
+        ]
+      }
+    },
+    "seamless": {
+      "training": {
+        "n_on_disk": 351719,
+        "n_in_reference": 352366,
+        "n_missing": 647,
+        "frac_missing": 0.0018361589937735195,
+        "total_invalid_px_frac": 0.0,
+        "frac_patches_with_any_invalid": 0.0,
+        "per_patch_invalid_frac": {
+          "p50": 0.0,
+          "p90": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "n_above": {
+          "0.05": 0,
+          "0.10": 0,
+          "0.25": 0,
+          "0.50": 0
+        },
+        "n_truncated": 77,
+        "median_shape": [
+          12.0,
+          12.0
+        ],
+        "truncation_threshold": [
+          10.2,
+          10.2
+        ]
+      },
+      "validation": {
+        "n_on_disk": 24119,
+        "n_in_reference": 24119,
+        "n_missing": 0,
+        "frac_missing": 0.0,
+        "total_invalid_px_frac": 0.0,
+        "frac_patches_with_any_invalid": 0.0,
+        "per_patch_invalid_frac": {
+          "p50": 0.0,
+          "p90": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "n_above": {
+          "0.05": 0,
+          "0.10": 0,
+          "0.25": 0,
+          "0.50": 0
+        },
+        "n_truncated": 0,
+        "median_shape": [
+          12.0,
+          12.0
+        ],
+        "truncation_threshold": [
+          10.2,
+          10.2
+        ]
+      },
+      "testing": {
+        "n_on_disk": 24188,
+        "n_in_reference": 24188,
+        "n_missing": 0,
+        "frac_missing": 0.0,
+        "total_invalid_px_frac": 0.0,
+        "frac_patches_with_any_invalid": 0.0,
+        "per_patch_invalid_frac": {
+          "p50": 0.0,
+          "p90": 0.0,
+          "p99": 0.0,
+          "max": 0.0
+        },
+        "n_above": {
+          "0.05": 0,
+          "0.10": 0,
+          "0.25": 0,
+          "0.50": 0
+        },
+        "n_truncated": 0,
+        "median_shape": [
+          12.0,
+          12.0
+        ],
+        "truncation_threshold": [
+          10.2,
+          10.2
+        ]
+      }
+    }
+  },
+  "channel_stats": {
+    "alpha_earth_coop": {
+      "native_unmasked": {
+        "median_std": 0.12208786458809301,
+        "min_std": 0.09549897231868223,
+        "max_std": 0.16137150069792622,
+        "mean_of_means": -0.009682338253047179,
+        "n_pixel_samples": 395923571.0
+      },
+      "native_masked": {
+        "median_std": 0.10497713835329735,
+        "min_std": 0.07324034990551205,
+        "max_std": 0.14668449537365605,
+        "mean_of_means": -0.005667562911666549,
+        "n_pixel_samples": 394337502.0
+      },
+      "resized_unmasked": {
+        "median_std": 0.12144741379025144,
+        "min_std": 0.09479828105404571,
+        "max_std": 0.16089848390132125,
+        "mean_of_means": -0.009574523215352652,
+        "n_pixel_samples": 360822784.0
+      },
+      "resized_masked": {
+        "median_std": 0.10475457713582173,
+        "min_std": 0.07280287210191519,
+        "max_std": 0.14649729513010798,
+        "mean_of_means": -0.005628981971590027,
+        "n_pixel_samples": 359397410.0
+      },
+      "sentinel_variance_share_native": 0.26065955528388596,
+      "effective_noise_ratio": 0.47730611269779133
+    },
+    "tesserav1.1_global": {
+      "native_unmasked": {
+        "median_std": 1.159205648652191,
+        "min_std": 0.7477063718358895,
+        "max_std": 1.8078374046016414,
+        "mean_of_means": -0.15754083276590108,
+        "n_pixel_samples": 385562321.0
+      },
+      "native_masked": {
+        "median_std": 1.1597271589795248,
+        "min_std": 0.7468994262985496,
+        "max_std": 1.8076842916859406,
+        "mean_of_means": -0.15776160889829816,
+        "n_pixel_samples": 385022754.0
+      },
+      "resized_unmasked": {
+        "median_std": 1.1339116671095701,
+        "min_std": 0.7296398693622151,
+        "max_std": 1.7877996291869749,
+        "mean_of_means": -0.15747938665231684,
+        "n_pixel_samples": 351174656.0
+      },
+      "resized_masked": {
+        "median_std": 1.134448447540575,
+        "min_std": 0.7288550498526757,
+        "max_std": 1.7875037779834089,
+        "mean_of_means": -0.15770097260892824,
+        "n_pixel_samples": 350660442.0
+      },
+      "sentinel_variance_share_native": 0.0,
+      "effective_noise_ratio": 0.044074281302422684
+    },
+    "seamless": {
+      "native_unmasked": {
+        "median_std": 0.5610476343448514,
+        "min_std": 0.44198064510254875,
+        "max_std": 0.7827038113501362,
+        "mean_of_means": 0.027114809307569186,
+        "n_pixel_samples": 49383764.0
+      },
+      "native_masked": {
+        "median_std": 0.5610476343448514,
+        "min_std": 0.44198064510254875,
+        "max_std": 0.7827038113501362,
+        "mean_of_means": 0.027114809307569186,
+        "n_pixel_samples": 49383764.0
+      },
+      "resized_unmasked": {
+        "median_std": 0.5446289864271141,
+        "min_std": 0.42432411149795923,
+        "max_std": 0.7661440462329919,
+        "mean_of_means": 0.027569274820700266,
+        "n_pixel_samples": 360160256.0
+      },
+      "resized_masked": {
+        "median_std": 0.5446289864271141,
+        "min_std": 0.42432411149795923,
+        "max_std": 0.7661440462329919,
+        "mean_of_means": 0.027569274820700266,
+        "n_pixel_samples": 360160256.0
+      },
+      "sentinel_variance_share_native": 0.0,
+      "effective_noise_ratio": 0.0918056167520774
+    }
+  },
+  "histograms": {
+    "alpha_earth_coop": [
+      [
+        "exactly 0",
+        350749
+      ],
+      [
+        "0-0.1%",
+        3
+      ],
+      [
+        "0.1-1%",
+        12
+      ],
+      [
+        "1-5%",
+        27
+      ],
+      [
+        "5-10%",
+        28
+      ],
+      [
+        "10-25%",
+        63
+      ],
+      [
+        "25-50%",
+        106
+      ],
+      [
+        "50-75%",
+        101
+      ],
+      [
+        "75-100%",
+        1277
+      ]
+    ],
+    "tesserav1.1_global": [
+      [
+        "exactly 0",
+        327906
+      ],
+      [
+        "0-0.1%",
+        24
+      ],
+      [
+        "0.1-1%",
+        591
+      ],
+      [
+        "1-5%",
+        12881
+      ],
+      [
+        "5-10%",
+        1513
+      ],
+      [
+        "10-25%",
+        13
+      ],
+      [
+        "25-50%",
+        11
+      ],
+      [
+        "50-75%",
+        4
+      ],
+      [
+        "75-100%",
+        1
+      ]
+    ],
+    "seamless": [
+      [
+        "exactly 0",
+        351719
+      ],
+      [
+        "0-0.1%",
+        0
+      ],
+      [
+        "0.1-1%",
+        0
+      ],
+      [
+        "1-5%",
+        0
+      ],
+      [
+        "5-10%",
+        0
+      ],
+      [
+        "10-25%",
+        0
+      ],
+      [
+        "25-50%",
+        0
+      ],
+      [
+        "50-75%",
+        0
+      ],
+      [
+        "75-100%",
+        0
+      ]
+    ]
+  },
+  "by_city": [
+    {
+      "city": "Cape Town",
+      "held_out": false,
+      "n_patches": 11252,
+      "coop_invalid_frac": 0.08178081905993782,
+      "coop_n_above_25": 896,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.00032623598224986345,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 983,
+      "tessera_n_truncated": 32,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Lisbon",
+      "held_out": false,
+      "n_patches": 1258,
+      "coop_invalid_frac": 0.035652083780426023,
+      "coop_n_above_25": 45,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0008550257240155832,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 71,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Mumbai",
+      "held_out": true,
+      "n_patches": 4834,
+      "coop_invalid_frac": 0.02204914387615354,
+      "coop_n_above_25": 108,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0009641436997739675,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 242,
+      "tessera_n_truncated": 1,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "New York",
+      "held_out": false,
+      "n_patches": 20371,
+      "coop_invalid_frac": 0.01574817045676692,
+      "coop_n_above_25": 332,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0012015708268906047,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 2026,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Amsterdam",
+      "held_out": false,
+      "n_patches": 3451,
+      "coop_invalid_frac": 0.0026842885165224185,
+      "coop_n_above_25": 10,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0015384124065617988,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 107,
+      "tessera_n_truncated": 3,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Hong Kong",
+      "held_out": false,
+      "n_patches": 4298,
+      "coop_invalid_frac": 0.002037121196322445,
+      "coop_n_above_25": 15,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0016476535248460926,
+      "tessera_n_above_25": 4,
+      "tessera_n_missing": 7,
+      "tessera_n_truncated": 22,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Guangzhou",
+      "held_out": true,
+      "n_patches": 9822,
+      "coop_invalid_frac": 0.0018595177753830427,
+      "coop_n_above_25": 39,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0020034349263221363,
+      "tessera_n_above_25": 5,
+      "tessera_n_missing": 26,
+      "tessera_n_truncated": 99,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Qingdao",
+      "held_out": false,
+      "n_patches": 5482,
+      "coop_invalid_frac": 0.0014290814672140973,
+      "coop_n_above_25": 14,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0023338782983492335,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 542,
+      "tessera_n_truncated": 17,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 111,
+      "seamless_n_truncated": 41
+    },
+    {
+      "city": "London",
+      "held_out": false,
+      "n_patches": 27340,
+      "coop_invalid_frac": 0.001157697222228014,
+      "coop_n_above_25": 60,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0013851139881935989,
+      "tessera_n_above_25": 4,
+      "tessera_n_missing": 111,
+      "tessera_n_truncated": 120,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Wuhan",
+      "held_out": false,
+      "n_patches": 8261,
+      "coop_invalid_frac": 0.00036158824674858823,
+      "coop_n_above_25": 7,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0009864524286141132,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 6,
+      "tessera_n_truncated": 3,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 106,
+      "seamless_n_truncated": 19
+    },
+    {
+      "city": "Melbourne",
+      "held_out": false,
+      "n_patches": 35093,
+      "coop_invalid_frac": 8.370946745542823e-05,
+      "coop_n_above_25": 4,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0013873722052713988,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 914,
+      "tessera_n_truncated": 53,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Beijing",
+      "held_out": false,
+      "n_patches": 5392,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0009806028850731737,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Berlin",
+      "held_out": false,
+      "n_patches": 19130,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0013027998195861102,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Bogota",
+      "held_out": false,
+      "n_patches": 8,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Buenos Aires",
+      "held_out": false,
+      "n_patches": 5,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Cairo",
+      "held_out": false,
+      "n_patches": 17445,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0017616555284465155,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Caracas",
+      "held_out": false,
+      "n_patches": 12,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Changsha",
+      "held_out": false,
+      "n_patches": 4667,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0006150274497863959,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Chicago",
+      "held_out": false,
+      "n_patches": 48,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Cologne",
+      "held_out": false,
+      "n_patches": 15265,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0016933188080538993,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Dhaka",
+      "held_out": false,
+      "n_patches": 30,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Istanbul",
+      "held_out": false,
+      "n_patches": 20431,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0011289159611888352,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 2617,
+      "tessera_n_truncated": 29,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Jakarta",
+      "held_out": true,
+      "n_patches": 4831,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0011506900665980422,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Karachi",
+      "held_out": false,
+      "n_patches": 1140,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Lima",
+      "held_out": false,
+      "n_patches": 48,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Los Angeles",
+      "held_out": false,
+      "n_patches": 11905,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0020448254745866505,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Madrid",
+      "held_out": false,
+      "n_patches": 6785,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0015205401303388533,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 162,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Milan",
+      "held_out": false,
+      "n_patches": 2963,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0018223456429484405,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Moscow",
+      "held_out": true,
+      "n_patches": 4831,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0019238298821850973,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Munich",
+      "held_out": true,
+      "n_patches": 4832,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0014690499988377769,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Nairobi",
+      "held_out": true,
+      "n_patches": 4828,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.00022598018907009153,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Nanjing",
+      "held_out": false,
+      "n_patches": 6356,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0022508312705262893,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Osaka [Kyoto]",
+      "held_out": false,
+      "n_patches": 6443,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0009818409996456493,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Paris",
+      "held_out": false,
+      "n_patches": 12511,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0015341514173485137,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 92,
+      "seamless_n_truncated": 17
+    },
+    {
+      "city": "Philadelphia",
+      "held_out": false,
+      "n_patches": 2,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Quezon City [Manila]",
+      "held_out": false,
+      "n_patches": 384,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0037442416673539357,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Rawalpindi [Islamabad]",
+      "held_out": false,
+      "n_patches": 8108,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0012648157552888509,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Rio De Janeiro",
+      "held_out": false,
+      "n_patches": 13596,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0009700590718193141,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Rome",
+      "held_out": false,
+      "n_patches": 5347,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0018445142779068178,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Salvador",
+      "held_out": false,
+      "n_patches": 1,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "San Jose",
+      "held_out": true,
+      "n_patches": 4812,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0023748173217444813,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Santiago",
+      "held_out": true,
+      "n_patches": 4798,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.000568960919357764,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Shanghai",
+      "held_out": false,
+      "n_patches": 7304,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0016569731048394337,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 358,
+      "tessera_n_truncated": 50,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Sydney",
+      "held_out": true,
+      "n_patches": 4830,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0011064561113941368,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 329,
+      "tessera_n_truncated": 16,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "S\u00e3o Paulo",
+      "held_out": false,
+      "n_patches": 19570,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.00070265022353043,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Tehran",
+      "held_out": true,
+      "n_patches": 4827,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.001722110913695989,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Tokyo",
+      "held_out": false,
+      "n_patches": 884,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0019454103593610906,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 7,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Vancouver",
+      "held_out": false,
+      "n_patches": 30657,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0018239925998756708,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 1094,
+      "tessera_n_truncated": 36,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Washington D.C.",
+      "held_out": false,
+      "n_patches": 4206,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0022309584832175284,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "Zurich",
+      "held_out": false,
+      "n_patches": 2515,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.001409422028020661,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 0,
+      "tessera_n_truncated": 0,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    },
+    {
+      "city": "\u4e1c\u8425\u533a",
+      "held_out": false,
+      "n_patches": 3240,
+      "coop_invalid_frac": 0.0,
+      "coop_n_above_25": 0,
+      "coop_n_missing": 0,
+      "coop_n_truncated": 0,
+      "tessera_invalid_frac": 0.0011327648729444416,
+      "tessera_n_above_25": 0,
+      "tessera_n_missing": 70,
+      "tessera_n_truncated": 13,
+      "seamless_invalid_frac": 0.0,
+      "seamless_n_above_25": 0,
+      "seamless_n_missing": 0,
+      "seamless_n_truncated": 0
+    }
+  ],
+  "by_lcz": [
+    {
+      "lcz": 1,
+      "coop_invalid_frac": 0.0,
+      "n_patches": 5068
+    },
+    {
+      "lcz": 2,
+      "coop_invalid_frac": 5.290357558215794e-05,
+      "n_patches": 24431
+    },
+    {
+      "lcz": 3,
+      "coop_invalid_frac": 0.0,
+      "n_patches": 31693
+    },
+    {
+      "lcz": 4,
+      "coop_invalid_frac": 0.0003154288767572553,
+      "n_patches": 8651
+    },
+    {
+      "lcz": 5,
+      "coop_invalid_frac": 0.0,
+      "n_patches": 16493
+    },
+    {
+      "lcz": 6,
+      "coop_invalid_frac": 0.00044549560262324483,
+      "n_patches": 35290
+    },
+    {
+      "lcz": 7,
+      "coop_invalid_frac": 0.0,
+      "n_patches": 3269
+    },
+    {
+      "lcz": 8,
+      "coop_invalid_frac": 0.0001591442140761389,
+      "n_patches": 39326
+    },
+    {
+      "lcz": 9,
+      "coop_invalid_frac": 0.0,
+      "n_patches": 13584
+    },
+    {
+      "lcz": 10,
+      "coop_invalid_frac": 0.0,
+      "n_patches": 11954
+    },
+    {
+      "lcz": 11,
+      "coop_invalid_frac": 0.00030773250153388437,
+      "n_patches": 42902
+    },
+    {
+      "lcz": 12,
+      "coop_invalid_frac": 0.0018657975479449485,
+      "n_patches": 9514
+    },
+    {
+      "lcz": 13,
+      "coop_invalid_frac": 0.0,
+      "n_patches": 9165
+    },
+    {
+      "lcz": 14,
+      "coop_invalid_frac": 0.0007935513770831715,
+      "n_patches": 41377
+    },
+    {
+      "lcz": 15,
+      "coop_invalid_frac": 0.0,
+      "n_patches": 2392
+    },
+    {
+      "lcz": 16,
+      "coop_invalid_frac": 0.0,
+      "n_patches": 7898
+    },
+    {
+      "lcz": 17,
+      "coop_invalid_frac": 0.02677186960268554,
+      "n_patches": 49359
+    }
+  ]
+}

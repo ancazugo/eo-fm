@@ -22,6 +22,8 @@ import torch.nn.functional as F
 from torchmetrics import Accuracy, JaccardIndex
 from torchmetrics.classification import MulticlassCohenKappa, MulticlassF1Score
 
+from training.augment import augment_images
+
 
 # ─── Classification ───────────────────────────────────────────────────────────
 
@@ -41,6 +43,21 @@ class LCZResNetModule(nn.Module):
         class_weights: Optional (num_classes,) tensor of per-class CE weights.
         label_smoothing: CE label smoothing (default 0.0).
         mixup_alpha: Beta(alpha, alpha) mixup on training batches (0 = off).
+        mixup_renorm: L2-renormalize each mixed pixel across channels. Only
+            meaningful for AlphaEarth, whose embeddings are unit-norm 64-d
+            vectors; mixing two of them leaves the sphere. Requires
+            channel_mean/channel_std, because after z-scoring the vectors no
+            longer lie on the unit sphere and renormalizing in normalized space
+            would be meaningless — the renorm is applied in raw units and the
+            result mapped back. (Note that mixup itself is unaffected by
+            normalization: z-scoring is affine and the mixup weights sum to 1,
+            so mixing before or after it is identical.)
+        channel_mean: Per-channel means, required by mixup_renorm.
+        channel_std: Per-channel stds, required by mixup_renorm.
+        noise_sigma: Augmentation noise in normalized per-channel std units.
+        noise_prob: Probability of noising a sample.
+        augment: Apply flips/rotations/noise in train_step (on device). Set
+            False when the input pipeline already augments.
         monitor: Validation metric for checkpointing/early stopping
             ("val_f1" or "val_kappa").
         logit_adjustment_tau: Logit-adjusted CE (Menon et al. 2021): the
@@ -60,6 +77,12 @@ class LCZResNetModule(nn.Module):
         class_weights: torch.Tensor | None = None,
         label_smoothing: float = 0.0,
         mixup_alpha: float = 0.0,
+        noise_sigma: float = 0.05,
+        noise_prob: float = 0.5,
+        augment: bool = True,
+        mixup_renorm: bool = False,
+        channel_mean: torch.Tensor | None = None,
+        channel_std: torch.Tensor | None = None,
         monitor: str = "val_f1",
         logit_adjustment_tau: float = 0.0,
         class_priors: torch.Tensor | None = None,
@@ -71,7 +94,19 @@ class LCZResNetModule(nn.Module):
         self.weight_decay = weight_decay
         self.max_epochs = max_epochs
         self.mixup_alpha = mixup_alpha
+        self.noise_sigma = noise_sigma
+        self.noise_prob = noise_prob
+        self.augment = augment
         self.monitor = monitor
+        self.mixup_renorm = mixup_renorm
+        if mixup_renorm:
+            if channel_mean is None or channel_std is None:
+                raise ValueError(
+                    "mixup_renorm needs channel_mean/channel_std: the renorm has to "
+                    "happen in raw units, so it must undo the normalisation first."
+                )
+            self.register_buffer("_norm_mean", torch.as_tensor(channel_mean).view(1, -1, 1, 1))
+            self.register_buffer("_norm_std", torch.as_tensor(channel_std).view(1, -1, 1, 1))
         self.logit_adjustment_tau = logit_adjustment_tau
         if logit_adjustment_tau > 0:
             if class_priors is None:
@@ -115,9 +150,37 @@ class LCZResNetModule(nn.Module):
         self._n_train = 0
         self._val_loss_sum = 0.0
         self._n_val = 0
+        # Mean fraction of masked-out pixels per batch; reported but not acted on.
+        self._invalid_sum = 0.0
+        self._n_invalid = 0
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x.float())
+    def forward(self, x: torch.Tensor, valid: torch.Tensor | None = None) -> torch.Tensor:
+        return self._forward_masked(x.float(), valid)
+
+    def _forward_masked(
+        self, images: torch.Tensor, valid: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Forward, passing the validity mask only to models that pool with it.
+
+        Convolutional families ignore the mask for now (Task 1.5 logs the
+        invalid fraction without changing their behaviour); the pooling
+        families declare ``accepts_valid_mask`` and take a masked mean.
+        """
+        if valid is not None and getattr(self.model, "accepts_valid_mask", False):
+            return self.model(images, valid=valid)
+        return self.model(images)
+
+    def _renorm_unit_sphere(self, x: torch.Tensor) -> torch.Tensor:
+        """Project mixed samples back onto the unit sphere, in raw units.
+
+        Undoes the channel normalization, renormalizes each pixel's channel
+        vector to L2 norm 1, then re-applies the normalization — so the model
+        keeps seeing standardized inputs while the mixed embedding respects the
+        geometry AlphaEarth actually has.
+        """
+        raw = x * self._norm_std + self._norm_mean
+        raw = raw / raw.norm(dim=1, keepdim=True).clamp_min(1e-8)
+        return (raw - self._norm_mean) / self._norm_std
 
     def _adjust_logits(self, logits: torch.Tensor) -> torch.Tensor:
         """Train-time logit adjustment; identity when disabled."""
@@ -146,17 +209,36 @@ class LCZResNetModule(nn.Module):
             m.reset()
         self._train_loss_sum = 0.0
         self._n_train = 0
+        self._invalid_sum = 0.0
+        self._n_invalid = 0
 
     def train_step(self, batch: dict, device: torch.device) -> torch.Tensor | None:
         """Forward + loss + metric update. Returns the loss tensor, or None
         for skipped batches (all-nodata labels or NaN loss)."""
         images = batch["image"].to(device).float()
         labels = batch["label"].to(device)
+        valid = batch.get("valid")
+        if valid is not None:
+            valid = valid.to(device).float()
+            self._invalid_sum += float(1.0 - valid.mean().item())
+            self._n_invalid += 1
         sample_w = batch.get("weight")
         if sample_w is not None:
             sample_w = sample_w.to(device).float()
         if (labels != -1).sum() == 0:
             return None
+
+        # Augmentation runs here, on-device and batched, rather than in the
+        # DataLoader collate: ~25x faster, and it keeps the validity mask under
+        # the same flips and rotations as the image.
+        if self.augment and self.training:
+            if valid is None:
+                images = augment_images(
+                    images, noise_sigma=self.noise_sigma, noise_prob=self.noise_prob)
+            else:
+                images, valid = augment_images(
+                    images, valid, noise_sigma=self.noise_sigma,
+                    noise_prob=self.noise_prob)
 
         def _ce(logits: torch.Tensor, targets: torch.Tensor,
                 w: torch.Tensor | None) -> torch.Tensor:
@@ -168,13 +250,18 @@ class LCZResNetModule(nn.Module):
             lam = float(torch.distributions.Beta(
                 self.mixup_alpha, self.mixup_alpha).sample())
             perm = torch.randperm(images.size(0), device=device)
-            logits = self.model(lam * images + (1 - lam) * images[perm])
+            # A mixed pixel is only usable where BOTH contributing patches have data.
+            mixed_valid = None if valid is None else torch.minimum(valid, valid[perm])
+            mixed = lam * images + (1 - lam) * images[perm]
+            if self.mixup_renorm:
+                mixed = self._renorm_unit_sphere(mixed)
+            logits = self._forward_masked(mixed, mixed_valid)
             loss_logits = self._adjust_logits(logits)
             loss = lam * _ce(loss_logits, labels, sample_w) + \
                 (1 - lam) * _ce(loss_logits, labels[perm],
                                 sample_w[perm] if sample_w is not None else None)
         else:
-            logits = self.model(images)
+            logits = self._forward_masked(images, valid)
             loss = _ce(self._adjust_logits(logits), labels, sample_w)
         if torch.isnan(loss):
             return None
@@ -191,8 +278,14 @@ class LCZResNetModule(nn.Module):
         self._n_train += 1
         return loss
 
+    def _invalid_log(self, prefix: str) -> dict[str, float]:
+        if not self._n_invalid:
+            return {}
+        return {f"{prefix}_invalid_frac": self._invalid_sum / self._n_invalid}
+
     def compute_train_logs(self) -> dict[str, float]:
         return {
+            **self._invalid_log("train"),
             "train_loss":      self._train_loss_sum / max(1, self._n_train),
             "train_oa":        self.train_acc.compute().item(),
             "train_acc_macro": self.train_acc_macro.compute().item(),
@@ -207,13 +300,20 @@ class LCZResNetModule(nn.Module):
             m.reset()
         self._val_loss_sum = 0.0
         self._n_val = 0
+        self._invalid_sum = 0.0
+        self._n_invalid = 0
 
     def val_step(self, batch: dict, device: torch.device) -> None:
         images = batch["image"].to(device).float()
         labels = batch["label"].to(device)
+        valid = batch.get("valid")
+        if valid is not None:
+            valid = valid.to(device).float()
+            self._invalid_sum += float(1.0 - valid.mean().item())
+            self._n_invalid += 1
         if (labels != -1).sum() == 0:
             return
-        logits = self.model(images)
+        logits = self._forward_masked(images, valid)
         loss = self.ce_loss(logits, labels)
         preds = logits.argmax(dim=1)
         self.val_acc(preds, labels)
@@ -226,6 +326,7 @@ class LCZResNetModule(nn.Module):
 
     def compute_val_logs(self) -> dict[str, float]:
         return {
+            **self._invalid_log("val"),
             "val_loss":      self._val_loss_sum / max(1, self._n_val),
             "val_acc":       self.val_acc.compute().item(),
             "val_acc_macro": self.val_acc_macro.compute().item(),

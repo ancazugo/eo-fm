@@ -56,7 +56,7 @@ if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
 from datasets.grid_tiles import GridSegDataModule, build_city_tile_items
-from datasets.registry import EMBEDDING_REGISTRY
+from datasets.registry import available_embeddings, provenance
 from models import build_model, resolve_arch
 from training import (
     LCZUNetModule,
@@ -138,6 +138,12 @@ def main() -> None:
 
     # ── Loss ──────────────────────────────────────────────────────────────────
     g = parser.add_argument_group("Loss")
+    g.add_argument("--noise-sigma", type=float, default=0.05,
+                   help="Gaussian augmentation noise, in units of the normalised "
+                        "per-channel std (default: 0.05, historical value — untuned; "
+                        "0 disables).")
+    g.add_argument("--noise-prob", type=float, default=0.5,
+                   help="Probability of adding augmentation noise (default: 0.5).")
     g.add_argument("--dice-weight", type=float, default=0.5,
                    help="Weight of Dice loss (0 = CE-only, 1 = Dice-only). Default: 0.5.")
 
@@ -150,8 +156,9 @@ def main() -> None:
     # ── Inference ─────────────────────────────────────────────────────────────
     g = add_inference_args(parser)
     g.add_argument("--embedding-name", required=True,
-                   choices=sorted(EMBEDDING_REGISTRY),
-                   help="Embedding registry key for infer_roi.")
+                   choices=available_embeddings(),
+                   help="Embedding registry key for infer_roi. Deprecated and "
+                        "pending entries are excluded (PLAN-v3).")
     g.add_argument("--patch-size", type=int, default=64,
                    help="Sliding-window patch size in pixels for inference (default: 64).")
 
@@ -248,6 +255,8 @@ def main() -> None:
         eval_label_source="gpkg" if eval_items is not None else None,
         aux_dropout_p=aux_dropout,
         aux_channel_start=base_channels,
+        noise_sigma=args.noise_sigma,
+        noise_prob=args.noise_prob,
     )
 
     # ── WandB ─────────────────────────────────────────────────────────────────
@@ -255,7 +264,9 @@ def main() -> None:
     run_cfg = dict(
         task="segmentation",
         embedding="+".join(args.output_name),
-        embedding_name=args.embedding_name,
+        # Provenance on every run (Task 1.5.3, guard 3): `embedding_name` alone
+        # does not say which Tessera archive a number came from.
+        **provenance(args.embedding_name),
         cities=city_names,
         year=args.year,
         label_source=args.label_source,
@@ -265,6 +276,8 @@ def main() -> None:
         preset=args.preset,
         in_channels=in_channels,
         num_classes=args.num_classes,
+        noise_sigma=args.noise_sigma,
+        noise_prob=args.noise_prob,
         batch_size=args.batch_size,
         lr=args.lr,
         weight_decay=args.weight_decay,
@@ -298,6 +311,9 @@ def main() -> None:
             early_stopping_patience=args.early_stopping_patience,
             run_dir=run_dir,
             model_name=model_name,
+            # Segmentation has no --normalize yet, but the checkpoint still has
+            # to record which product it was trained on (Task 1.5.3, guard 2).
+            norm_meta={**provenance(args.embedding_name), "year": args.year},
         )
     logger.info(f"Best checkpoint: {ckpt_path}")
 

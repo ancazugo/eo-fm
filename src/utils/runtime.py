@@ -131,6 +131,7 @@ def run_city_inference(
     device: torch.device,
     dequantize_fn: Callable | None,
     *,
+    normalize: tuple | None = None,
     embedding_name: str,
     embedding_dir: Path,
     num_classes: int,
@@ -144,6 +145,9 @@ def run_city_inference(
 
     The bbox is taken from {city}_grid.gpkg; the output is named
     ``{run_dir.name}_{model_type}-{preset}-{task_label}-prediction_{city}.tif``.
+
+    ``normalize`` must be the same ``(mean, std)`` the model was trained with,
+    or the maps are wrong; callers pass the arrays they fed to the datamodule.
     """
     import geopandas as gpd
     from infer_roi import infer_roi
@@ -174,6 +178,7 @@ def run_city_inference(
             batch_size=batch_size,
             device=device,
             dequantize_fn=dequantize_fn,
+            normalize=normalize,
             year=year,
             city_name=city,
             title=f"LCZ — {city} — {embedding_name} — {model_type}/{preset}",

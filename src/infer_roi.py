@@ -85,6 +85,7 @@ def _open_and_clip(
     roi_4326: tuple[float, float, float, float],
     margin_m: float = 0.0,
     dequantize_fn=None,
+    normalize: tuple | None = None,
     valid_bbox_4326: tuple[float, float, float, float] | None = None,
 ) -> tuple[np.ndarray, str, Any] | None:
     """Open a source tile, clip to roi_4326 + margin, return (arr, crs, transform).
@@ -148,6 +149,9 @@ def _open_and_clip(
     arr = clipped.values.astype(np.float32)
     if dequantize_fn is not None:
         arr = dequantize_fn(arr)
+    if normalize is not None:
+        mean, std = normalize
+        arr = (arr - mean[:, None, None]) / (std[:, None, None] + 1e-6)
 
     # Compute Affine manually from coordinate arrays.
     # clipped.rio.transform() uses step = y[1]-y[0] and returns e = -step,
@@ -361,6 +365,7 @@ def infer_roi(
     batch_size: int = 8,
     device: torch.device | None = None,
     dequantize_fn=None,
+    normalize: tuple | None = None,
     out_crs: str | None = None,
     out_res: float | None = None,
     year: str | None = None,
@@ -513,6 +518,7 @@ def infer_roi(
         logger.info(f"Tile {i + 1}/{len(matched_paths)}: {tile_path.name}")
 
         result = _open_and_clip(tile_path, bbox, margin_m=margin_m, dequantize_fn=dequantize_fn,
+                               normalize=normalize,
                                valid_bbox_4326=path_to_valid_bbox.get(tile_path))
         if result is None:
             logger.warning("  Skipped — no valid data after clip")
@@ -610,7 +616,7 @@ def infer_roi(
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
-    from datasets.registry import EMBEDDING_REGISTRY
+    from datasets.registry import available_embeddings
     from models import MODEL_REGISTRY
 
     p = argparse.ArgumentParser(
@@ -638,8 +644,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--num-classes", type=int, default=17,
                    help="Number of LCZ classes (must match training).")
     p.add_argument("--embedding-name", required=True,
-                   choices=sorted(EMBEDDING_REGISTRY),
-                   help="Embedding type key.")
+                   choices=available_embeddings(),
+                   help="Embedding type key. Deprecated and pending entries are "
+                        "excluded (PLAN-v3).")
     p.add_argument("--embedding-dir", required=True, type=Path,
                    help="Directory containing source tile files (.zarr or .tif).")
     p.add_argument("--year", default=None,
@@ -677,6 +684,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--margin-m", type=float, default=200.0,
                    help="Extra metres clipped around the bbox per tile for edge context "
                         "(default: 200).")
+    p.add_argument("--normalize", choices=["auto", "none", "channel"], default="auto",
+                   help="Input normalisation. 'auto' (default) takes the mode and "
+                        "statistics from the checkpoint and errors if it has none; "
+                        "'none' reproduces the pre-Phase-1 unnormalised path.")
     p.add_argument("--dequantize", action="store_true",
                    help="Dequantize embeddings on-the-fly. "
                         "Function is selected from --embedding-name: "
@@ -740,7 +751,7 @@ def main() -> None:
     logger.info(f"Device: {device}")
 
     # ── Build model from the registry ─────────────────────────────────────────
-    from datasets.registry import get_in_channels
+    from datasets.registry import check_checkpoint_provenance, get_in_channels
     from models import get_family, resolve_arch
     from training.tasks import LCZResNetModule, LCZUNetModule
 
@@ -749,6 +760,16 @@ def main() -> None:
 
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     state = ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
+
+    # Before anything is built: a checkpoint from another product loads cleanly
+    # whenever the channel counts agree, and then predicts confident nonsense.
+    # Re-raised as SystemExit so the CLI reports it like the other user errors
+    # here, rather than as a traceback out of the registry.
+    if isinstance(ckpt, dict):
+        try:
+            check_checkpoint_provenance(ckpt, args.embedding_name)
+        except ValueError as e:
+            raise SystemExit(str(e)) from None
 
     if args.model_type == "linear_probe" and "norm.running_mean" not in state:
         # Legacy probe from the retired linear_probe.py script: fc-only state
@@ -793,6 +814,46 @@ def main() -> None:
     model.eval()
     logger.info(f"Loaded checkpoint: {args.checkpoint}")
 
+    # ── Input normalisation, read from the checkpoint ─────────────────────────
+    # It has to match training exactly or every map produced is wrong, so the
+    # stats travel inside the checkpoint. Checkpoints written before Phase 1
+    # carry no normalisation keys; rather than silently assuming "none" (which
+    # would quietly mis-scale a normalised model), demand --normalize none.
+    normalize = None
+    ckpt_norm = ckpt.get("normalize") if isinstance(ckpt, dict) else None
+    if args.normalize == "auto":
+        if ckpt_norm is None:
+            raise SystemExit(
+                f"{args.checkpoint} carries no normalisation metadata (trained "
+                "before Phase 1, or from a script that does not record it). Pass "
+                "--normalize none to reproduce the pre-Phase-1 unnormalised path, "
+                "or retrain so the stats are stored in the checkpoint."
+            )
+        mode = ckpt_norm
+    else:
+        mode = args.normalize
+        if ckpt_norm is not None and ckpt_norm != mode:
+            logger.warning(
+                f"--normalize {mode} overrides the checkpoint's '{ckpt_norm}' — "
+                "predictions will not match the trained model unless this is "
+                "a deliberate reproduction of the old path."
+            )
+
+    if mode == "channel":
+        mean, std = ckpt.get("channel_mean"), ckpt.get("channel_std")
+        if mean is None or std is None:
+            raise SystemExit(
+                f"{args.checkpoint} says normalize='channel' but has no "
+                "channel_mean/channel_std arrays."
+            )
+        normalize = (np.asarray(mean, dtype=np.float32),
+                     np.asarray(std, dtype=np.float32))
+        logger.info(
+            f"Input normalisation: channel (median std {np.median(normalize[1]):.4f})"
+        )
+    else:
+        logger.info("Input normalisation: none")
+
     # ── Dequantize function (auto-applied for coop/seamless) ──────────────────
     dequantize_fn, _ = resolve_dequantize(args.embedding_name, force=args.dequantize)
 
@@ -810,6 +871,7 @@ def main() -> None:
         batch_size=args.batch_size,
         device=device,
         dequantize_fn=dequantize_fn,
+        normalize=normalize,
         out_crs=args.out_crs,
         out_res=args.out_res,
         year=args.year,

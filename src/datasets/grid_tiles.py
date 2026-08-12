@@ -257,6 +257,8 @@ class GridSegDataModule:
         eval_label_source: str | None = None,
         aux_dropout_p: float = 0.0,
         aux_channel_start: int | None = None,
+        noise_sigma: float = 0.05,
+        noise_prob: float = 0.5,
     ) -> None:
         self.all_items = all_items
         self.split_map = split_map
@@ -268,6 +270,8 @@ class GridSegDataModule:
         self.eval_label_source = eval_label_source
         self.aux_dropout_p = aux_dropout_p
         self.aux_channel_start = aux_channel_start
+        self.noise_sigma = noise_sigma
+        self.noise_prob = noise_prob
 
     def setup(self) -> None:
         def _key(it):
@@ -318,7 +322,9 @@ class GridSegDataModule:
 
     def _train_collate(self, batch: list) -> dict:
         images, masks = GridSegDataModule._pad_batch(batch)
-        images, masks = augment_batch(images, masks)
+        images, masks = augment_batch(
+            images, masks, noise_sigma=self.noise_sigma, noise_prob=self.noise_prob
+        )
         if self.aux_dropout_p > 0 and self.aux_channel_start is not None:
             drop = torch.rand(images.shape[0]) < self.aux_dropout_p
             images[drop, self.aux_channel_start:] = 0.0

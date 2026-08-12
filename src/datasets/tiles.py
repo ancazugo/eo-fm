@@ -53,28 +53,59 @@ def tessera_grid_geometry(tile_name: str):
     return crs, from_origin(left, top, 10, 10)
 
 
-def tessera_grid_bounds_4326(tile_name: str) -> tuple[float, float, float, float]:
-    """WGS84 bounds of a tessera 0.1° tile's raster, from its name alone.
+def tessera_grid_utm_rect(tile_name: str):
+    """The tile raster's extent as a rectangle in its own UTM CRS.
 
-    Same quantity the tesserav1.1_global branch reads out of a geoinfo tiff
-    (raster bounds reprojected to EPSG:4326), so both indexes hold comparable
-    footprints — slightly larger than the nominal cell, since the UTM
-    rectangle circumscribes the lat/lon quadrilateral.  The pixel counts
-    follow from the reprojected cell (validated against the npy shape on 500
-    v2 tiles), so no file has to be opened to index a tile.
+    Pixel counts follow from the reprojected cell (validated against the npy
+    shape on 500 v2 tiles), so no file has to be opened to index a tile.
     """
     import rasterio.warp
 
-    crs, _ = tessera_grid_geometry(tile_name)
+    crs, transform = tessera_grid_geometry(tile_name)
     m = TESSERA_GRID_RE.match(tile_name)
     lon, lat = float(m.group("lon")), float(m.group("lat"))
     left, bottom, right, top = rasterio.warp.transform_bounds(
         "EPSG:4326", crs, lon - 0.05, lat - 0.05, lon + 0.05, lat + 0.05
     )
     width, height = round((right - left) / 10), round((top - bottom) / 10)
-    return rasterio.warp.transform_bounds(
-        crs, "EPSG:4326", left, top - height * 10, left + width * 10, top
+    return crs, box(transform.c, transform.f - height * 10,
+                    transform.c + width * 10, transform.f)
+
+
+def exact_footprint_4326(src_crs, rect):
+    """A raster's WGS84 footprint as a quadrilateral, not a bounding box.
+
+    A UTM rectangle maps to a curved quadrilateral in WGS84, so its bounding
+    box claims slivers along the edges that hold no data — 0.15% of the box
+    area at the equator, 3.8% at 60°N, 10.7% at 78°N.  Indexing on that bbox
+    makes coverage tests report patches as fully covered when the crop
+    actually comes out truncated (693 of the 148,570 tesserav2 patches on the
+    first pass).
+
+    transform_geom maps the four corners only, so the edges come back as
+    chords of the true curves rather than the curves themselves.  Measured
+    against a 50 m-segmentized reference the residual is sub-pixel — 0.09 m
+    at the equator, 1.1 m at 60°N, 3.1 m at 78°N against a 10 m pixel — so
+    densifying would cost ~700 vertices per tile across a 40k-tile index to
+    move a boundary by a fraction of a pixel.  STRtree still queries by
+    bounding box, so candidate matching is unchanged either way.
+    """
+    import rasterio.warp
+    from shapely.geometry import mapping, shape
+
+    return shape(
+        rasterio.warp.transform_geom(
+            src_crs.to_string() if hasattr(src_crs, "to_string") else src_crs,
+            "EPSG:4326",
+            mapping(rect),
+        )
     )
+
+
+def tessera_grid_footprint_4326(tile_name: str):
+    """Exact WGS84 footprint polygon of a tessera 0.1° tile, from its name."""
+    crs, rect = tessera_grid_utm_rect(tile_name)
+    return exact_footprint_4326(crs, rect)
 
 
 # ---------------------------------------------------------------------------
@@ -204,8 +235,8 @@ def build_tile_index(
             if not tiff_path.exists():
                 continue
             with rasterio.open(tiff_path) as ds:
-                l, b, r, t = rasterio.warp.transform_bounds(ds.crs, "EPSG:4326", *ds.bounds)
-            geoms.append(box(l, b, r, t))
+                # Exact footprint, not its bbox — see exact_footprint_4326.
+                geoms.append(exact_footprint_4326(ds.crs, box(*ds.bounds)))
             paths.append(npy_dir)
         logger.info(f"Tile index (tesserav1.1_global): {len(paths)} tiles from {npy_root}")
         return paths, STRtree(geoms)
@@ -226,12 +257,12 @@ def build_tile_index(
             )
 
         # v2 has no geoinfo tiffs, so footprints come from the tile names
-        # (tessera_grid_bounds_4326) rather than from opening 40k rasters.
+        # (tessera_grid_footprint_4326) rather than from opening 40k rasters.
         paths, geoms = [], []
         for npy_dir in sorted(npy_root.iterdir()):
             if not npy_dir.is_dir() or not TESSERA_GRID_RE.match(npy_dir.name):
                 continue
-            geoms.append(box(*tessera_grid_bounds_4326(npy_dir.name)))
+            geoms.append(tessera_grid_footprint_4326(npy_dir.name))
             paths.append(npy_dir)
         if not paths:
             raise FileNotFoundError(f"No grid_* tile directories found in {npy_root}")
@@ -452,6 +483,20 @@ def open_tile(path: Path) -> xr.DataArray:
     """Open a .zarr or .tif tile as a (band, y, x) DataArray with CRS set."""
     import rioxarray as rxr
 
+    # .zarr FIRST: a zarr store is itself a directory, so this must be tested
+    # before the is_dir() branch below — otherwise every zarr tile is misrouted
+    # to the Tessera NPY reader and dies with "NPY files not found".
+    if path.suffix == ".zarr":
+        ds = xr.open_zarr(str(path), chunks=False)
+        da = ds["embedding"]
+        if da.dims != ("band", "y", "x"):
+            da = da.transpose("band", "y", "x")
+        if da.rio.crs is None and "spatial_ref" in ds:
+            crs_wkt = ds["spatial_ref"].attrs.get("crs_wkt")
+            if crs_wkt:
+                da = da.rio.write_crs(crs_wkt)
+        return da
+
     # Tessera global (v1.1 / v2): path is the NPY subdir
     if path.is_dir():
         return _open_tile_tessera_npy_dir(path)
@@ -466,19 +511,7 @@ def open_tile(path: Path) -> xr.DataArray:
         if infer_dir.exists():
             return _open_tile_tessera11(path)
 
-    if path.suffix == ".zarr":
-        ds = xr.open_zarr(str(path), chunks=False)
-        da = ds["embedding"]
-        if da.dims != ("band", "y", "x"):
-            da = da.transpose("band", "y", "x")
-        if da.rio.crs is None and "spatial_ref" in ds:
-            crs_wkt = ds["spatial_ref"].attrs.get("crs_wkt")
-            if crs_wkt:
-                da = da.rio.write_crs(crs_wkt)
-    else:
-        da = rxr.open_rasterio(path)
-
-    return da
+    return rxr.open_rasterio(path)
 
 
 # ---------------------------------------------------------------------------
