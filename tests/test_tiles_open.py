@@ -1,4 +1,5 @@
-"""Regression tests for datasets.tiles.open_tile's format dispatch.
+"""Regression tests for datasets.tiles: open_tile's format dispatch and the
+WGS84 tile footprints the spatial index is built from.
 
 A zarr store is a DIRECTORY, so the ``.zarr`` branch has to be tested before the
 ``path.is_dir()`` branch that routes Tessera global tiles to the NPY reader.
@@ -6,8 +7,9 @@ When the order was the other way round, every ``.zarr`` tile raised
 "NPY files not found" and the ``.zarr`` branch was unreachable — which broke the
 ``alpha_earth`` (GEE) and ``tessera`` families end to end.
 
-These run against the real tile stores and skip when the data is not mounted,
-so they are safe in an offline checkout.
+The open_tile tests run against the real tile stores and skip when the data is
+not mounted, so they are safe in an offline checkout. The footprint tests derive
+everything from a tile name and need no data at all.
 """
 
 from __future__ import annotations
@@ -60,3 +62,68 @@ def test_open_tile_reads_a_tessera_npy_directory():
     assert da.dims == ("band", "y", "x")
     assert da.sizes["band"] == 128
     assert da.rio.crs is not None
+
+
+# ── Tile footprints (no data needed — derived from the tile name) ─────────────
+
+# A near-equatorial tile and a high-latitude one. Reprojection distortion grows
+# with latitude, so the second is where a bounding box over-claims most.
+EQUATORIAL_TILE = "grid_36.85_-1.35"      # Nairobi
+POLAR_TILE = "grid_16.55_78.05"           # Svalbard
+
+
+@pytest.mark.parametrize("tile_name", [EQUATORIAL_TILE, POLAR_TILE])
+def test_footprint_is_strictly_smaller_than_its_bounding_box(tile_name):
+    """The whole point of exact_footprint_4326: the bbox claims land it has not got."""
+    from shapely.geometry import box
+
+    from datasets.tiles import tessera_grid_footprint_4326
+
+    footprint = tessera_grid_footprint_4326(tile_name)
+    bbox = box(*footprint.bounds)
+
+    assert footprint.within(bbox)
+    assert footprint.area < bbox.area
+
+
+def test_a_patch_in_the_bbox_sliver_is_not_covered_by_the_exact_footprint():
+    """The behaviour _fully_covered depends on, stated as a test.
+
+    A point in the corner sliver passes a bounding-box coverage test and fails
+    the exact one. Under the bbox the extraction accepted such patches and
+    crop_patch returned a truncated array, which PatchDataset then stretched to
+    the model's patch size — a silently distorted sample rather than a dropped
+    one.
+    """
+    from shapely.geometry import box
+
+    from datasets.tiles import tessera_grid_footprint_4326
+
+    footprint = tessera_grid_footprint_4326(POLAR_TILE)
+    bbox = box(*footprint.bounds)
+
+    sliver = bbox.difference(footprint)
+    assert not sliver.is_empty, "precondition: the bbox over-claims somewhere"
+
+    probe = sliver.representative_point()
+    assert probe.within(bbox)
+    assert not probe.within(footprint)
+
+
+def test_distortion_grows_with_latitude():
+    """Ordering check: the correction is negligible at the equator, large at 78N.
+
+    Pins the reason the fix exists at all — if these were the same magnitude the
+    bounding box would have been good enough.
+    """
+    from shapely.geometry import box
+
+    from datasets.tiles import tessera_grid_footprint_4326
+
+    def over_claim(tile_name: str) -> float:
+        fp = tessera_grid_footprint_4326(tile_name)
+        return 1.0 - fp.area / box(*fp.bounds).area
+
+    assert over_claim(EQUATORIAL_TILE) < 0.01
+    assert over_claim(POLAR_TILE) > 0.05
+    assert over_claim(POLAR_TILE) > 10 * over_claim(EQUATORIAL_TILE)
