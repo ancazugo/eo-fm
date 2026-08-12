@@ -1141,16 +1141,27 @@ truncated patches against 8,108 exact tile footprints.
 
 | split | absent | would recover | correctly rejected | no tile at all |
 |---|---|---|---|---|
-| training | 9,422 | 223 (2.4%) | 9,199 | 9,144 |
+| training | 9,422 | 191 (2.0%) | 9,199 | 9,144 |
 | validation | 241 | 0 (0.0%) | 241 | 241 |
 | testing | 330 | 0 (0.0%) | 330 | 319 |
 
+> **Corrected 2026-08-12 while doing B4** (`e750f8e`). This table first reported
+> **223 (2.4%)** recoverable training patches and **zero** blocked by the corrupt
+> tile. The corrupt-tile test could never fire: `build_tile_index` returns the NPY
+> *directory*, Tessera names tiles by fractional coordinates, and `Path.stem`
+> reads the trailing `.25` as a suffix — so every name was compared as
+> `grid_121.35_31` and never matched `grid_121.35_31.25`. All 8,108 v1.1 global
+> tiles were affected. **32 of the 223 depend solely on the corrupt Shanghai tile
+> and are not recoverable.** Fixed by `datasets.tiles.tile_index_name`; the
+> conclusion below is unchanged, and so are every truncation count and the
+> zero-recoverable finding on validation and test.
+
 **The evaluation-coverage hole is permanent.** Sydney's 329 missing test patches
 and Mumbai's 241 missing validation patches are ground Tessera does not cover, so
-re-extraction cannot restore test-split comparability. The 223 recoverable
-training patches are ordinary urban classes in London (111), Shanghai (32),
-Qingdao (26) and Guangzhou (22) — of the 9,690 absent LCZ 17 patches, 9 are
-recoverable.
+re-extraction cannot restore test-split comparability. The 191 recoverable
+training patches are ordinary urban classes in London (111), Qingdao (26),
+Guangzhou (22), Hong Kong (7) and Wuhan (6) — Shanghai now contributes none — and
+of the 9,690 absent LCZ 17 patches, 9 are recoverable.
 
 Truncation splits in two, and the second half is not what it looks like. 258 of
 560 truncated training patches are now correctly rejected (and 17 of 17 on test).
@@ -1196,12 +1207,10 @@ rather than remove them.**
 
 ### Open items
 
-1. **The multi-UTM-zone `crop_patch` defect** is now quantified on
-   `tesserav1.1_global`: 302 training patches truncated at a zone seam, plus
-   whatever it costs the other families (unmeasured). It is out of Phase 2 scope
-   — no training or model logic changes here — but it belongs in the GATE 3
-   re-extraction decision, since re-extracting without fixing it reproduces the
-   same 302.
+1. ~~**The multi-UTM-zone `crop_patch` defect**~~ **Scoped by Amendment B4
+   below**: 22.1% of zone-straddling patches come back truncated, all of them in
+   the training split. Still out of Phase 2 scope to *fix*; still a GATE 3 input.
+   What remains unmeasured is what it costs the other two families.
 2. **Whether Arm B should use `--max-invalid-frac 0.25 --min-native-frac 0.5`
    per family as Rev A specifies** is already settled; noted only because 2.0c
    shows the nodata criterion does independent work on just 178 training patches
@@ -1210,4 +1219,94 @@ rather than remove them.**
 
 ### GATE 2.0 status
 
-Reached. Tasks 2.1–2.5 not started.
+Reached. Task 2.1 running.
+
+---
+
+### Amendment B4 — The multi-zone mosaic defect, scoped (measure only)
+
+Full artefacts: `diagnostics/mosaic_scope.md` / `diagnostics/mosaic_scope.json`.
+
+Task 2.0d found 294 of the 302 truncated-but-accepted patches at a UTM zone seam.
+That is a numerator without a denominator — it says truncated patches sit at
+seams, not that sitting at a seam truncates a patch. B4 supplies the denominator
+by scanning all 390,680 `tesserav1.1_global` patches on disk instead of only the
+failures.
+
+| population | n | truncated | rate |
+|---|---|---|---|
+| all on disk | 390,680 | 320 | 0.08% |
+| single tile | 353,386 | 149 | 0.04% |
+| multiple tiles | 37,294 | 171 | 0.46% |
+| multiple tiles, **one** zone | 36,534 | 3 | 0.01% |
+| **straddling a zone boundary** | **760** | **168** | **22.11%** |
+
+**Of the 760 patches that straddle a UTM zone boundary, 168 come back truncated —
+22.1%, against 0.01% for patches that span multiple tiles within a single zone.**
+
+That contrast is the result. `merge_multi_crs` is implicated and `numpy_mosaic`
+is essentially clean, but straddling is **not on its own sufficient**: a further
+trigger selects which 22% fail, and identifying it is the prerequisite before
+Phase 4 can judge its map-production exposure. Read the other way, 52.5% of all
+truncated patches straddle a zone and 53.4% span multiple tiles — the rest are
+ordinary tile-edge coverage failures, a separate phenomenon.
+
+Two things bound the risk:
+
+- **All 760 straddling patches are in the training split.** Validation and
+  testing contain none, so the defect cannot reach any Phase 2 evaluation metric
+  by any route.
+- The manifest already excludes them via `native_frac >= 0.5`, so Arm A is
+  unaffected regardless.
+
+By city, all at the seams a UTM zone predicts: London 271 straddling / 75
+truncated (27.7%), Guangzhou 139 / 24 (17.3%), Hong Kong 68 / 16 (23.5%),
+Qingdao 49 / 11 (22.4%), Wuhan 20 / 1 (5.0%).
+
+Rev B also asks whether the truncated patches that span tiles *without* crossing
+a zone share a property, which would indicate a second mechanism. There are
+three, and they are strikingly uniform: all Shanghai, all training, all exactly
+two tiles, all cropped to `7x33`. None touch the corrupt tile. Too few to
+generalise from, and `numpy_mosaic`'s 0.01% rate argues against a second
+systematic mechanism.
+
+Definition note: "spans multiple tiles" is taken from what the extractor does —
+`extract_so2sat_embeddings` queries the STRtree with no predicate and passes
+every bounding-box candidate to `crop_patch`. The table uses truly-intersecting
+tiles, since `crop_patch` routes on how many clips come back non-empty; under the
+extractor's looser bbox definition the ratio is 19.7% (168 of 852). Under Phase
+1.75's stricter 0.85-per-side truncation rule it is 38.9% (296 of 760).
+
+**Nothing was fixed.** Rev B is explicit that the mosaic is not repaired in
+Phase 2; this is a GATE 3 input beside the re-extraction recovery count.
+
+### Task 2.1 — Reproduce the pre-fix baseline
+
+Launcher `run_phase2_anchor.sh`. Three seeds of the opt3 recipe on
+`tesserav1.1_global` with the pre-fix flags — `--normalize none --nodata-mode
+zero --max-invalid-frac 1.0`, **native per-family coverage, no manifest** —
+against which every later Phase 2 number is measured.
+
+Results pending; the runs are in flight.
+
+#### The augmentation is distributionally unchanged
+
+`f45fd80` replaced a per-sample loop with batched tensor ops, so a fixed seed no
+longer reproduces the old draw sequence and the anchor can only be held to
+**seed-level** agreement with kappa 0.6190. `tests/test_augment_distribution.py`
+pins that this is an RNG-stream change and not a semantics change, comparing the
+current implementation against the pre-Phase-1 one vendored from `e12c7c2`:
+
+| property | instrument | result |
+|---|---|---|
+| values, pooled | KS, 768,000 per side | D = 4.60e-04, **p = 1.0000** |
+| values, per channel | KS across a 250× scale range | p ≥ 0.982 |
+| geometry | frequency of the 8 dihedral transforms | uniform in both; χ² 5.68 and 2.87 on df 7 |
+| noise gate | application rate | 0.4997 vs 0.5047 |
+| noise magnitude | KS on the perturbations | p = 0.985; σ 0.05002 vs 0.05004 |
+| **RNG stream** | equality from an identical seed | **differs — the negative control** |
+
+Geometry needs its own instrument because a pooled KS is blind to it: flips and
+rotations permute pixel positions, and the pooled distribution is invariant to
+permutation. Every test seeds `torch` explicitly so the p-values are fixed rather
+than resampled per run.
