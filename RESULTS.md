@@ -968,10 +968,36 @@ Reached. Phase 2 not started.
 
 ---
 
-## Phase 2 — Revalidation (`PLAN-v3-phase2-revA.md`)
+## Phase 2 — Revalidation (`PLAN-v3-phase2-revA.md`, amended by `PLAN-v3-phase2-revB.md`)
 
 Branch `exp/p2-revalidation`, cut from `master` after Phases 1, 1.5 and 1.75 were
 merged (`30092a6`). No changes to model or training logic in this phase.
+
+Rev B amends Rev A following GATE 2.0; Rev A stands except where superseded. Its
+amendments and where they land:
+
+| | amendment | lands in |
+|---|---|---|
+| B1 | Tessera's water gap is a chapter-level finding (archive-documentation check, coverage figure, deployment consequence) | write-up |
+| B2 | Task 2.2 becomes a 2×2 (train arm × eval set), replacing Rev A's A−B difference; **plus one pre-registered prediction, below** | Task 2.2 |
+| B3 | Metrics separate the easy classes: macro-F1 first, built-only LCZ 1–10 alongside the 17-class figures, per-class recall with LCZ 17 flagged | Task 2.2 onward |
+| B4 | Scope the multi-UTM-zone mosaic defect — measure only, no fix in Phase 2 | Task 2.1 turn |
+| B5 | `native_frac` threshold sensitivity: one Arm A config under the tighter per-side rule | end of Phase 2 |
+| B6 | Tasks 2.1, 2.3, 2.4, 2.5 confirmed unchanged | — |
+
+Two supersessions worth stating explicitly, because earlier text in this file
+says otherwise:
+
+- **B2 replaces the "A−B difference" with the full 2×2.** §2.0c below records a
+  dual-eval of Arm A checkpoints only, which is the A row (A/A and A/B). Rev B
+  adds the B row: Arm B checkpoints are also evaluated on both test sets. A/A vs
+  A/B is the test class-mix effect; A/A vs B/A the training-data effect.
+  Cross-family claims use the **common-test column only** — native test differs
+  per family, so B/B may never appear in a cross-family table.
+- **B3 supersedes OA as the headline.** LCZ 17 alone is 12–14% of the dataset,
+  near-ceiling for every family, and the manifest moves that share, so OA is
+  dominated by a class nobody competes on. Metric plumbing lands with Task 2.2,
+  where B3 first applies; Task 2.1 below already reports macro-F1 first.
 
 ### Pre-registration
 
@@ -996,6 +1022,21 @@ Committed before any Phase 2 run launched, verbatim from Rev A:
   constraint and the gap needs a different explanation — most likely that 64-d
   annual composites carry less LCZ-relevant structure than 128-d time-series
   representations.
+
+#### Addition from Rev B (Amendment B2)
+
+Committed before the Task 2.1 anchor runs launched and before any Task 2.2 run
+exists, verbatim from Rev B:
+
+> LCZ 17 recall will be **lower** on the common test set than the native one,
+> because the excluded patches are pure ocean while the surviving water patches
+> are coastal and mixed. If water recall rises instead, the filter is not doing
+> what the audit says and Task 2.2 stops pending an explanation.
+
+This is a prediction about the A/A-versus-A/B contrast, so Task 2.2 tests it;
+Task 2.1 runs no manifest and cannot. The stop condition is the point of
+recording it: a rise would mean the 2.0c audit mischaracterises the filter, and
+every Arm A number rests on that characterisation.
 
 ### Task 2.0 — Common manifest and coverage control
 
