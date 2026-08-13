@@ -1219,7 +1219,7 @@ rather than remove them.**
 
 ### GATE 2.0 status
 
-Reached. Task 2.1 running.
+Reached. Task 2.1 complete; Tasks 2.2-2.5 not started.
 
 ---
 
@@ -1287,7 +1287,91 @@ Launcher `run_phase2_anchor.sh`. Three seeds of the opt3 recipe on
 zero --max-invalid-frac 1.0`, **native per-family coverage, no manifest** —
 against which every later Phase 2 number is measured.
 
-Results pending; the runs are in flight.
+Metrics ordered macro-F1 first per Amendment B3.
+
+| seed | epochs | best val_kappa (epoch) | macro-F1 | OA | kappa | macro acc |
+|---|---|---|---|---|---|---|
+| 0 | 12 | 0.5667 (2) | 0.5641 | 0.6409 | 0.6097 | 0.5822 |
+| 1 | 12 | 0.5857 (2) | 0.5460 | 0.6497 | 0.6175 | 0.5690 |
+| 2 | 25 | 0.5892 (15) | 0.5651 | 0.6438 | 0.6111 | 0.5904 |
+| **mean ± sd** | | | **0.5584 ± 0.0108** | **0.6448 ± 0.0045** | **0.6128 ± 0.0042** | **0.5805 ± 0.0108** |
+
+W&B `p2-anchor-tessera-seed{0,1,2}` (`p3x6xm0v`, `vh8rzsee`, `49tr6tzw`).
+
+#### The comparison is against three historical runs, not one number
+
+The 0.6190 anchor is not alone in W&B: two further pre-fix Tessera runs with the
+same flags already existed, so the pre-fix baseline is itself a distribution.
+
+| run (pre-Phase-1) | epochs | best val_kappa (epoch) | macro-F1 | OA | kappa |
+|---|---|---|---|---|---|
+| `opt3-lr5e-4-warmup3` | 17 | 0.5747 (7) | 0.5652 | 0.6514 | 0.6190 |
+| `opt3-tessera-seed1` | 12 | 0.5892 (2) | 0.5586 | 0.6586 | 0.6268 |
+| `opt3-tessera-seed2` | 14 | 0.5869 (4) | 0.5634 | 0.6484 | 0.6171 |
+| **mean ± sd** | | | **0.5624 ± 0.0034** | **0.6528 ± 0.0052** | **0.6210 ± 0.0051** |
+
+Early stopping between epochs 12 and 25, with val_kappa peaking in the first
+handful and training loss still falling, is the **normal shape of this recipe**,
+not a failure — the historical runs stopped at 12, 14 and 17. Seed 0's stop at
+epoch 12 with its peak at epoch 2 matches `opt3-tessera-seed1` almost exactly.
+
+#### Verdict: reproduced within seed noise, but not by Rev A's literal test
+
+Rev A asks whether the existing 0.6190 "falls inside" mean ± std. **It does
+not** — it sits **+1.50 sd** above the Task 2.1 mean, inside a 2 sd interval
+([0.6044, 0.6211]) but outside 1 sd ([0.6086, 0.6169]). Stated plainly rather
+than widened to 2 sd and declared a pass.
+
+Against the full historical distribution, no metric differs significantly at
+n = 3 per side (Welch):
+
+| metric | Task 2.1 | historical | difference | p |
+|---|---|---|---|---|
+| macro-F1 | 0.5584 ± 0.0108 | 0.5624 ± 0.0034 | −0.0040 | 0.593 |
+| OA | 0.6448 ± 0.0045 | 0.6528 ± 0.0052 | −0.0080 | 0.116 |
+| kappa | 0.6128 ± 0.0042 | 0.6210 ± 0.0051 | −0.0082 | 0.101 |
+
+So the honest reading is: **a consistent ~0.8-point shortfall on kappa and OA
+that n = 3 cannot distinguish from seed noise**, and a macro-F1 gap of 0.4
+points that is nowhere near significant. Under B3, macro-F1 is the headline
+metric, and it is the one that agrees best.
+
+No mechanism is available to explain a real shift. The flags reproduce the old
+behaviour by construction (`--normalize none` skips the stats pass entirely,
+`--nodata-mode zero` restores zero-filling, σ 0.05 is absolute under
+`--normalize none`); `tests/test_augment_distribution.py` shows the augmentation
+is distributionally unchanged; the extracted npys are byte-identical to those the
+historical runs read (342,944 files, untouched); and the `patch_id` collision fix
+predates the original run (2026-06-10 against 2026-06-16), so both sides are on
+the corrected split.
+
+Two caveats belong with these numbers:
+
+- **The historical runs' seeds are not recorded** — `seed` is absent from all
+  three configs, so their spread mixes seed variation with ordinary run-to-run
+  nondeterminism, and it cannot be assumed they used three distinct seeds. Task
+  2.1's three are explicitly 0, 1 and 2.
+- **n = 3 per side is weak.** A −0.008 shift at p ≈ 0.1 is exactly the regime
+  where more seeds would resolve the question and three cannot.
+
+**The band every later improvement must clear.** Pooling all six runs carrying
+pre-fix flags gives **kappa 0.6169 ± 0.0061**, range [0.6097, 0.6268]. That is
+the more defensible anchor than either triple alone, and it is the number Phase 2
+improvements should be measured against.
+
+#### Verification
+
+| check | result |
+|---|---|
+| `pytest` | **319 passed, 1 skipped** (303 + 12 augmentation + 4 tile-name) |
+| split sizes, all three runs | **342,944 / 23,878 / 23,858** — the native counts, not the manifest's 341,754 / 23,878 / 23,852 |
+| W&B config, all three | `patch_manifest: None`, `patch_manifest_sha256: None`, `max_invalid_frac: 1`, `normalize: none`, `nodata_mode: zero`, `noise_sigma: 0.05`, `seed: 0/1/2` |
+| checkpoints, all three | carry `normalize`, `max_invalid_frac`, `patch_manifest_sha256` and the five provenance fields; load under `weights_only=True` |
+| the `--normalize none` warning | emitted verbatim in every run, as intended for a deliberate ablation |
+| chain | three runs, all exit 0 |
+| B4 wrote nothing | Tessera extraction dir 342,944 files before and after |
+| **GATE 1 regression** | md5 `7c2222b04ad830fe0c08eb4ee686df51` — **unchanged** |
+| pre-registration ordering | B2 committed 22:58:22, first run started 22:59:10 |
 
 #### The augmentation is distributionally unchanged
 
