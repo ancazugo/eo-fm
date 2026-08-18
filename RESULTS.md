@@ -968,7 +968,7 @@ Reached. Phase 2 not started.
 
 ---
 
-## Phase 2 — Revalidation (`PLAN-v3-phase2-revA.md`, amended by `PLAN-v3-phase2-revB.md`)
+## Phase 2 — Revalidation (`PLAN-v3-phase2-revA.md`, amended by `PLAN-v3-phase2-revB.md` and `-revC.md`)
 
 Branch `exp/p2-revalidation`, cut from `master` after Phases 1, 1.5 and 1.75 were
 merged (`30092a6`). No changes to model or training logic in this phase.
@@ -1219,7 +1219,8 @@ rather than remove them.**
 
 ### GATE 2.0 status
 
-Reached. Task 2.1 complete; Tasks 2.2-2.5 not started.
+Reached. Tasks 2.1 and 2.1b complete. Task 2.1b-iii is unblocked by Rev C's own
+gate but not launched; Tasks 2.1c and 2.2-2.5 not started.
 
 ---
 
@@ -1394,3 +1395,137 @@ Geometry needs its own instrument because a pooled KS is blind to it: flips and
 rotations permute pixel positions, and the pooled distribution is invariant to
 permutation. Every test seeds `torch` explicitly so the p-values are fixed rather
 than resampled per run.
+
+---
+
+### Task 2.1b — Two named mechanisms for the shortfall, both excluded
+
+Rev C names two things the GATE 2.1 verification could not have detected and blocks
+Task 2.2 on both. Neither needed a training run. **Both come back clean, and the
+~0.8-point shortfall therefore stands unexplained.**
+
+#### 2.1b-i — Augmentation independence within a batch
+
+GATE 1 described the Phase 1 change as "one batched draw instead of N scalar draws",
+which reads two ways. `torch.rand(n)` keeps per-sample randomness; `torch.rand(1)`
+broadcast hands every sample in a batch the **same** transform, collapsing
+augmentation diversity per epoch from 8^B states to 8. Every test committed with
+Task 2.1 passes under both, because the marginal distribution of augmented values is
+identical either way — that is precisely why the KS results above could not settle it.
+
+`src/training/augment.py:69-71` draws length-`n` tensors, so the source says
+per-sample. Measured rather than read off the source, by recovering the transform
+each sample **actually received** (distinct-pixel inputs, exact match against the 8
+dihedral elements) so a correct draw that is broadcast during application would also
+be caught:
+
+| measurement | old (pre-Phase-1) | new (current) |
+|---|---|---|
+| distinct `(hflip, vflip, rot_k)` per batch of 64, mean of 16 | 15.73 | 15.72 |
+| distinct **dihedral elements** per batch of 64, mean of 8 | 8.000 | **8.000** |
+| joint over 1000 batches | all 16 states, 0.0601–0.0646 | all 16, 0.0608–0.0643 |
+| within-batch pairwise agreement, 200 batches (chance = 0.1250) | 0.1254 | **0.1242** |
+| noise gate, per-batch fraction noised | — | mean 0.5016, range 0.312–0.703 |
+| noise gate, batches at exactly 0.0 or 1.0 | — | **0 of 1000** |
+
+All four draws — hflip, vflip, rot_k and the noise gate — are per-sample.
+**The mechanism is excluded.** Pinned by three new tests in
+`tests/test_augment_distribution.py` (`2de495c`), each verified to fail against a
+deliberately broadcast implementation and to pass at six seeds.
+
+Two honest notes on this result:
+
+- `test_every_dihedral_transform_is_reachable_and_equally_likely`, committed with
+  Task 2.1, **would already have failed** under broadcast: it asserts all 8 transform
+  counts are non-zero from a single 4000-sample call. The mechanism was excluded
+  before Rev C proposed it. It was not framed that way, and the new tests measure it
+  at the real batch size and add the within-batch dimension, so they still earn their
+  place — but the exclusion is not new evidence.
+- Rev C specified "a chi-square test of independence between sample index and
+  augmentation state". That test was written, measured and **dropped**. It does not
+  detect broadcast — verified against the broken implementation, where it *passes*,
+  because broadcast makes samples dependent on each other and not on their position,
+  so every position keeps the same marginal distribution. It is also flaky: a 64x8
+  table over 200 batches leaves ~25 counts per cell and the old path returned
+  p = 0.0035 at one of four seeds tried. Pairwise agreement is the statistic that
+  separates the two readings; the reasoning is recorded in the test file.
+
+#### 2.1b-ii — `Path.stem` tile-name collisions
+
+The collision is real and larger than "truncation" suggests. On a 0.1° grid,
+`grid_0.55_52.05` through `grid_0.55_52.95` all stem to `grid_0.55_52` — ten-way:
+
+| family | tile dirs | distinct names | distinct stems | collisions |
+|---|---|---|---|---|
+| `tesserav1.1_global` | 8,108 | 8,108 | **1,546** | 6,562 |
+| `tesserav2` | 40,075 | 40,075 | **23,938** | 16,137 |
+
+Every `.stem` in the repository, classified:
+
+| site | subject | class |
+|---|---|---|
+| `diagnostics/reextraction_scope.py:76-80` | tile | diagnostic — uses `tile_index_name` since `e750f8e` |
+| `diagnostics/mosaic_scope.py:73-81` | tile | diagnostic — uses `tile_index_name` |
+| `datasets/tiles.py:47` | tile | inside `tile_index_name`, geoinfo `.tiff` branch (no fractional suffix) |
+| `infer_roi.py:595` | **output** GeoTIFF filename | not a tile |
+| `osm_lcz_relabel.py:362,426` | output filename, plot title | not a tile |
+| `embedding_explorer.py:80` | parquet UI label | not a tile |
+| `datasets/so2sat.py:80,414,615`, `pack_patches.py:98`, `knn_baseline.py:401`, `embedding_projection.py:90`, `diagnostics/embedding_stats.py:113`, `download_missing_coop_tiles.py:50` | `patch_NNNNNN.npy` | patch id — 342,944 files, **0 stem collisions**, 0 filenames with an extra dot |
+
+**No consumer is in the data path**, and four independent lines of evidence say the
+truncated name never reached it:
+
+- extraction resolves tiles geometrically: `tree.query(patch_geom)` → positions →
+  `tile_paths[i]` → `crop_patch` (`extract_so2sat_embeddings.py:219-238`). No name is
+  formed at any point. `infer_roi.py:439-445` uses the same path; its `.name` appears
+  only in log lines.
+- `open_tile` routes on `path.is_dir()`, and `_open_tile_tessera_npy_dir` reads
+  `npy_dir.name` — the full directory name (`datasets/tiles.py:457`).
+- git history: `.stem` has **never** appeared in `datasets/tiles.py` before `e750f8e`
+  (the commit that added `tile_index_name` and documented stem as wrong), and has
+  never appeared in `extract_so2sat_embeddings.py` at all.
+- `data/tessera_v1.1_global_2017_tiles.gpkg` carries all 8,108 **full** names, 0
+  truncated.
+
+**Verdict: no patch could have resolved to a neighbouring tile; 0 patches affected.**
+The bug's entire blast radius was the two diagnostics, both already fixed at
+`e750f8e`. Rev C's stop condition — counts differ **and** a consumer is in the data
+path — is not met: the counts differ, no consumer is in the data path. Task 2.2 is
+not blocked by this. Pinned by a new test in `tests/test_tiles_open.py` (`f5c852c`)
+requiring two stem-colliding tiles to stay two index entries 0.9° apart.
+
+#### Where this leaves the shortfall
+
+Both mechanisms Rev C named are excluded, so the ~0.8-point kappa/OA gap between the
+new reproduction (0.6128 ± 0.0042) and the historical runs (0.6210 ± 0.0051) has no
+identified cause. It remains not separable from noise at n=3 (Welch p = 0.10 for
+kappa, 0.12 for OA, 0.59 for macro-F1).
+
+Rev C's 2.1b-iii is therefore **unblocked**: four additional seeds (3–6) of the Task
+2.1 configuration, taking the new side to n=7 for roughly 70% power against the fixed
+historical n=3. Not launched — held for a decision on whether the GPU goes to this or
+to Task 2.1c's learning-rate audit first.
+
+Until it is resolved either way, the pooled six-run band **kappa 0.6169 ± 0.0061,
+range [0.6097, 0.6268]** stands as the Phase 2 reference, with Rev C's caveat that
+pooling assumes both sides are the same population — which is the thing under test.
+It is conservative for setting a bar and must not be cited as evidence of equivalence.
+
+#### Verification
+
+| check | result |
+|---|---|
+| `pytest` | **323 passed, 1 skipped** (319 + 3 augmentation + 1 tile-index) |
+| new augmentation tests vs a broadcast implementation | **3 of 3 fail**, as required |
+| new augmentation tests at six seeds | pass at all six — not seed-luck |
+| tile-index guard: two stem-colliding tiles | 2 distinct paths, 2 distinct names, footprints 0.9° apart |
+| scope | only `tests/` and `RESULTS.md` touched; **`src/` byte-identical to `1534c08`** |
+| Tessera extraction dir | 342,944 files, unchanged |
+| GATE 1 regression md5 `7c2222b04ad830fe0c08eb4ee686df51` | unchanged **by construction** — see below |
+
+The GATE 1 md5 is a function of `src/`, the `student-coop-v1` checkpoint and the
+coop tiles, none of which this task touched, and `git diff 1534c08 HEAD -- src/` is
+empty. It was not re-run: with a provably zero source diff a re-run cannot produce
+information, only the appearance of it. Task 2.1's md5 came from an actual
+invocation, and any task that does touch `src/` must re-run it rather than inherit
+this reasoning.
