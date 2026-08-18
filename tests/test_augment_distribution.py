@@ -21,6 +21,10 @@ pooled test cannot see all of them:
   distribution over all positions is invariant to permutation.
 - **noise gating** — the rate at which noise is applied, and its magnitude.
 
+None of those three can see whether the draws are independent *across samples
+within a batch*, which is a fourth property and the one Task 2.1b was opened to
+settle; the tests for it are in their own section at the foot of this file.
+
 Every test seeds `torch` explicitly, so the p-values are fixed rather than
 resampled per run — a test that fails 1% of the time is worse than no test.
 """
@@ -244,3 +248,115 @@ def test_shape_and_dtype_survive(sigma):
     images = torch.randn(32, 3, 8, 8)
     out = augment_images(images.clone(), noise_sigma=sigma)
     assert out.shape == images.shape and out.dtype == images.dtype
+
+
+# ── Task 2.1b — independence ACROSS samples within one batch ─────────────────
+#
+# Every test above passes under a mechanism they cannot see. "One batched draw
+# instead of N scalar draws" has two readings: `torch.rand(n)`, which keeps
+# per-sample randomness, and `torch.rand(1)` broadcast, which hands every sample
+# in a batch the SAME transform. The marginal distribution of augmented values
+# is identical either way, and so is the marginal distribution of transforms
+# pooled over batches — so KS and the pooled chi-square are both blind to it.
+#
+# The difference is real: under broadcast, augmentation diversity per epoch
+# collapses from 8^B states to 8, a uniform handicap on every training run and
+# invisible to any marginal test. What separates the two readings is
+# independence across samples *within* one batch, which is what these measure.
+#
+# Batches of 64 here, per the Rev C specification; the anchor trains at 256, so
+# the real margin against a collapsed batch is wider still.
+
+BATCH_2_1B = 64
+N_BATCHES_2_1B = 200
+
+
+def _per_batch_dihedral_ids(fn, n_batches: int = N_BATCHES_2_1B) -> list[list[int]]:
+    """The transform each sample actually received, batch by batch.
+
+    Recovered by exact match against the 8 candidates rather than read off the
+    draws, so it tests the applied result and would also catch a correct draw
+    that is then broadcast during application.
+    """
+    out = []
+    for _ in range(n_batches):
+        images = _distinct_patches(BATCH_2_1B)
+        out.append(_dihedral_ids(images, fn(images.clone(), noise_sigma=0.0)))
+    return out
+
+
+def test_every_sample_in_a_batch_draws_its_own_transform():
+    """The test that fails under broadcast: it would realise exactly 1 distinct
+    transform in every batch, against 8 here.
+
+    The bound is 6, not 8. With 64 samples over 8 equiprobable states a batch
+    misses one about 0.16% of the time — seed 0 of the old path does it once in
+    200 batches — so requiring all 8 every time would be seed-luck rather than a
+    property. Six still sits five states clear of the failure being excluded.
+    """
+    for name, fn in (("old", _augment_images_pre_phase1), ("new", augment_images)):
+        torch.manual_seed(11)
+        distinct = [len(set(ids)) for ids in _per_batch_dihedral_ids(fn)]
+        mean = sum(distinct) / len(distinct)
+        assert min(distinct) >= 6, f"{name}: a batch realised only {min(distinct)} transforms"
+        assert mean > 7.9, f"{name}: mean {mean:.3f} distinct transforms per batch"
+
+
+def test_two_samples_in_a_batch_agree_no_more_often_than_chance():
+    """Independence stated as the quantity that actually separates the two
+    readings: how often do two samples in the same batch receive the same
+    transform? Under per-sample draws, 1/8. Under broadcast, 1.
+
+    This replaces the chi-square of sample index against transform that Rev C
+    specified. That test was written first and does not work — see
+    `test_batch_position_does_not_predict_the_transform` below. Broadcast makes
+    samples perfectly dependent on *each other*, not on their position, so a
+    test keyed on position is blind to it. Pairwise agreement is keyed on the
+    dependence itself and catches partial sharing as well as total.
+    """
+    chance = 1.0 / 8.0
+    for name, fn in (("old", _augment_images_pre_phase1), ("new", augment_images)):
+        torch.manual_seed(12)
+        agree = total = 0
+        for ids in _per_batch_dihedral_ids(fn):
+            counts = _counts(ids)
+            # pairs sharing a transform, over all pairs in the batch
+            agree += int(((counts * (counts - 1)) / 2).sum().item())
+            total += BATCH_2_1B * (BATCH_2_1B - 1) // 2
+        rate = agree / total
+        assert rate < 2 * chance, f"{name}: {rate:.4f} of within-batch pairs share a transform"
+        assert abs(rate - chance) < 0.02, f"{name}: agreement {rate:.4f}, chance {chance:.4f}"
+
+
+# Rev C specified this as "a chi-square test of independence between sample
+# index and augmentation state". That test was written, measured and dropped,
+# for two independent reasons:
+#
+#   1. It does not detect the mechanism it was proposed for. Verified against a
+#      deliberately broadcast implementation: it PASSES, because broadcast makes
+#      samples perfectly dependent on each other, not on their position — every
+#      position keeps the same marginal distribution over transforms.
+#   2. It is flaky. A 64x8 table over 200 batches leaves ~25 counts per cell,
+#      and the old path returned p=0.0035 at one of four seeds tried — a failure
+#      at ALPHA on correct code, which this file's own preamble rules out.
+#
+# The pairwise-agreement test above is the statistic that separates the two
+# readings, and it is stable across seeds.
+
+
+def test_the_noise_gate_is_drawn_per_sample():
+    """The third draw, checked the same way. A broadcast gate would noise whole
+    batches or none of them, so the per-batch noised fraction would only ever be
+    0.0 or 1.0 instead of scattering around 0.5.
+
+    Zeros in, so any non-zero output pixel came from the noise and nowhere else.
+    """
+    torch.manual_seed(13)
+    fractions = []
+    for _ in range(N_BATCHES_2_1B):
+        out = augment_images(torch.zeros(BATCH_2_1B, 2, 6, 6), noise_sigma=0.05)
+        fractions.append((out.reshape(BATCH_2_1B, -1).abs().sum(1) > 0).float().mean().item())
+
+    assert not any(f in (0.0, 1.0) for f in fractions), "a whole batch shared the noise gate"
+    mean = sum(fractions) / len(fractions)
+    assert 0.45 < mean < 0.55, f"noise applied to {mean:.3f} of samples, expected ~0.5"
