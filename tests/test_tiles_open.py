@@ -183,3 +183,38 @@ def test_the_truncated_name_flips_the_hemisphere_just_below_the_equator(tmp_path
 
     assert truncated == 32623        # northern hemisphere, wrong
     assert correct == 32723          # southern hemisphere, right
+
+
+def test_the_tile_index_does_not_collapse_stem_colliding_tiles(tmp_path):
+    """Task 2.1b-ii. The truncation is a ten-way collision, not a lost suffix:
+    on a 0.1 degree grid `grid_0.55_52.05` through `grid_0.55_52.95` all stem to
+    `grid_0.55_52`, so 8,108 v1.1 global tiles have only 1,546 distinct stems
+    and 40,075 v2 tiles have 23,938.
+
+    The index survives that because it is keyed by geometry — build_tile_index
+    returns paths and an STRtree, and callers match with tree.query(patch_geom)
+    and index back into the path list, so no name is ever formed. This pins that
+    property: a future refactor keying tiles by name would resolve a patch to a
+    neighbouring tile up to 0.9 degrees away, silently.
+
+    Uses the tesserav2 branch, which derives footprints from the tile names via
+    tessera_grid_footprint_4326 and so needs no rasters on disk.
+    """
+    from datasets.tiles import build_tile_index, tile_index_name
+
+    npy_root = tmp_path / "large_student" / "2017"
+    names = ["grid_0.55_52.05", "grid_0.55_52.95"]
+    for name in names:
+        (npy_root / name).mkdir(parents=True)
+
+    paths, tree = build_tile_index(tmp_path, "tesserav2", year="2017")
+
+    assert len({p.stem for p in paths}) == 1          # the collision is real
+    assert len(paths) == 2
+    assert {tile_index_name(p) for p in paths} == set(names)
+
+    # And they index to genuinely different places — 0.9 degrees of latitude,
+    # not two aliases of one tile.
+    footprints = [tree.geometries[i] for i in range(len(paths))]
+    lats = sorted(round(f.centroid.y, 1) for f in footprints)
+    assert lats[1] - lats[0] > 0.5
