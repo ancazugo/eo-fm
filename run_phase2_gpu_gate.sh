@@ -32,3 +32,12 @@ wait_for_gpu () {
     waited=$(( waited + GPU_POLL_SECONDS ))
   done
 }
+
+# Whether a run already finished, so a paused chain can resume without redoing
+# work. Keyed on the completion marker rather than on the log file existing: a
+# run that crashed or was interrupted leaves a log behind too, and skipping it
+# would silently drop a seed from the band it belongs to.
+already_complete () {
+  local log=$1
+  [[ -f $log ]] && grep -q "Run complete. Outputs in" "$log"
+}

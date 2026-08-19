@@ -52,8 +52,8 @@ COMMON=(
 
 run () {
   local name=$1; shift
-  if [[ -f "$LOGS/$name.log" ]]; then
-    echo "=== $(date -Is) skipping $name (log exists) ==="; return 0
+  if already_complete "$LOGS/$name.log"; then
+    echo "=== $(date -Is) skipping $name (already finished) ==="; return 0
   fi
   wait_for_gpu "$name"
   echo "=== $(date -Is) starting $name ==="

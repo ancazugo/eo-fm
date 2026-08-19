@@ -40,6 +40,9 @@ COMMON=(
 
 run () {
   local name=$1; shift
+  if already_complete "$LOGS/$name.log"; then
+    echo "=== $(date -Is) skipping $name (already finished) ==="; return 0
+  fi
   wait_for_gpu "$name"
   echo "=== $(date -Is) starting $name ==="
   python src/patch_classification.py "${COMMON[@]}" --run-name "$name" "$@" \
