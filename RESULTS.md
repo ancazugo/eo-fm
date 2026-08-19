@@ -1565,3 +1565,42 @@ empty. It was not re-run: with a provably zero source diff a re-run cannot produ
 information, only the appearance of it. Task 2.1's md5 came from an actual
 invocation, and any task that does touch `src/` must re-run it rather than inherit
 this reasoning.
+
+---
+
+### Tasks 2.1b-iii and 2.1c — paused on GPU contention (2026-08-19)
+
+Pre-registered and launched; **paused after seed 3 of 2.1b-iii**, with nothing
+concluded and nothing invalidated.
+
+**Why.** The T4 is shared. Seed 3 ran at **55 min/epoch** — measured across five
+consecutive epochs (59, 47, 51, 55, 61) — against the anchor's **9.1 min/epoch**,
+a **6.0x slowdown**, with eight processes on the card from three users. The
+anchor's 12-25 epoch range then implies ~14 h per run rather than ~2.5 h:
+
+| | at anchor pace | at contended pace |
+|---|---|---|
+| 2.1b-iii, 4 runs | ~10 h | ~2.5 days |
+| 2.1c, 21 runs | ~50 h | ~12 days |
+| total | ~60-90 h | **~2 weeks** |
+
+**What this does not affect.** Contention changes wall-clock only. Seed 3's
+val_kappa trace is healthy and its best so far (0.5947 at epoch 5) is above every
+anchor seed's best, so nothing about the comparison is compromised. Training is
+seeded; a resumed run is the run that was planned.
+
+**State at the pause.** Seed 3 was left to finish rather than killed, six hours
+in; the chain wrapper was stopped so seeds 4-6 never started. 2.1c never
+launched, so its pre-registration still precedes every run of it.
+
+**Resuming.** `./run_phase2_1b_iii.sh` then `./run_phase2_1c.sh stage1`. Both
+skip runs whose log carries the completion marker, so a resume picks up at seed 4
+without redoing seed 3.
+
+**A design note against my own work.** The chains carry a GPU admission gate that
+blocks until 5 GB is free. It did what it was built for — it admitted seed 3 at
+6,897 MiB free and would have prevented the OOM that concurrent chains would have
+hit — but it gates the wrong resource. The binding constraint was SM time, which
+no free-memory check detects. A gate that waits on utilisation as well would have
+caught this before six hours went into one seed, and is the thing to add before
+the next long chain.
