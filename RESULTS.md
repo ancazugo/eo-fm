@@ -1038,6 +1038,42 @@ Task 2.1 runs no manifest and cannot. The stop condition is the point of
 recording it: a rise would mean the 2.0c audit mischaracterises the filter, and
 every Arm A number rests on that characterisation.
 
+#### Addition from Rev C (Tasks 2.1b-iii and 2.1c)
+
+Committed before any run of either task exists.
+
+**Task 2.1c**, verbatim from Rev C:
+
+> best val_kappa will occur at a later epoch under a lower LR, and the
+> seed-to-seed variance in peak epoch will narrow. If a lower LR does not move
+> the peak epoch later, the early peak is overfitting driven by capacity rather
+> than step size, and the answer is regularization or a smaller model rather
+> than a schedule change.
+
+**Task 2.1b-iii.** The four extra seeds test whether peak epoch at `opt3` is
+**bimodal**, not merely whether its mean shifted. The anchor's three seeds peak
+at epochs **2, 2, 15** — two during warmup at a low LR, one well after it. The
+prediction is that seeds 3-6 land in the same two clusters rather than spreading
+evenly, and that runs peaking during warmup score lower. If both hold, the
+anchor's ~0.8-point shortfall is a sampling artefact of an unstable schedule —
+three draws from a bimodal distribution against a historical three — and needs
+no code mechanism. Nothing further is then chased.
+
+The falsifier is a unimodal peak-epoch distribution across n=7: that would leave
+the shortfall unexplained with all three named mechanisms excluded, and Rev C's
+instruction applies — use the new-code distribution as the Phase 2 reference and
+carry a ~0.8-point uncertainty on comparisons to published pre-fix numbers.
+
+**One arm of Task 2.1c is dropped, recorded here before results exist.** Rev C
+asks for "cosine decay versus the current schedule" at the best LR. The current
+schedule **is** cosine: `training/loop.py:62-73` builds `CosineAnnealingLR`
+unconditionally and prepends `LinearLR` warmup through `SequentialLR` when
+`--warmup-epochs > 0`. There is no flag selecting anything else, so the arm
+compares cosine with itself. The LR sweep and the warmup arm already test the
+hypothesis behind it — that the peak lands early because the step size is wrong
+— so the arm is skipped rather than made real with a new CLI flag, which would
+be a production code change in a revalidation phase. 15 + 6 runs, not 24.
+
 ### Task 2.0 — Common manifest and coverage control
 
 Full artefacts: `diagnostics/patch_manifest.md` /
