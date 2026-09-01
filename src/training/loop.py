@@ -120,6 +120,17 @@ def run_training_loop(
         )
 
         value = val_logs[monitor]
+        # NaN never compares greater than anything, so a monitor that goes NaN
+        # would silently checkpoint nothing and leave the caller evaluating an
+        # untrained model. Degenerate val sets do this: MulticlassCohenKappa
+        # returns NaN when the val split holds a single class (expected
+        # agreement is 1, so the chance correction divides by zero).
+        if value != value:  # NaN
+            logger.warning(
+                f"  → {monitor} is NaN at epoch {epoch+1}; not a valid "
+                "improvement. This usually means the val split is degenerate "
+                "(too few tiles, or a single class present)."
+            )
         if value > best_value:
             best_value = value
             patience_counter = 0
@@ -139,6 +150,13 @@ def run_training_loop(
             if patience_counter >= early_stopping_patience:
                 logger.info(f"Early stopping at epoch {epoch+1}")
                 break
+
+    if best_ckpt_path is None:
+        logger.warning(
+            f"No checkpoint was ever saved: {monitor} never improved on "
+            f"{best_value}. The returned model holds its FINAL weights, not "
+            "its best ones, and any evaluation that follows scores those."
+        )
 
     if best_ckpt_path and best_ckpt_path.exists():
         ckpt = torch.load(best_ckpt_path, map_location=device)
