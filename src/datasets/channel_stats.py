@@ -144,6 +144,124 @@ def compute_channel_stats(
     return mean, std
 
 
+def grid_stats_cache_path(
+    run_root: Path, output_names, year: str, embedding_name: str,
+    items: list, n_sample: int, seed: int,
+) -> Path:
+    """Cache path for one segmentation (embedding, year, tile-set) combination.
+
+    Keyed on the things that change the statistics -- the embedding, the year,
+    the sample size and seed, and the identity of the train tile set -- so a run
+    on a different city list, or one narrowed by ``--require-embeddings``, gets
+    its own entry instead of silently reusing another's normalizer.
+    """
+    h = hashlib.sha256()
+    names = "+".join(output_names) if not isinstance(output_names, str) else output_names
+    h.update(f"{names}|{year}|{embedding_name}|{len(items)}|{n_sample}|{seed}".encode())
+    for it in items[:64]:
+        p0 = it[0][0] if isinstance(it[0], tuple) else it[0]
+        h.update(str(p0).encode())
+    return Path(run_root) / "_channel_stats" / f"grid_{names}_{year}_{h.hexdigest()[:16]}.npz"
+
+
+def compute_grid_channel_stats(
+    items: list,
+    dequantize_fn=None,
+    nodata_predicate=None,
+    *,
+    n_sample: int = 400,
+    seed: int = 0,
+    cache_path: Path | None = None,
+    recompute: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-channel ``(mean, std)`` over a sample of segmentation grid tiles.
+
+    The segmentation analogue of :func:`compute_channel_stats`. It exists
+    separately rather than as a flag because the two consume different
+    datasets, and the whole point of both is to describe *the exact tensor the
+    model consumes* -- so the statistics must be produced by the same class
+    that produces the training batches.
+
+    That principle is what makes this correct across embedding families without
+    any per-family branching here:
+
+    * dequantization is applied by ``GridSegDataset`` exactly as in training,
+      so coop and seamless statistics describe dequantized values, not int8
+      codes;
+    * ``seamless`` expands 13 stored bands to 72 channels during dequantize, so
+      the returned arrays are 72 long, matching the model's input;
+    * for fused items dequantization applies to source 0 only, again matching
+      training, and the returned arrays span the full concatenated stack;
+    * nodata pixels are excluded via the family predicate, which runs on the
+      RAW array before dequantization -- coop's all-channels ``-128`` sentinel
+      becomes a plausible-looking vector of L2 norm 8.06 afterwards, so
+      measuring it post-dequantize would quietly bias every channel.
+
+    ``items`` must be the TRAIN split only; val or test items here would leak
+    evaluation data into the normalizer.
+
+    ``n_sample`` defaults to 400 tiles rather than the patch pipeline's 20000
+    patches because a 128x128 tile carries 16384 pixels against a 32x32 patch's
+    1024 -- 400 tiles is already ~6.5M pixel samples.
+
+    Returns ``(mean, std)``, each ``(C,)`` float32, std floored at 1e-6.
+    """
+    if cache_path is not None and cache_path.exists() and not recompute:
+        cached = np.load(cache_path)
+        logger.info(f"Channel stats: loaded {cache_path}")
+        return cached["mean"], cached["std"]
+
+    from datasets.grid_tiles import GridSegDataset
+
+    rng = np.random.default_rng(seed)
+    idx = (rng.choice(len(items), n_sample, replace=False)
+           if len(items) > n_sample else np.arange(len(items)))
+    sample = [items[int(i)] for i in idx]
+    logger.info(
+        f"Channel stats: {len(sample)} train tiles (of {len(items)})"
+    )
+
+    ds = GridSegDataset(
+        sample, "gpkg", dequantize_fn=dequantize_fn,
+        nodata_predicate=nodata_predicate, emit_valid=True,
+    )
+
+    n = s1 = s2 = None
+    for i in range(len(ds)):
+        item = ds[i]
+        x = item["image"].numpy().astype(np.float64)          # (C, H, W)
+        flat = x.reshape(x.shape[0], -1)
+        v = item.get("valid")
+        w = (np.ones(flat.shape[1], dtype=np.float64) if v is None
+             else v.numpy().reshape(-1).astype(np.float64))
+        if s1 is None:
+            s1 = np.zeros(flat.shape[0])
+            s2 = np.zeros(flat.shape[0])
+            n = 0.0
+        s1 += (flat * w).sum(axis=1)
+        s2 += ((flat ** 2) * w).sum(axis=1)
+        n += w.sum()
+
+    if n is None or n <= 0:
+        raise ValueError("No valid pixels found while computing channel stats")
+
+    mean = s1 / n
+    std = np.sqrt(np.maximum(s2 / n - mean ** 2, 0.0))
+    mean = mean.astype(np.float32)
+    std = np.maximum(std, 1e-6).astype(np.float32)
+
+    logger.info(
+        f"Channel stats: {len(mean)} channels, median std={np.median(std):.4f} "
+        f"(min {std.min():.4f}, max {std.max():.4f}), {n:,.0f} valid pixels"
+    )
+
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(cache_path, mean=mean, std=std)
+        logger.info(f"Channel stats: cached to {cache_path}")
+    return mean, std
+
+
 def stats_cache_path(
     output_name: str, year: str, split_source: str, *,
     embedding_name: str | list[str] | tuple[str, ...],

@@ -396,7 +396,7 @@ class LCZUNetModule(nn.Module):
 
     Loss: ``(1 − dice_weight) × CrossEntropy + dice_weight × MulticlassDice``
     Both losses use ``ignore_index=-1`` to skip unlabeled pixels.
-    Monitored metric: val_miou (macro mIoU).
+    Monitored metric: ``monitor``, default val_miou.
 
     Args:
         model: Any (B, C, H, W) → (B, num_classes, H, W) module.
@@ -405,13 +405,27 @@ class LCZUNetModule(nn.Module):
         weight_decay: Adam L2 regularization.
         dice_weight: Weighting of Dice loss (0 = CE only, 1 = Dice only).
         max_epochs: Total training epochs (used for CosineAnnealingLR T_max).
+        class_weights: Per-class CE weights, or None.
+        label_smoothing: CE label smoothing.
+        monitor: Metric name to checkpoint and early-stop on. ``val_kappa`` is
+            what makes segmentation runs selectable on the same quantity the
+            patch campaign reports; ``val_miou`` stays the default so existing
+            runs keep their meaning.
 
-    ``monitor`` is a class attribute here (segmentation always checkpoints on
-    val_miou), whereas LCZResNetModule takes it as a constructor argument;
-    ``run_training_loop`` only requires that ``task_module.monitor`` exists.
+    ``monitor`` used to be a class attribute here (segmentation always
+    checkpointed on val_miou); it is now a constructor argument, matching
+    LCZResNetModule. ``run_training_loop`` only requires that
+    ``task_module.monitor`` exists, and it maximises it — so every supported
+    value must be higher-is-better.
+
+    Deliberately absent: mixup. Section 3 of the campaign report showed mixup +
+    label smoothing caps teacher confidence at ~0.9 and leaves models badly
+    under-confident (fitted temperature as low as 0.46). Under a masked loss
+    with sparse labels that is worse, not better, and it would poison any
+    downstream confidence gating.
     """
 
-    monitor = "val_miou"
+    _SUPPORTED_MONITORS = ("val_miou", "val_kappa", "val_acc", "val_f1")
 
     def __init__(
         self,
@@ -421,21 +435,42 @@ class LCZUNetModule(nn.Module):
         weight_decay: float = 1e-4,
         dice_weight: float = 0.5,
         max_epochs: int = 50,
+        class_weights: torch.Tensor | None = None,
+        label_smoothing: float = 0.0,
+        monitor: str = "val_miou",
     ) -> None:
         super().__init__()
+        if monitor not in self._SUPPORTED_MONITORS:
+            raise ValueError(
+                f"monitor={monitor!r} is not one of {self._SUPPORTED_MONITORS}"
+            )
         self.model = model
         self.num_classes = num_classes
         self.lr = lr
         self.weight_decay = weight_decay
         self.dice_weight = dice_weight
         self.max_epochs = max_epochs
+        self.monitor = monitor
 
         self.dice_loss = MulticlassDiceLoss(num_classes, ignore_index=-1)
-        self.ce_loss = nn.CrossEntropyLoss(ignore_index=-1)
+        if class_weights is not None:
+            self.register_buffer("_ce_weight", class_weights.float())
+        else:
+            self._ce_weight = None
+        self.ce_loss = nn.CrossEntropyLoss(
+            ignore_index=-1, weight=self._ce_weight,
+            label_smoothing=label_smoothing,
+        )
 
         metric_kw = dict(task="multiclass", num_classes=num_classes, ignore_index=-1)
         self.val_miou = JaccardIndex(**metric_kw, average="macro")
         self.val_acc = Accuracy(**metric_kw)
+        self.val_kappa = MulticlassCohenKappa(
+            num_classes=num_classes, ignore_index=-1
+        )
+        self.val_f1 = MulticlassF1Score(
+            num_classes=num_classes, ignore_index=-1, average="macro"
+        )
 
         self._train_loss_sum = self._train_ce_sum = self._train_dice_sum = 0.0
         self._n_train = 0
@@ -486,23 +521,35 @@ class LCZUNetModule(nn.Module):
     def reset_val_metrics(self) -> None:
         self.val_miou.reset()
         self.val_acc.reset()
+        self.val_kappa.reset()
+        self.val_f1.reset()
         self._val_loss_sum = 0.0
         self._n_val = 0
 
     def val_step(self, batch: dict, device: torch.device) -> None:
         images = batch["image"].to(device).float()
         masks = batch["mask"].to(device)
+        # An all-nodata tile makes the masked loss NaN, and one NaN poisons the
+        # running val_loss for the whole epoch. train_step has always guarded
+        # this; val_step did not.
+        if (masks != -1).sum() == 0:
+            return
         logits = self.model(images)
         loss, _, _ = self._loss(logits, masks)
         preds = logits.argmax(dim=1)
         self.val_miou(preds, masks)
         self.val_acc(preds, masks)
-        self._val_loss_sum += loss.item()
-        self._n_val += 1
+        self.val_kappa(preds, masks)
+        self.val_f1(preds, masks)
+        if torch.isfinite(loss):
+            self._val_loss_sum += loss.item()
+            self._n_val += 1
 
     def compute_val_logs(self) -> dict[str, float]:
         return {
-            "val_loss": self._val_loss_sum / max(1, self._n_val),
-            "val_miou": self.val_miou.compute().item(),
-            "val_acc":  self.val_acc.compute().item(),
+            "val_loss":  self._val_loss_sum / max(1, self._n_val),
+            "val_miou":  self.val_miou.compute().item(),
+            "val_acc":   self.val_acc.compute().item(),
+            "val_kappa": self.val_kappa.compute().item(),
+            "val_f1":    self.val_f1.compute().item(),
         }
