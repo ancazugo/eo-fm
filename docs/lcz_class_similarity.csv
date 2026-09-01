@@ -1,0 +1,44 @@
+# LCZ class similarity matrix.
+#
+# Source:   Bechtel, B., Demuzere, M. & Stewart, I.D. (2020),
+#           "A Weighted Accuracy Measure for Land Cover Mapping: Comment on
+#           Johnson et al. Local Climate Zone (LCZ) Map Accuracy Assessments
+#           Should Account for Land Cover Physical Characteristics that Affect
+#           the Local Thermal Environment", Remote Sensing 12(11):1769.
+#           https://doi.org/10.3390/rs12111769
+# Revision: 2020 published version (supplementary XLSX), transcribed 2026-08-20.
+#
+# Construction: a 12-point diagnostic scheme scoring dissimilarity over four
+# surface characteristics -- openness (compact/open/sparse/nil), height
+# (high/medium/low/nil), land cover (pervious/impervious) and surface objects
+# (buildings/plants). One point per degree of separation on openness and
+# height; three points per degree on land cover and surface objects. Summed
+# 0-12, normalised to [0,1], inverted, symmetrised. Worked example from the
+# paper: LCZ 1 vs LCZ 4 = 1 (compact vs open) + 0 (both high-rise) + 3
+# (impervious vs pervious) + 0 (both building classes) = 4 -> 1 - 4/12 = 0.67.
+#
+# CAVEAT: the 2020 paper states the scheme is under development and that newer
+# revisions carry slightly updated scores, so LCZ Generator factsheets may use a
+# later matrix. OAw/kappa_w computed here are comparable to published factsheet
+# values only for factsheets built on this revision.
+#
+# Row/column order is 1..10, A..G -> indices 0..16, matching the project-wide
+# 1-17 -> 0-16 label convention. Loader: src/training/lcz_metrics.py.
+LCZ,1,2,3,4,5,6,7,8,9,10,A,B,C,D,E,F,G
+1,1.00,0.92,0.83,0.67,0.58,0.50,0.58,0.75,0.42,0.75,0.33,0.25,0.08,0.00,0.25,0.00,0.00
+2,0.92,1.00,0.92,0.58,0.67,0.58,0.67,0.83,0.42,0.83,0.42,0.33,0.25,0.08,0.33,0.08,0.08
+3,0.83,0.92,1.00,0.50,0.58,0.67,0.75,0.92,0.58,0.92,0.50,0.42,0.33,0.17,0.42,0.17,0.17
+4,0.67,0.58,0.50,1.00,0.92,0.83,0.75,0.50,0.75,0.58,0.50,0.58,0.50,0.33,0.08,0.33,0.33
+5,0.58,0.67,0.58,0.92,1.00,0.92,0.83,0.67,0.83,0.67,0.58,0.67,0.50,0.42,0.17,0.42,0.42
+6,0.50,0.58,0.67,0.83,0.92,1.00,0.92,0.75,0.92,0.75,0.67,0.75,0.67,0.58,0.25,0.50,0.50
+7,0.58,0.67,0.75,0.75,0.83,0.92,1.00,0.67,0.83,0.67,0.75,0.67,0.58,0.42,0.17,0.42,0.42
+8,0.75,0.83,0.92,0.50,0.67,0.75,0.67,1.00,0.75,0.92,0.42,0.50,0.42,0.25,0.50,0.33,0.33
+9,0.42,0.42,0.58,0.75,0.83,0.92,0.83,0.75,1.00,0.67,0.58,0.67,0.75,0.58,0.33,0.58,0.58
+10,0.75,0.83,0.92,0.58,0.67,0.75,0.67,0.92,0.67,1.00,0.42,0.50,0.42,0.25,0.50,0.33,0.33
+A,0.33,0.42,0.50,0.50,0.58,0.67,0.75,0.42,0.58,0.42,1.00,0.92,0.83,0.67,0.42,0.67,0.67
+B,0.25,0.33,0.42,0.58,0.67,0.75,0.67,0.50,0.67,0.50,0.92,1.00,0.92,0.75,0.50,0.75,0.75
+C,0.08,0.25,0.33,0.50,0.50,0.67,0.58,0.42,0.75,0.42,0.83,0.92,1.00,0.83,0.58,0.83,0.83
+D,0.00,0.08,0.17,0.33,0.42,0.58,0.42,0.25,0.58,0.25,0.67,0.75,0.83,1.00,0.75,0.92,0.92
+E,0.25,0.33,0.42,0.08,0.17,0.25,0.17,0.50,0.33,0.50,0.42,0.50,0.58,0.75,1.00,0.75,0.75
+F,0.00,0.08,0.17,0.33,0.42,0.50,0.42,0.33,0.58,0.33,0.67,0.75,0.83,0.92,0.75,1.00,0.92
+G,0.00,0.08,0.17,0.33,0.42,0.50,0.42,0.33,0.58,0.33,0.67,0.75,0.83,0.92,0.75,0.92,1.00
