@@ -87,6 +87,11 @@ def main() -> None:
     parser.add_argument("--cities-dir", type=Path, default=None)
     parser.add_argument("--cities", nargs="+", default=None)
     parser.add_argument("--label-col", default="LCZ_class")
+    parser.add_argument("--patch-manifest", type=Path, default=None,
+                        help="Task 2.0 common-patch manifest. Restricts the "
+                             "evaluated universe so this number is scored on "
+                             "exactly the patches the comparison baseline used; "
+                             "without it the two cover different sets.")
     add_eval_args(parser, batch_size=512)
     args = parser.parse_args()
 
@@ -99,6 +104,7 @@ def main() -> None:
         global_split=args.global_split, global_gpkg=args.global_gpkg,
         cities_dir=args.cities_dir, cities=args.cities,
         label_col=args.label_col, orig_test=args.orig_test,
+        patch_manifest=args.patch_manifest,
     )
     test_items = [it for it in all_items if it.split == "test"]
     if not test_items:
