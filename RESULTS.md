@@ -1255,8 +1255,11 @@ rather than remove them.**
 
 ### GATE 2.0 status
 
-Reached. Tasks 2.1 and 2.1b complete. Task 2.1b-iii is unblocked by Rev C's own
-gate but not launched; Tasks 2.1c and 2.2-2.5 not started.
+Reached. Tasks 2.1, 2.1b, 2.1b-iii and 2.1c complete; Tasks 2.2-2.5 not started.
+
+*Updated 2026-09-04.* When this line was first written, 2.1b-iii and 2.1c were
+unlaunched. Both have since run to completion — see the two sections at the end
+of this file.
 
 ---
 
@@ -1604,3 +1607,223 @@ hit — but it gates the wrong resource. The binding constraint was SM time, whi
 no free-memory check detects. A gate that waits on utilisation as well would have
 caught this before six hours went into one seed, and is the thing to add before
 the next long chain.
+
+**Resumed and completed (2026-08-27 → 08-31).** Contention cleared and both tasks
+ran to completion under `run_chain_seg_then_phase2.sh` and
+`run_chain_stage2_then_seg.sh`: anchor seeds 4-6 on 08-27/28, 2.1c stage 1 on
+08-28/29, 2.1c stage 2 on 08-30/31. All 25 runs exited 0. Results below. The
+GPU-gate design note stands — the gate still watches free memory, not SM time,
+and nothing has been added to fix that.
+
+---
+
+### Task 2.1b-iii — Four more anchor seeds; the shortfall does not survive them
+
+Seeds 3-6 of the Task 2.1 anchor configuration (`--normalize none --nodata-mode
+zero --max-invalid-frac 1.0`, native Tessera coverage, no manifest), taking the
+new-code side to n=7 against the fixed historical n=3.
+
+| run | seed | peak epoch | stop epoch | best val_kappa | macro-F1 | OA | kappa |
+|---|---|---|---|---|---|---|---|
+| `p2-anchor-tessera-seed0` | 0 | **2** | 12 | 0.5667 | 0.5641 | 0.6409 | 0.6097 |
+| `p2-anchor-tessera-seed1` | 1 | **2** | 12 | 0.5857 | 0.5460 | 0.6497 | 0.6175 |
+| `p2-anchor-tessera-seed2` | 2 | 15 | 25 | 0.5892 | 0.5651 | 0.6438 | 0.6111 |
+| `p2-anchor-tessera-seed3` | 3 | 5 | 15 | 0.5947 | 0.5672 | 0.6602 | 0.6286 |
+| `p2-anchor-tessera-seed4` | 4 | 16 | 26 | 0.5754 | 0.5527 | 0.6529 | 0.6218 |
+| `p2-anchor-tessera-seed5` | 5 | 22 | 32 | 0.6027 | 0.5741 | 0.6597 | 0.6283 |
+| `p2-anchor-tessera-seed6` | 6 | 19 | 29 | 0.5914 | 0.5483 | 0.6452 | 0.6130 |
+
+Bold peak epoch = best checkpoint selected during warmup. Artefacts:
+`diagnostics/schedule_audit_anchor.{json,md}`.
+
+#### The gap closes as seeds are added
+
+| metric | new code, n=7 | historical, n=3 | difference | Welch p |
+|---|---|---|---|---|
+| macro-F1 | 0.5597 ± 0.0106 | 0.5624 ± 0.0034 | -0.0027 | 0.556 |
+| OA | 0.6503 ± 0.0077 | 0.6528 ± 0.0052 | -0.0025 | 0.579 |
+| kappa | 0.6186 ± 0.0079 | 0.6210 ± 0.0051 | -0.0024 | 0.590 |
+
+At n=3 the same comparison gave −0.0082 on kappa (p = 0.101) and −0.0080 on OA
+(p = 0.116). At n=7 both shrink to −0.002 with p ≈ 0.6. **The ~0.8-point
+shortfall was a small-sample artefact.** It did not merely fail to reach
+significance with more data — the point estimate itself fell by about 70% once
+four more draws were added, which is what a noise gap does and what a real
+mechanism does not. Seeds 0-2 drew low: two of them (0 and 2) are the two lowest
+kappas of the seven, and their mean of 0.6128 sits 0.0058 below the seven-seed
+mean.
+
+Consequently the new-code and pre-fix distributions are not distinguishable,
+the Phase 1 fixes cost nothing measurable on this configuration, and the pooled
+six-run reference band **kappa 0.6169 ± 0.0061** can now be replaced for
+Phase 2 purposes by the seven-seed new-code band **kappa 0.6186 ± 0.0079,
+range [0.6097, 0.6286]**, which no longer rests on the assumption that both
+sides are one population.
+
+#### Scoring the pre-registration
+
+The pre-registration made bimodality the test and named a falsifier: *"a unimodal
+peak-epoch distribution across n=7"*.
+
+- **Falsifier not triggered.** Peak epochs are [2, 2, 5, 15, 16, 19, 22]. The
+  widest gap between consecutive peaks is 10 epochs across a span of 20 — 50% of
+  the span — splitting [2, 2, 5] from [15, 16, 19, 22]. The distribution stayed
+  in two clusters. Seeds 4-6 all landed in the late cluster, seed 3 (peak 5)
+  widened the early one.
+- **The second prediction — "runs peaking during warmup score lower" — is not
+  supported.** Direction is right, size is not: warmup-peaked runs (n=2) average
+  kappa 0.6136 ± 0.0055 against 0.6206 ± 0.0083 for the rest (p = 0.284), and
+  peak epoch does not track kappa across the seven (Spearman ρ = +0.342,
+  p = 0.452). Seed 2 peaked at epoch 15 and still scored 0.6111, below the
+  warmup-peaked seed 1's 0.6175.
+
+So the pre-registered *mechanism* — a bimodal schedule that drags the early-peaking
+draws down — is only half-evidenced: the bimodality is real, its consequence for
+the metric is not visible at this n. That does not reopen the shortfall, because
+the shortfall is what needed a cause and it is no longer there to explain. Per
+the pre-registration's own instruction, **nothing further is chased**, and the
+2 sd caveat Rev C attached to comparisons with published pre-fix numbers is
+withdrawn.
+
+---
+
+### Task 2.1c — Learning-rate and schedule audit; `opt3` confirmed, the schedule hypothesis fails
+
+21 runs: stage 1 sweeps `--lr` over five values at `--warmup-epochs 3`, stage 2
+sweeps warmup over {0, 1} at the winning LR, 3 seeds each. The dropped
+cosine-versus-cosine arm is recorded in the pre-registration above.
+
+**Configuration note, and it matters for reading these numbers.** These runs are
+on the **Task 2.2 Arm A** configuration — `--normalize channel --nodata-mode mask`
+plus the Task 2.0 manifest — *not* the anchor's pre-fix flags. Arm A restricts to
+23,852 test patches against the anchor's 24,188, so **nothing in this section is
+directly comparable to the anchor band above**; the comparisons that matter here
+are between the cells, which share a population exactly.
+
+| run | lr | warmup | seed | peak epoch | stop | best val_kappa | macro-F1 | OA | kappa |
+|---|---|---|---|---|---|---|---|---|---|
+| `p2-1c-lr1e-4-w3-seed0` | 0.0001 | 3 | 0 | 15 | 25 | 0.5554 | 0.5163 | 0.6207 | 0.5859 |
+| `p2-1c-lr1e-4-w3-seed1` | 0.0001 | 3 | 1 | **3** | 13 | 0.5783 | 0.5382 | 0.6379 | 0.6045 |
+| `p2-1c-lr1e-4-w3-seed2` | 0.0001 | 3 | 2 | 6 | 16 | 0.5715 | 0.5647 | 0.6425 | 0.6109 |
+| `p2-1c-lr2.5e-4-w3-seed0` | 0.00025 | 3 | 0 | 14 | 24 | 0.6016 | 0.5853 | 0.6702 | 0.6393 |
+| `p2-1c-lr2.5e-4-w3-seed1` | 0.00025 | 3 | 1 | **3** | 13 | 0.6007 | 0.5590 | 0.6564 | 0.6255 |
+| `p2-1c-lr2.5e-4-w3-seed2` | 0.00025 | 3 | 2 | 5 | 15 | 0.5700 | 0.5468 | 0.6234 | 0.5901 |
+| `p2-1c-lr5e-4-w0-seed0` | 0.0005 | 0 | 0 | 1 | 11 | 0.5800 | 0.5301 | 0.6327 | 0.5988 |
+| `p2-1c-lr5e-4-w0-seed1` | 0.0005 | 0 | 1 | 18 | 28 | 0.5720 | 0.5323 | 0.6359 | 0.6020 |
+| `p2-1c-lr5e-4-w0-seed2` | 0.0005 | 0 | 2 | 8 | 18 | 0.5854 | 0.5690 | 0.6634 | 0.6319 |
+| `p2-1c-lr5e-4-w1-seed0` | 0.0005 | 1 | 0 | 19 | 29 | 0.5691 | 0.5413 | 0.6351 | 0.6013 |
+| `p2-1c-lr5e-4-w1-seed1` | 0.0005 | 1 | 1 | 2 | 12 | 0.5692 | 0.5354 | 0.6209 | 0.5884 |
+| `p2-1c-lr5e-4-w1-seed2` | 0.0005 | 1 | 2 | 17 | 27 | 0.5555 | 0.5308 | 0.6334 | 0.5993 |
+| `p2-1c-lr5e-4-w3-seed0` | 0.0005 | 3 | 0 | 7 | 17 | 0.5807 | 0.5539 | 0.6473 | 0.6145 |
+| `p2-1c-lr5e-4-w3-seed1` | 0.0005 | 3 | 1 | **2** | 12 | 0.5952 | 0.5689 | 0.6595 | 0.6289 |
+| `p2-1c-lr5e-4-w3-seed2` | 0.0005 | 3 | 2 | 10 | 20 | 0.6083 | 0.6047 | 0.6767 | 0.6479 |
+| `p2-1c-lr1e-3-w3-seed0` | 0.001 | 3 | 0 | 12 | 22 | 0.5816 | 0.5555 | 0.6617 | 0.6307 |
+| `p2-1c-lr1e-3-w3-seed1` | 0.001 | 3 | 1 | **2** | 12 | 0.5705 | 0.5599 | 0.6316 | 0.6004 |
+| `p2-1c-lr1e-3-w3-seed2` | 0.001 | 3 | 2 | 6 | 16 | 0.5883 | 0.5644 | 0.6600 | 0.6296 |
+| `p2-1c-lr5e-5-w3-seed0` | 5e-05 | 3 | 0 | 8 | 18 | 0.5500 | 0.5358 | 0.6096 | 0.5763 |
+| `p2-1c-lr5e-5-w3-seed1` | 5e-05 | 3 | 1 | 4 | 14 | 0.5756 | 0.5469 | 0.6313 | 0.5983 |
+| `p2-1c-lr5e-5-w3-seed2` | 5e-05 | 3 | 2 | 8 | 18 | 0.5781 | 0.5389 | 0.6272 | 0.5930 |
+
+Artefacts: `diagnostics/schedule_audit_2_1c.{json,md}`.
+
+#### The learning-rate sweep: `opt3` sits on the optimum
+
+| lr (warmup 3) | peak epochs | mean peak | macro-F1 | OA | kappa |
+|---|---|---|---|---|---|
+| 5e-05 | 4, 8, 8 | 6.7 | 0.5405 ± 0.0057 | 0.6227 ± 0.0116 | 0.5892 ± 0.0115 |
+| 0.0001 | 3, 6, 15 | 8.0 | 0.5397 ± 0.0242 | 0.6337 ± 0.0115 | 0.6004 ± 0.0129 |
+| 0.00025 | 3, 5, 14 | 7.3 | 0.5637 ± 0.0196 | 0.6500 ± 0.0240 | 0.6183 ± 0.0254 |
+| 0.0005 | 2, 7, 10 | 6.3 | 0.5758 ± 0.0261 | 0.6612 ± 0.0148 | 0.6304 ± 0.0167 |
+| 0.001 | 2, 6, 12 | 6.7 | 0.5599 ± 0.0044 | 0.6511 ± 0.0169 | 0.6202 ± 0.0172 |
+
+Single-peaked response across a 20× span, maximised at **5e-4** on all three
+metrics simultaneously. Kappa and OA rise and fall monotonically around it;
+macro-F1 has one inversion at the bottom of the range (0.5405 at 5e-5 against
+0.5397 at 1e-4), far inside those cells' seed spread. The `opt3` learning rate,
+adopted in June, is confirmed as the best of five. The curve is not flat:
+dropping to 5e-5 costs 4.1 kappa points and doubling to 1e-3 costs 1.0.
+
+#### The warmup arm
+
+| warmup (lr 5e-4) | peak epochs | macro-F1 | OA | kappa |
+|---|---|---|---|---|
+| 0 | 1, 8, 18 | 0.5438 ± 0.0218 | 0.6440 ± 0.0169 | 0.6109 ± 0.0183 |
+| 1 | 2, 17, 19 | 0.5358 ± 0.0053 | 0.6298 ± 0.0078 | 0.5963 ± 0.0069 |
+| 3 | 2, 7, 10 | 0.5758 ± 0.0261 | 0.6612 ± 0.0148 | 0.6304 ± 0.0167 |
+
+Warmup 3 wins on all three metrics, so `opt3`'s second half is confirmed too.
+The ordering is non-monotonic — warmup 1 scores below warmup 0 — but the gap
+(0.0146 kappa) is inside the seed spread of these cells (sd 0.0069-0.0183) and
+should not be read as a finding about warmup 1 specifically.
+
+#### Scoring the pre-registration: it fails, and the failure is informative
+
+Rev C predicted: *"best val_kappa will occur at a later epoch under a lower LR,
+and the seed-to-seed variance in peak epoch will narrow."*
+
+**Neither half holds.** Mean peak epoch across the five learning rates is
+6.7, 8.0, 7.3, 6.3, 6.7 — flat, with no trend over two decades of step size
+(Spearman ρ = -0.126, p = 0.655, on the 15 warmup-3 runs). Peak-epoch
+variance does not narrow at low LR either: sd is 2.31 at 5e-5 but 6.24 at 1e-4
+and 5.86 at 2.5e-4, non-monotonic and dominated by one late-peaking seed per cell.
+Every cell keeps at least one run peaking within the first six epochs.
+
+Rev C attached a conditional to exactly this outcome:
+
+> If a lower LR does not move the peak epoch later, the early peak is
+> overfitting driven by capacity rather than step size, and the answer is
+> regularization or a smaller model rather than a schedule change.
+
+That branch is now the live one. **The early peak is not a schedule artefact and
+no schedule change will fix it.** This also converges with two independent prior
+results: the June capacity runs (resnet101/152 did not help) and the
+clean-universe-260 regularization-regime analysis in
+`docs/global_lcz_campaign_2026-07.md`. Three routes now converge on the same
+conclusion — the ceiling on this recipe is regularization and label supply, not
+optimisation and not capacity, so the levers left are the ones that change what
+the model sees rather than how it descends. Acting on that is a Phase 3/4
+question, not a Phase 2 one; Phase 2
+keeps `opt3` unchanged, which is now an empirically defended choice rather than
+an inherited one.
+
+#### One incidental reading, flagged rather than claimed
+
+The winning cell scores **kappa 0.6304 ± 0.0167** (best single run
+0.6479), which sits above the anchor's seven-seed band. It is
+tempting to read that as the Phase 1 fixes plus manifest restriction buying ~1.2
+kappa points. **Do not.** The test populations differ (23,852 vs 24,188 patches,
+the difference concentrated in LCZ 17 water), so the two numbers answer different
+questions. Disentangling the training-arm effect from the evaluation-set effect
+is precisely what Task 2.2's 2×2 exists to do, and this is at most a hint about
+which way that grid will fall.
+
+#### What this unblocks
+
+Tasks 2.1, 2.1b, 2.1b-iii and 2.1c are complete and Phase 2's diagnostic
+preamble is finished. **Task 2.2 is the next run**, and its last code
+prerequisite is now closed.
+
+`--min-native-frac` was the one Rev C item still missing from the training CLI —
+`run_phase2_anchor.sh:18` recorded that Rev A's `0.0` was inert because the flag
+did not exist, so Arm B could not be expressed. It exists now
+(`datasets.so2sat.filter_by_native_fraction`, `patch_classification.py:179`),
+reading the manifest's `native_frac_<family>` columns rather than remeasuring,
+taking the **minimum** across sources on a fused run, and applying to training
+and evaluation alike on the same reasoning as `--max-invalid-frac`. It is logged
+to the W&B config and written into the checkpoint beside
+`patch_manifest_sha256`. All three population flags are now present and
+recorded, so an Arm A and an Arm B checkpoint are distinguishable after the fact.
+
+| check | result |
+|---|---|
+| `pytest` | **445 passed, 2 skipped** (13 new in `tests/test_min_native_frac.py`) |
+| default `0.0` returns the identical list object | yes — `assert out is items`, no parquet read |
+| filter vs. a pandas count, 4,000 real manifest rows at 0.5 / 0.9 / 1.0 | exact match at all three |
+| fused run takes the minimum across sources | exact match against pandas `min(axis=1)` |
+| end-to-end `--min-native-frac 0.5` on Nairobi, nano preset | ran to completion; dropped 0 of 4,828 |
+| is 0 right for Nairobi? | yes — Nairobi's minimum `native_frac` is 0.9412; Sydney, which Rev B named, has 6 patches below 0.5 |
+| checkpoint provenance | `min_native_frac 0.5`, `patch_manifest_sha256 ad7fdae3…` — matches Rev B's recorded hash |
+
+The `pytest` baseline moved from the 323/1 recorded at GATE 2 because the
+segmentation foundation work (`data/segmentation_plan.md` §8) added its suites in
+the interim; 432/2 of the current count predate this task.

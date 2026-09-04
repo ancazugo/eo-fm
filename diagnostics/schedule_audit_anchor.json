@@ -1,0 +1,205 @@
+{
+  "meta": {
+    "prefix": "p2-anchor-tessera",
+    "entity": "phd-thesis-team",
+    "project": "lcz-classification-dl",
+    "generated": "2026-09-04T08:10:53+00:00",
+    "n_runs": 7
+  },
+  "runs": [
+    {
+      "run_name": "p2-anchor-tessera-seed0",
+      "run_id": "p3x6xm0v",
+      "seed": 0,
+      "lr": 0.0005,
+      "warmup_epochs": 3,
+      "patch_manifest": null,
+      "normalize": "none",
+      "peak_epoch": 2,
+      "stop_epoch": 12,
+      "best_val_kappa": 0.5666601657867432,
+      "peaked_during_warmup": true,
+      "macro_f1": 0.5641144514083862,
+      "oa": 0.6408751606941223,
+      "kappa": 0.609740674495697
+    },
+    {
+      "run_name": "p2-anchor-tessera-seed1",
+      "run_id": "vh8rzsee",
+      "seed": 1,
+      "lr": 0.0005,
+      "warmup_epochs": 3,
+      "patch_manifest": null,
+      "normalize": "none",
+      "peak_epoch": 2,
+      "stop_epoch": 12,
+      "best_val_kappa": 0.5856724977493286,
+      "peaked_during_warmup": true,
+      "macro_f1": 0.5460283756256104,
+      "oa": 0.6497191786766052,
+      "kappa": 0.6174777150154114
+    },
+    {
+      "run_name": "p2-anchor-tessera-seed2",
+      "run_id": "49tr6tzw",
+      "seed": 2,
+      "lr": 0.0005,
+      "warmup_epochs": 3,
+      "patch_manifest": null,
+      "normalize": "none",
+      "peak_epoch": 15,
+      "stop_epoch": 25,
+      "best_val_kappa": 0.589187502861023,
+      "peaked_during_warmup": false,
+      "macro_f1": 0.5650514364242554,
+      "oa": 0.6438091993331909,
+      "kappa": 0.611054539680481
+    },
+    {
+      "run_name": "p2-anchor-tessera-seed3",
+      "run_id": "od2uapr9",
+      "seed": 3,
+      "lr": 0.0005,
+      "warmup_epochs": 3,
+      "patch_manifest": null,
+      "normalize": "none",
+      "peak_epoch": 5,
+      "stop_epoch": 15,
+      "best_val_kappa": 0.5946521759033203,
+      "peaked_during_warmup": false,
+      "macro_f1": 0.5672075748443604,
+      "oa": 0.6601978540420532,
+      "kappa": 0.6286455392837524
+    },
+    {
+      "run_name": "p2-anchor-tessera-seed4",
+      "run_id": "8il86g78",
+      "seed": 4,
+      "lr": 0.0005,
+      "warmup_epochs": 3,
+      "patch_manifest": null,
+      "normalize": "none",
+      "peak_epoch": 16,
+      "stop_epoch": 26,
+      "best_val_kappa": 0.5753821134567261,
+      "peaked_during_warmup": false,
+      "macro_f1": 0.5527279376983643,
+      "oa": 0.6528627872467041,
+      "kappa": 0.6217606663703918
+    },
+    {
+      "run_name": "p2-anchor-tessera-seed5",
+      "run_id": "u7o2qu9y",
+      "seed": 5,
+      "lr": 0.0005,
+      "warmup_epochs": 3,
+      "patch_manifest": null,
+      "normalize": "none",
+      "peak_epoch": 22,
+      "stop_epoch": 32,
+      "best_val_kappa": 0.6026818156242371,
+      "peaked_during_warmup": false,
+      "macro_f1": 0.5740824937820435,
+      "oa": 0.6597367525100708,
+      "kappa": 0.6283033490180969
+    },
+    {
+      "run_name": "p2-anchor-tessera-seed6",
+      "run_id": "px3d53tl",
+      "seed": 6,
+      "lr": 0.0005,
+      "warmup_epochs": 3,
+      "patch_manifest": null,
+      "normalize": "none",
+      "peak_epoch": 19,
+      "stop_epoch": 29,
+      "best_val_kappa": 0.5914467573165894,
+      "peaked_during_warmup": false,
+      "macro_f1": 0.5483466982841492,
+      "oa": 0.6451504826545715,
+      "kappa": 0.6130495071411133
+    }
+  ],
+  "groups": [
+    {
+      "group": {
+        "lr": 0.0005,
+        "warmup_epochs": 3
+      },
+      "runs": 7,
+      "peak_epochs": [
+        2,
+        2,
+        5,
+        15,
+        16,
+        19,
+        22
+      ],
+      "stop_epochs": [
+        12,
+        12,
+        15,
+        25,
+        26,
+        29,
+        32
+      ],
+      "peaked_during_warmup": 2,
+      "peak_epoch_stats": {
+        "n": 7,
+        "mean": 11.571428571428571,
+        "sd": 8.383657572069263,
+        "min": 2,
+        "max": 22
+      },
+      "macro_f1": {
+        "n": 7,
+        "mean": 0.5596512811524528,
+        "sd": 0.010612483776310598,
+        "min": 0.5460283756256104,
+        "max": 0.5740824937820435
+      },
+      "oa": {
+        "n": 7,
+        "mean": 0.6503359164510455,
+        "sd": 0.007652795051964577,
+        "min": 0.6408751606941223,
+        "max": 0.6601978540420532
+      },
+      "kappa": {
+        "n": 7,
+        "mean": 0.618575998714992,
+        "sd": 0.007879749737241901,
+        "min": 0.609740674495697,
+        "max": 0.6286455392837524
+      }
+    }
+  ],
+  "bimodality": {
+    "n": 7,
+    "peak_epochs": [
+      2,
+      2,
+      5,
+      15,
+      16,
+      19,
+      22
+    ],
+    "widest_gap": 10,
+    "span": 20,
+    "cluster_low": [
+      2,
+      2,
+      5
+    ],
+    "cluster_high": [
+      15,
+      16,
+      19,
+      22
+    ],
+    "gap_fraction_of_span": 0.5
+  }
+}
