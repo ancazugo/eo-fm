@@ -75,7 +75,7 @@ FAMILIES: dict[str, dict] = {
     "tesserav2": {
         "subdir": "GeoTessera_v2", "year": True, "kind": "npy",
         "prefix": "patch_", "suffix": ".npy", "embedding_name": "tesserav2",
-        "note": "already dequantized at extraction time; covers ~37% of So2Sat patches",
+        "note": "already dequantized at extraction time; covers ~36.6% of So2Sat patches",
     },
     "seamless": {
         "subdir": "EmbeddedSeamless", "year": True, "kind": "npy",

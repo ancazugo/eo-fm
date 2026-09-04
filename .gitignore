@@ -16,6 +16,8 @@ wandb/
 .claude/
 .pytest_cache/
 logs/
+*.gpkg
+*.sh
 # Generated experiment data (small reference inputs in data/ stay tracked)
 /data/patches_reference_unlabeled*.gpkg
 /data/pseudo_labels*/

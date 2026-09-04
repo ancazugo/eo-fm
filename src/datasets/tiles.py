@@ -539,6 +539,21 @@ def open_tile(path: Path) -> xr.DataArray:
     return rxr.open_rasterio(path)
 
 
+def fully_covered(geom, tile_geoms) -> bool:
+    """Whether *geom* lies entirely inside the matched tiles' footprints.
+
+    crop_patch returns a truncated array when only part of a footprint has
+    tile coverage, and the datasets then stretch it to the model's patch size
+    — silently distorted samples.  Extraction scripts use this to drop them.
+    Pass the exact tile footprints (what build_tile_index stores), not their
+    bounding boxes, or edge slivers read as covered.
+    """
+    from shapely import union_all
+
+    covering = tile_geoms[0] if len(tile_geoms) == 1 else union_all(tile_geoms)
+    return geom.covered_by(covering)
+
+
 # ---------------------------------------------------------------------------
 # Patch cropping
 # ---------------------------------------------------------------------------

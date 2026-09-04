@@ -44,7 +44,11 @@ from loguru import logger
 from tqdm import tqdm
 
 from datasets.registry import EMBEDDING_REGISTRY
-from datasets.tiles import build_tile_index as _build_tile_index, crop_patch as _crop_patch
+from datasets.tiles import (
+    build_tile_index as _build_tile_index,
+    crop_patch as _crop_patch,
+    fully_covered,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -80,15 +84,21 @@ def _iter_city_tasks(
     only_valid: bool,
     skip_existing: bool,
     valid_bbox_map: dict | None = None,
+    skip_partial_coverage: bool = False,
 ) -> list[tuple]:
-    """Build the list of (args) tuples for all grid tiles in one city."""
+    """Build the list of (args) tuples for all grid tiles in one city.
+
+    Returns (tasks, n_partial): with *skip_partial_coverage*, grid tiles not
+    wholly inside the available tile footprints are dropped instead of being
+    written as a truncated array the segmentation dataset would misalign
+    against its label raster."""
     from shapely.strtree import STRtree  # noqa: F401 — ensure import in workers
 
     city = city_dir.name
     grid_path = city_dir / f"{city}_grid.gpkg"
     if not grid_path.exists():
         logger.warning(f"  {city}: {grid_path.name} not found — skipping")
-        return []
+        return [], 0
 
     grid_gdf = gpd.read_file(grid_path)
     if only_valid:
@@ -96,18 +106,24 @@ def _iter_city_tasks(
 
     if grid_gdf.empty:
         logger.warning(f"  {city}: no {'valid ' if only_valid else ''}tiles — skipping")
-        return []
+        return [], 0
 
     # Reproject to EPSG:4326 for STRtree spatial query (tile index is in 4326)
     grid_4326 = grid_gdf.to_crs("EPSG:4326")
     grid_crs = str(grid_gdf.crs)
 
     tasks = []
+    n_partial = 0
     for (_, row), (_, row_4326) in zip(
         grid_gdf.iterrows(), grid_4326.iterrows()
     ):
         idxs = strtree.query(row_4326.geometry)
         if len(idxs) == 0:
+            continue
+        if skip_partial_coverage and not fully_covered(
+            row_4326.geometry, strtree.geometries[idxs]
+        ):
+            n_partial += 1
             continue
         matched = [tile_paths[i] for i in idxs]
         split = row["split"]
@@ -127,7 +143,7 @@ def _iter_city_tasks(
             if valid_bbox_map else None,
         ))
 
-    return tasks
+    return tasks, n_partial
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +205,13 @@ def main() -> None:
         action="store_true",
         help="Skip tiles whose .npy file already exists (useful for resuming).",
     )
+    parser.add_argument(
+        "--skip-partial-coverage",
+        action="store_true",
+        help="Skip grid tiles only partially covered by the available embedding "
+             "tiles instead of writing a truncated array. Recommended for gappy "
+             "embeddings such as tesserav2.",
+    )
     args = parser.parse_args()
 
     # Ensure src/ is on sys.path when running directly
@@ -222,8 +245,9 @@ def main() -> None:
     # Gather all tasks across cities
     logger.info(f"Building task list for {len(city_dirs)} cities …")
     all_tasks: list[tuple] = []
+    n_partial = 0
     for city_dir in city_dirs:
-        tasks = _iter_city_tasks(
+        tasks, city_partial = _iter_city_tasks(
             city_dir,
             tile_paths,
             strtree,
@@ -232,8 +256,10 @@ def main() -> None:
             args.only_valid,
             args.skip_existing,
             valid_bbox_map or None,
+            args.skip_partial_coverage,
         )
         all_tasks.extend(tasks)
+        n_partial += city_partial
 
     logger.info(f"Total tiles to process: {len(all_tasks)}")
     if not all_tasks:
@@ -261,7 +287,8 @@ def main() -> None:
 
     logger.info(
         f"\nDone — {n_saved} saved, {n_skipped} skipped (existing), "
-        f"{n_no_coverage} skipped (no coverage)."
+        f"{n_no_coverage} skipped (no coverage), "
+        f"{n_partial} skipped (partial coverage)."
     )
 
 

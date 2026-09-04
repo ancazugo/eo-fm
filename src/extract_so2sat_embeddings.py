@@ -37,24 +37,15 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent))
 
 from datasets.registry import EMBEDDING_REGISTRY
-from datasets.tiles import build_tile_index as _build_tile_index, crop_patch as _crop_patch
+from datasets.tiles import (
+    build_tile_index as _build_tile_index,
+    crop_patch as _crop_patch,
+    fully_covered as _fully_covered,
+)
 
 # ---------------------------------------------------------------------------
 # Worker for parallel execution
 # ---------------------------------------------------------------------------
-
-def _fully_covered(patch_geom, tile_geoms) -> bool:
-    """Whether *patch_geom* lies entirely inside the matched tiles' footprints.
-
-    crop_patch happily returns a truncated array when only part of a patch has
-    tile coverage, and PatchDataset then stretches it to the model's patch size
-    — silently distorted samples.  Callers use this to drop such patches.
-    """
-    from shapely import union_all
-
-    covering = tile_geoms[0] if len(tile_geoms) == 1 else union_all(tile_geoms)
-    return patch_geom.covered_by(covering)
-
 
 def _process_patch(args: tuple) -> tuple[str, bool]:
     (patch_id, geom_wkt, patch_crs, tile_paths, output_path,
