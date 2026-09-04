@@ -176,6 +176,14 @@ def main() -> None:
                         "src/diagnostics/nodata_population.py (default: "
                         "diagnostics/invalid_fraction.parquet). Only read when "
                         "--max-invalid-frac < 1.")
+    g.add_argument("--min-native-frac", type=float, default=0.0,
+                   help="Drop patches built from less than this fraction of "
+                        "native-resolution pixels, from training AND "
+                        "evaluation. Fractions are read from the "
+                        "native_frac_<family> columns of --patch-manifest "
+                        "(default: diagnostics/patch_manifest_v1.parquet). "
+                        "Default 0.0 keeps everything and is an exact no-op; "
+                        "Rev A's Arm B uses 0.5.")
     g.add_argument("--patch-manifest", type=Path, default=None,
                    help="Task 2.0 common manifest "
                         "(src/diagnostics/patch_manifest.py): restricts train, "
@@ -266,6 +274,7 @@ def main() -> None:
         embedding_names=args.embedding_name,
         invalid_frac_parquet=args.invalid_frac_parquet,
         patch_manifest=args.patch_manifest,
+        min_native_frac=args.min_native_frac,
     )
     manifest_sha = manifest_sha256(args.patch_manifest)
     n_pseudo = 0
@@ -442,6 +451,7 @@ def main() -> None:
         sub_patch_stride=args.sub_patch_stride,
         nodata_mode=args.nodata_mode,
         max_invalid_frac=args.max_invalid_frac,
+        min_native_frac=args.min_native_frac,
         # Which population the run used (Task 2.0). Arm A and Arm B are
         # otherwise indistinguishable in W&B, and the hash catches a manifest
         # rebuilt with different thresholds under the same filename.
@@ -512,6 +522,7 @@ def main() -> None:
                 # experiments and their checkpoints are otherwise
                 # indistinguishable.
                 "max_invalid_frac": args.max_invalid_frac,
+                "min_native_frac": args.min_native_frac,
                 "patch_manifest_sha256": manifest_sha,
             },
         )

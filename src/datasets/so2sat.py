@@ -294,6 +294,7 @@ def build_so2sat_items(
     embedding_names: list[str] | None = None,
     invalid_frac_parquet: Path | None = None,
     patch_manifest: Path | None = None,
+    min_native_frac: float = 0.0,
 ) -> tuple[list[PatchItem], list[Path]]:
     """Build the full item list plus the city dirs used for per-city inference.
 
@@ -386,6 +387,9 @@ def build_so2sat_items(
     all_items = filter_by_invalid_fraction(
         all_items, max_invalid_frac, embedding_names, invalid_frac_parquet
     )
+    all_items = filter_by_native_fraction(
+        all_items, min_native_frac, embedding_names, patch_manifest
+    )
     all_items = filter_by_manifest(all_items, patch_manifest)
 
     return all_items, city_dirs
@@ -395,6 +399,10 @@ def build_so2sat_items(
 
 DEFAULT_INVALID_FRAC_PARQUET = (
     Path(__file__).resolve().parents[2] / "diagnostics" / "invalid_fraction.parquet"
+)
+
+DEFAULT_PATCH_MANIFEST = (
+    Path(__file__).resolve().parents[2] / "diagnostics" / "patch_manifest_v1.parquet"
 )
 
 _SCAN_COMMAND = "python src/diagnostics/nodata_population.py"
@@ -493,6 +501,96 @@ def filter_by_invalid_fraction(
     if n_unknown:
         logger.warning(
             f"{n_unknown} patches had no entry in {parquet.name} and were kept."
+        )
+    return kept
+
+
+def filter_by_native_fraction(
+    items: list[PatchItem],
+    min_native_frac: float,
+    embedding_names: list[str] | None,
+    manifest: Path | None = None,
+) -> list[PatchItem]:
+    """Drop patches that were cropped from too little native-resolution data.
+
+    Rev A's second coverage criterion. A patch near a tile edge can be present
+    and free of nodata and still be built from a handful of native pixels — 484
+    Tessera training patches crop to as little as 2 px per side — because the
+    crop is clipped at the tile boundary and then resized up to the nominal
+    patch size. ``native_frac`` is that shortfall as a ratio,
+    ``(native_h * native_w) / expected_native_area[family]``, and this filter
+    drops the tail of it from training *and* evaluation, on the same reasoning
+    as ``filter_by_invalid_fraction``.
+
+    Fractions are read from the Task 2.0 manifest's ``native_frac_<family>``
+    columns rather than measured here — the manifest already computed them over
+    all 400,673 patches, and recomputing would mean opening every tile at the
+    start of every run.
+
+    For a fused run the **minimum** fraction across the requested sources
+    decides: fusion concatenates the sources, so the most truncated one sets
+    how much real signal the sample carries.
+
+    ``min_native_frac <= 0.0`` returns *items* itself, unchanged and in order.
+    Task 2.1's anchor and every Arm A run depend on that being a provable
+    no-op, which is why the CLI default is 0.0 and not the manifest's own 0.5.
+    """
+    if min_native_frac <= 0.0:
+        return items
+
+    manifest = Path(manifest) if manifest is not None else DEFAULT_PATCH_MANIFEST
+    if not manifest.exists():
+        logger.error(
+            f"--min-native-frac {min_native_frac} needs per-patch native "
+            f"fractions, but {manifest} does not exist. Write it with:\n"
+            f"    {_MANIFEST_COMMAND}"
+        )
+        raise SystemExit(1)
+
+    head = pd.read_parquet(manifest).head(0)
+    families = embedding_names or []
+    cols = [f"native_frac_{f}" for f in families]
+    missing = [f for f, c in zip(families, cols) if c not in head.columns]
+    if missing or not cols:
+        known = sorted(c[len("native_frac_"):] for c in head.columns
+                       if c.startswith("native_frac_"))
+        logger.error(
+            f"{manifest.name} has no native_frac column for "
+            f"{missing or 'the requested families'}. It covers {known}; "
+            f"rebuild it with `{_MANIFEST_COMMAND} --families "
+            f"{' '.join(families) or '<family>'}`."
+        )
+        raise SystemExit(1)
+
+    df = pd.read_parquet(manifest, columns=["dataset", "patch_id", *cols])
+    # Minimum across the fused sources; a single source is its own minimum.
+    frac = dict(zip(zip(df["dataset"].astype(str), df["patch_id"].astype(str)),
+                    df[cols].min(axis=1).to_numpy()))
+
+    kept: list[PatchItem] = []
+    dropped: dict[str, int] = {}
+    n_unknown = 0
+    for it in items:
+        f = frac.get(patch_key(it.path))
+        if f is None:
+            # Outside the manifest's universe (unlabeled or pseudo-labelled).
+            # Kept, so this filter cannot become a silent coverage restriction.
+            n_unknown += 1
+            kept.append(it)
+        elif f >= min_native_frac:
+            kept.append(it)
+        else:
+            dropped[it.split] = dropped.get(it.split, 0) + 1
+
+    n_dropped = sum(dropped.values())
+    detail = ", ".join(f"{s} {n}" for s, n in sorted(dropped.items())) or "none"
+    logger.info(
+        f"--min-native-frac {min_native_frac}: dropped {n_dropped} of "
+        f"{len(items)} patches ({detail})"
+    )
+    if n_unknown:
+        logger.warning(
+            f"{n_unknown} patches had no entry in {manifest.name} and were kept."
         )
     return kept
 
