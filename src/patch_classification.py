@@ -2,7 +2,7 @@
 
 Any classification family in the models registry can be trained
 (``--family``: resnet, efficientnet, convnext, densenet, mobilenet, vit,
-aspp, mlp, ...).
+aspp, mlp, shallow_cnn, ...).
 
 Three split modes:
 

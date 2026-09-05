@@ -1,7 +1,7 @@
 """Semantic segmentation trained on grid tile embeddings.
 
 Any segmentation family in the models registry can be trained
-(``--family``: unet, resnet_unet, ...).
+(``--family``: unet, resnet_unet, fcn8, ...).
 
 For each city the script:
   1. Reads {city}/{output_name}/{year}/{split}/{city}_{grid_id}.npy

@@ -60,8 +60,10 @@ src/
     registry.py              #   ModelFamily, build_model(), families_for()
     timm_families.py         #   resnet, efficientnet, convnext, densenet, mobilenet, vit
     mlp.py, aspp.py          #   classification families
+    shallow_cnn.py           #   2-conv CNN + GAP + Linear (classification family)
     linear_probe.py          #   pooling + BatchNorm + Linear probe (classification family)
     unet.py, resnet_unet.py  #   segmentation families
+    fcn8.py                  #   miniature FCN-8s with score fusion (segmentation family)
   training/                  # Shared training library
     tasks.py                 #   LCZResNetModule (cls), LCZUNetModule (seg)
     loop.py                  #   run_training_loop() — one generic loop
@@ -92,8 +94,8 @@ R/                           # R figure scripts (reads data/wandb_export_*.csv)
 
 | Pipeline | Families |
 |---|---|
-| `patch_classification.py` | `resnet` (default), `efficientnet`, `convnext`, `densenet`, `mobilenet`, `vit`, `aspp`, `mlp`, `linear_probe` |
-| `semantic_segmentation.py` | `unet` (default), `resnet_unet` |
+| `patch_classification.py` | `resnet` (default), `efficientnet`, `convnext`, `densenet`, `mobilenet`, `vit`, `aspp`, `mlp`, `shallow_cnn`, `linear_probe` |
+| `semantic_segmentation.py` | `unet` (default), `resnet_unet`, `fcn8` |
 
 `linear_probe` is pooling + `BatchNorm1d(affine=False)` + Linear (the "BN + linear"
 probe). Presets are all equivalent (GAP pooling); pass `--arch mean_std` for
@@ -293,7 +295,7 @@ Use `--only-valid` to skip tiles flagged as invalid (recommended). Use `--skip-e
 
 Trains a patch classifier on pre-extracted So2Sat patch `.npy` files. After training, automatically runs full-ROI inference via `infer_roi.py`.
 
-**Families** (`--family`): `resnet` (default) · `efficientnet` · `convnext` · `densenet` · `mobilenet` · `vit` · `aspp` · `mlp`
+**Families** (`--family`): `resnet` (default) · `efficientnet` · `convnext` · `densenet` · `mobilenet` · `vit` · `aspp` · `mlp` · `shallow_cnn`
 **Presets** (`--preset`): `nano` · `small` · `base` · `medium` · `large` (resnet: resnet18 → resnet152)
 
 #### Split modes
@@ -405,7 +407,7 @@ test_confusion_matrix.png
 
 Trains a segmentation model on pre-extracted grid tile `.npy` files. Label masks are rasterized on the fly from `patches_reference_{city}_split.gpkg` polygons. After training, automatically runs full-ROI inference via `infer_roi.py`.
 
-**Families** (`--family`): `unet` (default) · `resnet_unet` (timm ResNet encoder + U-Net decoder; presets nano/small/base → resnet18/34/50)
+**Families** (`--family`): `unet` (default) · `resnet_unet` (timm ResNet encoder + U-Net decoder; presets nano/small/base → resnet18/34/50) · `fcn8` (miniature FCN-8s: 2-3 pooling stages, 1×1 score heads fused coarse-to-fine; presets nano (2, 8) → large (3, 64))
 
 **U-Net presets:**
 
@@ -475,7 +477,7 @@ python src/semantic_segmentation.py \
 **Key flags:**
 - `--label-source` — `gpkg` (rasterize polygons on the fly) or `tif` (clip label raster)
 - `--label-tif-dir` — train on dense pseudo-label rasters (see Step 3c); val/test stay on gpkg GT
-- `--family` — model family (`unet` or `resnet_unet`)
+- `--family` — model family (`unet`, `resnet_unet` or `fcn8`)
 - `--preset` — size preset (see table above)
 - `--dequantize` — force dequantization (auto-applied for `alpha_earth_coop`/`seamless`)
 - `--checkpoint` — skip training, load weights and run inference only

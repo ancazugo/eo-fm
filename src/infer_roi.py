@@ -12,9 +12,9 @@ This eliminates all grid-tile artifacts and UTM-zone boundary artefacts.
 
 Supports:
 - Every model family in the models registry: segmentation families (unet,
-  resnet_unet) run per-pixel with Hanning-blended logits; classification
-  families (resnet, mlp, aspp, vit, linear_probe, ...) run patch-wise with
-  majority vote.
+  resnet_unet, fcn8) run per-pixel with Hanning-blended logits; classification
+  families (resnet, mlp, aspp, vit, shallow_cnn, linear_probe, ...) run
+  patch-wise with majority vote.
 - Legacy linear-probe checkpoints from the retired linear_probe.py script
   (fc-only state dict): pass ``--stats-file`` with the training-set mean/std
   NPZ and they are converted on load.

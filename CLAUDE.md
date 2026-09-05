@@ -69,10 +69,12 @@ src/
     timm_families.py         #   resnet/efficientnet/convnext/densenet/mobilenet/vit (classification)
     mlp.py                   #   GAP+MLP (classification)
     aspp.py                  #   LightASPPHead (classification)
+    shallow_cnn.py           #   2-block Conv-BN-ReLU-Pool + GAP + Linear (classification)
     linear_probe.py          #   pooling + BatchNorm1d(affine=False) + Linear (classification);
                              #   arch payload = pooling ("gap"/"mean_std"); stats live in the checkpoint
     unet.py                  #   DoubleConv, UNet (segmentation)
     resnet_unet.py           #   ResNetUNet (segmentation)
+    fcn8.py                  #   FCN8 — miniature FCN-8s, score fusion (segmentation)
   training/
     tasks.py                 #   LCZResNetModule (cls, monitor=val_f1), LCZUNetModule (seg, monitor=val_miou)
     loop.py                  #   run_training_loop() — generic Adam+cosine loop, early stopping, checkpointing
