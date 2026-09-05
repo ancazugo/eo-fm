@@ -37,7 +37,17 @@ wait_for_gpu () {
 # work. Keyed on the completion marker rather than on the log file existing: a
 # run that crashed or was interrupted leaves a log behind too, and skipping it
 # would silently drop a seed from the band it belongs to.
+#
+# TWO markers, because semantic_segmentation.py has two exits: the normal one
+# logs "Run complete. Outputs in ...", but under --no-inference it logs
+# "--no-inference: skipping city rasters. Outputs in ..." and returns before
+# reaching it. Matching only the first made this predicate permanently false for
+# every --no-inference seg run -- which is every row in run_seg_ladder.sh, so its
+# resume logic never fired and a re-run would have re-trained finished rows from
+# scratch (~10 GPU-hours for rows 4-5). It also made any waiter built on this
+# helper report a healthy run as crashed.
 already_complete () {
   local log=$1
-  [[ -f $log ]] && grep -q "Run complete. Outputs in" "$log"
+  [[ -f $log ]] && grep -qE \
+    "Run complete\. Outputs in|--no-inference: skipping city rasters\. Outputs in" "$log"
 }
