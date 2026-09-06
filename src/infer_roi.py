@@ -47,6 +47,7 @@ Example (classification):
 from __future__ import annotations
 
 import argparse
+import inspect
 import sys
 from pathlib import Path
 from typing import Any
@@ -799,8 +800,19 @@ def main() -> None:
                 if args.base_features is not None:
                     bf = args.base_features
                 arch = (d, bf)
-        elif args.model_type == "vit":
+        else:
+            # Classification families: img_size drives both the ViT token grid
+            # and the conv stem adaptation, so the rebuilt structure matches
+            # what training produced.
             build_kwargs["img_size"] = args.patch_size
+
+        # This calls family.build directly rather than build_model, so the
+        # signature filtering build_model does has to happen here too --
+        # img_size is meaningless to mlp/aspp/shallow_cnn/linear_probe and
+        # bottleneck_dropout to a seg family that does not take it.
+        sig = inspect.signature(family.build)
+        if not any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            build_kwargs = {k: v for k, v in build_kwargs.items() if k in sig.parameters}
 
         logger.info(f"Building {args.model_type}: preset={args.preset}, arch={arch}")
         net = family.build(arch, in_channels=in_channels, num_classes=args.num_classes,

@@ -81,3 +81,50 @@ def test_shallow_cnn_arch_override():
         out = model(torch.randn(2, 64, 32, 32))
 
     assert out.shape == (2, NUM_CLASSES)
+
+
+def test_conv_families_keep_a_usable_feature_map():
+    """No classification conv family may collapse a 32 px patch to 1x1.
+
+    Every timm model here is built for 224 px and downsamples by 32x, so an
+    unadapted stem leaves a single pixel at the classifier -- the model is asked
+    to label a 320 m patch from one activation. Measured on the cultural split,
+    the families that ended at 1x1 clustered at kappa 0.599-0.601 whether they
+    carried 604k or 12.9M parameters, while resnet (4x4) reached 0.6145. This
+    pins the adaptation for every family, not just the one that had it
+    hardcoded until 2026-09.
+    """
+    from models.timm_families import TIMM_PRESETS, MIN_FINAL_MAP, _final_map_size
+
+    for family, presets in TIMM_PRESETS.items():
+        if family == "vit":
+            continue  # tokenised, not a conv feature map: patch_size=2 handles it
+        for preset in presets:
+            model = build_model(
+                family, preset, in_channels=IN_CHANNELS, num_classes=NUM_CLASSES,
+                head_dropout=0.0, img_size=32,
+            )
+            got = _final_map_size(model, IN_CHANNELS, 32)
+            assert got >= MIN_FINAL_MAP, (
+                f"{family}/{preset} collapses 32px to {got}x{got}; "
+                f"expected at least {MIN_FINAL_MAP}x{MIN_FINAL_MAP}"
+            )
+
+
+def test_resnet_stem_matches_the_historical_surgery():
+    """resnet's adapted stem must stay bit-identical, or every resnet
+    checkpoint in the project (SSL students, ensemble members, the 2.1c
+    reference band) stops loading. The generic adaptation replaced a hardcoded
+    resnet branch; this is the guard that it reproduces it exactly.
+    """
+    import torch.nn as nn
+
+    model = build_model("resnet", "small", in_channels=IN_CHANNELS,
+                        num_classes=NUM_CLASSES, head_dropout=0.0, img_size=32)
+    assert isinstance(model.conv1, nn.Conv2d)
+    assert model.conv1.kernel_size == (3, 3)
+    assert model.conv1.stride == (1, 1)
+    assert model.conv1.padding == (1, 1)
+    assert model.conv1.bias is None
+    assert model.conv1.in_channels == IN_CHANNELS
+    assert isinstance(model.maxpool, nn.Identity)

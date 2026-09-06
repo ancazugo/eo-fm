@@ -1,11 +1,15 @@
 """timm-backed classification families: resnet, efficientnet, convnext,
 densenet, mobilenet, vit.
 
-All families share one builder (:func:`build_timm`). Family-specific input
-adaptations for small embedding patches (32×32 px):
+All families share one builder (:func:`build_timm`). Input adaptations for
+small embedding patches (32×32 px):
 
-- resnet: stem surgery — 7×7 stride-2 conv + maxpool replaced by a 3×3
-  stride-1 conv + Identity, so feature maps stay large.
+- conv families: :func:`adapt_stem_for_small_inputs` relaxes early downsampling
+  until the deepest feature map is at least 4×4. Untouched, all of them end at
+  1×1 on a 32 px patch — they are built for 224 px and downsample by 32×. Until
+  2026-09 only resnet got this (hardcoded), which is why the other families
+  looked like weak architectures when they were really being handed a single
+  pixel to classify from.
 - vit: patch_size overridden to 2 → (img_size / 2)² tokens (e.g. 256 tokens
   for a 32×32 input).
 """
@@ -15,6 +19,107 @@ from __future__ import annotations
 import torch.nn as nn
 
 from models.registry import ModelFamily, register
+
+# Patch size the stem adaptation is calibrated for when a caller does not say.
+# 32 px is the So2Sat patch (320 m at 10 m/px) and the --patch-size default.
+DEFAULT_IMG_SIZE = 32
+
+# Spatial size the deepest feature map should keep. 4 is what the historical
+# resnet-only surgery produced, so resnet's structure — and every resnet
+# checkpoint ever written — is unchanged by generalising it.
+MIN_FINAL_MAP = 4
+
+
+def _final_map_size(model: nn.Module, in_channels: int, img_size: int) -> int:
+    """Spatial size of the feature map entering the classifier, or 0 if not 4-D."""
+    import torch
+
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            feats = model.forward_features(torch.zeros(2, in_channels, img_size, img_size))
+    finally:
+        model.train(was_training)
+    return feats.shape[-1] if feats.dim() == 4 else 0
+
+
+def _replace(model: nn.Module, path: str, new: nn.Module) -> None:
+    parts = path.split(".")
+    parent = model
+    for p in parts[:-1]:
+        parent = parent[int(p)] if p.isdigit() else getattr(parent, p)
+    last = parts[-1]
+    if last.isdigit():
+        parent[int(last)] = new
+    else:
+        setattr(parent, last, new)
+
+
+def adapt_stem_for_small_inputs(
+    model: nn.Module,
+    in_channels: int,
+    img_size: int = DEFAULT_IMG_SIZE,
+    min_final_map: int = MIN_FINAL_MAP,
+) -> list[str]:
+    """Relax early downsampling so a small input keeps a usable feature map.
+
+    Every timm classification model here is designed for 224 px ImageNet images
+    and downsamples by 32×. On a 32 px embedding patch that leaves a 1×1 map at
+    the classifier — all spatial structure inside the patch is gone before the
+    first block finishes. Measured on the cultural split, the families that end
+    at 1×1 cluster at kappa 0.599–0.601 regardless of whether they carry 604k or
+    12.9M parameters, while resnet (4×4, via the surgery this generalises) gets
+    0.6145 and a purpose-built 2-conv net (8×8) gets 0.6330.
+
+    Walks the modules in definition order — which is forward order for these
+    architectures — and neutralises each stride>1 op until ``forward_features``
+    returns at least ``min_final_map``. A change that does not increase the map
+    is reverted, which is what skips squeeze-excite branches: their pooling is a
+    side path, so relaxing it moves nothing.
+
+    Convs with kernel ≥4 (the 7×7 ResNet/DenseNet stems, ConvNeXt's 4×4
+    patchify) are replaced by 3×3 stride-1; smaller convs keep their kernel and
+    just lose the stride; pooling layers become Identity.
+
+    For resnet this reproduces the previous hardcoded surgery exactly — 3×3
+    stride-1 conv1 plus Identity maxpool — so resnet checkpoints still load.
+    Checkpoints for the other families written before this change will not:
+    their shapes genuinely differ, and ``load_state_dict`` says so loudly.
+
+    Returns:
+        The module paths that were relaxed, for logging.
+    """
+    relaxed: list[str] = []
+    for path, mod in list(model.named_modules()):
+        if _final_map_size(model, in_channels, img_size) >= min_final_map:
+            break
+        if not isinstance(mod, (nn.Conv2d, nn.MaxPool2d, nn.AvgPool2d)):
+            continue
+        stride = mod.stride if isinstance(mod.stride, tuple) else (mod.stride, mod.stride)
+        if stride[0] <= 1:
+            continue
+
+        before = _final_map_size(model, in_channels, img_size)
+        if isinstance(mod, nn.Conv2d) and mod.kernel_size[0] >= 4:
+            _replace(model, path, nn.Conv2d(
+                mod.in_channels, mod.out_channels, kernel_size=3, stride=1,
+                padding=1, bias=mod.bias is not None,
+            ))
+            undo = lambda p=path, m=mod: _replace(model, p, m)  # noqa: E731
+        elif isinstance(mod, nn.Conv2d):
+            mod.stride = (1, 1)
+            undo = lambda m=mod, s=stride: setattr(m, "stride", s)  # noqa: E731
+        else:
+            _replace(model, path, nn.Identity())
+            undo = lambda p=path, m=mod: _replace(model, p, m)  # noqa: E731
+
+        if _final_map_size(model, in_channels, img_size) <= before:
+            undo()
+        else:
+            relaxed.append(path)
+    return relaxed
+
 
 TIMM_PRESETS: dict[str, dict[str, str]] = {
     "resnet": {
@@ -88,19 +193,7 @@ def build_timm(
         return timm.create_model(arch, **kwargs, patch_size=2)
 
     model = timm.create_model(arch, **kwargs)
-
-    if family == "resnet":
-        out_ch = model.conv1.out_channels  # preserve original width (64 for all resnet variants)
-        model.conv1 = nn.Conv2d(
-            in_channels=in_channels,
-            out_channels=out_ch,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            bias=False,
-        )
-        model.maxpool = nn.Identity()
-
+    adapt_stem_for_small_inputs(model, in_channels, img_size or DEFAULT_IMG_SIZE)
     return model
 
 

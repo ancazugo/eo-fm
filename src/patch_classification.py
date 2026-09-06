@@ -370,7 +370,7 @@ def main() -> None:
         in_channels=in_channels,
         num_classes=args.num_classes,
         head_dropout=args.head_dropout,
-        img_size=args.patch_size if args.family == "vit" else None,
+        img_size=args.patch_size,   # stem adaptation + ViT tokens both need it
     )
     class_weights = None
     class_priors = None
