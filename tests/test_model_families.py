@@ -64,7 +64,7 @@ def test_segmentation_output_shape(family, size):
     assert out.shape == (2, NUM_CLASSES, size, size)
 
 
-@pytest.mark.parametrize("family", ["shallow_cnn", "fcn8"])
+@pytest.mark.parametrize("family", ["shallow_cnn", "fcn8", "attention_unet"])
 def test_new_families_define_every_preset(family):
     # utils.cli hardcodes the five preset names and defaults to "large", so a
     # family missing one is unusable from the CLI without --preset.
@@ -128,3 +128,56 @@ def test_resnet_stem_matches_the_historical_surgery():
     assert model.conv1.bias is None
     assert model.conv1.in_channels == IN_CHANNELS
     assert isinstance(model.maxpool, nn.Identity)
+
+
+def test_attention_unet_differs_from_unet_only_by_its_gates():
+    """The matched-capacity premise, pinned as a test.
+
+    attention_unet exists to answer one question: do attention gates help on
+    pre-trained embeddings? That answer is only interpretable if an
+    attention_unet row and a unet row at the same preset differ by the gates
+    and nothing else -- not by width, depth or decoder shape. If someone later
+    retunes one family's channel schedule, this fails rather than silently
+    turning the comparison into a capacity experiment.
+    """
+    kwargs = dict(in_channels=IN_CHANNELS, num_classes=NUM_CLASSES,
+                  bottleneck_dropout=0.3)
+    plain = build_model("unet", "small", **kwargs)
+    gated = build_model("attention_unet", "small", **kwargs)
+
+    gate_params = sum(p.numel() for p in gated.gates.parameters())
+    assert gate_params > 0
+    assert (sum(p.numel() for p in gated.parameters())
+            == sum(p.numel() for p in plain.parameters()) + gate_params)
+
+    # Same preset ladder, so `--preset X` means the same capacity in both.
+    assert get_family("attention_unet").presets == get_family("unet").presets
+
+
+def test_attention_unet_actually_gates_its_skips():
+    """A forward() that forgot the gates would pass every other test here.
+
+    It would build, return the right shape, train, and report a number -- one
+    produced by a plain U-Net, filed under "attention". The gates are only real
+    if forcing their output to zero changes the prediction, so that is what
+    this checks: zeroing every psi must suppress the skip contribution.
+    """
+    import torch.nn as nn
+
+    class _Zero(nn.Module):
+        def forward(self, x):
+            return torch.zeros_like(x[:, :1])
+
+    model = build_model(
+        "attention_unet", "nano", in_channels=IN_CHANNELS,
+        num_classes=NUM_CLASSES, bottleneck_dropout=0.0,
+    ).eval()
+    x = torch.randn(2, IN_CHANNELS, 64, 64)
+
+    with torch.no_grad():
+        before = model(x)
+        for gate in model.gates:
+            gate.psi = _Zero()
+        after = model(x)
+
+    assert not torch.allclose(before, after)

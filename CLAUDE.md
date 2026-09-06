@@ -75,6 +75,7 @@ src/
     unet.py                  #   DoubleConv, UNet (segmentation)
     resnet_unet.py           #   ResNetUNet (segmentation)
     fcn8.py                  #   FCN8 — miniature FCN-8s, score fusion (segmentation)
+    attention_unet.py        #   AttentionUNet — UNet + additive skip attention gates (segmentation)
   training/
     tasks.py                 #   LCZResNetModule (cls, monitor=val_f1), LCZUNetModule (seg, monitor=val_miou)
     loop.py                  #   run_training_loop() — generic Adam+cosine loop, early stopping, checkpointing

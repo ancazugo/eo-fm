@@ -25,6 +25,7 @@ from models import shallow_cnn    # noqa: F401
 from models import unet           # noqa: F401
 from models import resnet_unet    # noqa: F401
 from models import fcn8           # noqa: F401
+from models import attention_unet  # noqa: F401
 
 from models.mlp import MLPModel, build_mlp
 from models.aspp import LightASPPHead, build_aspp
@@ -34,6 +35,7 @@ from models.timm_families import build_timm
 from models.unet import DoubleConv, UNet, build_unet
 from models.resnet_unet import ResNetUNet, build_resnet_unet
 from models.fcn8 import FCN8, build_fcn8
+from models.attention_unet import AttentionGate, AttentionUNet, build_attention_unet
 
 __all__ = [
     "MODEL_REGISTRY",
@@ -60,4 +62,7 @@ __all__ = [
     "build_resnet_unet",
     "FCN8",
     "build_fcn8",
+    "AttentionGate",
+    "AttentionUNet",
+    "build_attention_unet",
 ]

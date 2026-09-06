@@ -12,7 +12,8 @@ This eliminates all grid-tile artifacts and UTM-zone boundary artefacts.
 
 Supports:
 - Every model family in the models registry: segmentation families (unet,
-  resnet_unet, fcn8) run per-pixel with Hanning-blended logits; classification
+  resnet_unet, fcn8, attention_unet) run per-pixel with Hanning-blended logits;
+  classification
   families (resnet, mlp, aspp, vit, shallow_cnn, linear_probe, ...) run
   patch-wise with majority vote.
 - Legacy linear-probe checkpoints from the retired linear_probe.py script
@@ -880,7 +881,12 @@ def main() -> None:
         build_kwargs: dict = {}
         if family.pipeline == "segmentation":
             build_kwargs["bottleneck_dropout"] = args.bottleneck_dropout
-            if args.model_type == "unet":
+            # Every (depth, base_features) family honours the overrides, not
+            # just unet: fcn8 and attention_unet carry the same tuple payload,
+            # and rebuilding them at the preset depth after training with
+            # --depth would silently load the wrong structure. resnet_unet's
+            # payload is a backbone name, so the isinstance check skips it.
+            if isinstance(arch, tuple):
                 d, bf = arch
                 if args.depth is not None:
                     d = args.depth

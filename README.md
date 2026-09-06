@@ -64,6 +64,7 @@ src/
     linear_probe.py          #   pooling + BatchNorm + Linear probe (classification family)
     unet.py, resnet_unet.py  #   segmentation families
     fcn8.py                  #   miniature FCN-8s with score fusion (segmentation family)
+    attention_unet.py        #   U-Net + additive attention gates on the skips (segmentation family)
   training/                  # Shared training library
     tasks.py                 #   LCZResNetModule (cls), LCZUNetModule (seg)
     loop.py                  #   run_training_loop() — one generic loop
@@ -95,7 +96,7 @@ R/                           # R figure scripts (reads data/wandb_export_*.csv)
 | Pipeline | Families |
 |---|---|
 | `patch_classification.py` | `resnet` (default), `efficientnet`, `convnext`, `densenet`, `mobilenet`, `vit`, `aspp`, `mlp`, `shallow_cnn`, `linear_probe` |
-| `semantic_segmentation.py` | `unet` (default), `resnet_unet`, `fcn8` |
+| `semantic_segmentation.py` | `unet` (default), `resnet_unet`, `fcn8`, `attention_unet` |
 
 `linear_probe` is pooling + `BatchNorm1d(affine=False)` + Linear (the "BN + linear"
 probe). Presets are all equivalent (GAP pooling); pass `--arch mean_std` for
@@ -407,7 +408,7 @@ test_confusion_matrix.png
 
 Trains a segmentation model on pre-extracted grid tile `.npy` files. Label masks are rasterized on the fly from `patches_reference_{city}_split.gpkg` polygons. After training, automatically runs full-ROI inference via `infer_roi.py`.
 
-**Families** (`--family`): `unet` (default) · `resnet_unet` (timm ResNet encoder + U-Net decoder; presets nano/small/base → resnet18/34/50) · `fcn8` (miniature FCN-8s: 2-3 pooling stages, 1×1 score heads fused coarse-to-fine; presets nano (2, 8) → large (3, 64))
+**Families** (`--family`): `unet` (default) · `resnet_unet` (timm ResNet encoder + U-Net decoder; presets nano/small/base → resnet18/34/50) · `fcn8` (miniature FCN-8s: 2-3 pooling stages, 1×1 score heads fused coarse-to-fine; presets nano (2, 8) → large (3, 64)) · `attention_unet` (U-Net with additive attention gates on every skip, Oktay et al. 2018; same preset ladder as `unet` so rows are matched-capacity, gates add ~1.1% params)
 
 **U-Net presets:**
 
@@ -477,7 +478,7 @@ python src/semantic_segmentation.py \
 **Key flags:**
 - `--label-source` — `gpkg` (rasterize polygons on the fly) or `tif` (clip label raster)
 - `--label-tif-dir` — train on dense pseudo-label rasters (see Step 3c); val/test stay on gpkg GT
-- `--family` — model family (`unet`, `resnet_unet` or `fcn8`)
+- `--family` — model family (`unet`, `resnet_unet`, `fcn8` or `attention_unet`)
 - `--preset` — size preset (see table above)
 - `--dequantize` — force dequantization (auto-applied for `alpha_earth_coop`/`seamless`)
 - `--checkpoint` — skip training, load weights and run inference only
