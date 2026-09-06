@@ -305,10 +305,13 @@ Trains a patch classifier on pre-extracted So2Sat patch `.npy` files. After trai
 |---|---|---|---|
 | Per-city | *(default)* | `patches_reference_{city}_split.gpkg` — grid-based `split` column | Training/evaluating on specific cities |
 | Global | `--global-split` | `patches_reference_rxr.gpkg` — original So2Sat `dataset` column | Full 400 k-patch cross-city training |
+| Custom | `--global-split --split-col <col>` | any other column of the global GeoPackage | Leave-one-city-out, region-stratified, k-fold |
 
 **Per-city mode** requires `--cities-dir` and `--cities`. The train/val/test split comes from the grid-based assignment in each city's split GeoPackage (created by `create_city_grids.py`).
 
 **Global mode** (`--global-split`) uses the original So2Sat split encoded in `patches_reference_rxr.gpkg` (`dataset` column: `training` / `validation` / `testing`), giving 352 k / 24 k / 24 k patches across all 51 cities. No city selection is needed; `--cities-dir` and `--cities` are ignored for data loading (they can still be passed to run post-training inference on specific cities).
+
+**Custom splits** (`--split-col`) read the train/val/test assignment from a different column of the same GeoPackage, accepting either `training`/`validation`/`testing` or `train`/`val`/`test`. Author the column however you like — hold out cities, stratify by region, cut k folds — but **leave `dataset` untouched**: it also selects which of the `training/`, `validation/`, `testing/` directories holds each patch's `.npy`, and patch_ids restart at `000000` in each one. Rewriting `dataset` to express a split silently repoints a patch at a different file with the same id. An unrecognised value, or a column that leaves any of train/val/test empty, raises rather than training on a truncated set. The column name is part of the channel-stats cache key, so a custom split cannot inherit the culture-10 normaliser; if you edit the *values* inside a column between runs, pass `--recompute-stats`.
 
 ```bash
 # Per-city — AlphaEarth COOP, London

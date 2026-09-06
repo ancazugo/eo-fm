@@ -4,13 +4,17 @@ Items are :class:`PatchItem` records with labels 0-16 (LCZ_class 1-17 shifted
 by -1) and split ∈ {"train", "val", "test"}.
 
 Two split modes:
-  Per-city: patches_reference_{city}_split.gpkg (grid-based split column).
-  Global:   patches_reference_rxr.gpkg ('dataset' column, all 400k+ patches).
+  Per-city: patches_reference_{city}_split.gpkg ('split' column beside
+            'dataset', which is why custom per-city splits always worked).
+  Global:   patches_reference_rxr.gpkg ('dataset' column, all 400k+ patches),
+            or any other column via ``split_col`` — see build_global_items for
+            why the split and the directory key must not be the same column.
 """
 
 from __future__ import annotations
 
 import warnings
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -136,23 +140,55 @@ def assign_cities(gdf, city_bounds: Path):
     return joined[~joined.index.duplicated(keep="first")]["city"]
 
 
+# Split values accepted from a GPKG column. The long forms are what the So2Sat
+# reference GeoPackages carry; the short forms are accepted so a hand-authored
+# ``split_col`` can use the same vocabulary as PatchDataModule directly.
+_SPLIT_ALIASES = {
+    "training": "train", "validation": "val", "testing": "test",
+    "train": "train", "val": "val", "test": "test",
+}
+
+
 def build_global_items(
     patches_gpkg: Path,
     patch_index: dict[str, dict[str, Path]],
     label_col: str = "LCZ_class",
     city_bounds: Path | None = None,
+    split_col: str | None = None,
 ) -> list[PatchItem]:
     """Build PatchItems from the global So2Sat GPKG.
 
-    Uses the 'dataset' column ('training'/'validation'/'testing') and maps it
-    to the 'train'/'val'/'test' strings expected by PatchDataModule.
+    By default the 'dataset' column ('training'/'validation'/'testing') decides
+    the split, mapped to the 'train'/'val'/'test' strings PatchDataModule wants.
+
+    ``split_col`` reads the split from a DIFFERENT column instead, which is what
+    makes custom splits (leave-one-city-out, region-stratified, k-fold, random)
+    possible without touching 'dataset'. That separation is not cosmetic:
+    'dataset' also names the on-disk directory a patch's npy lives in, and
+    patch_ids are NOT unique across those directories (see build_patch_index) --
+    each of training/validation/testing restarts at 000000. Rewriting 'dataset'
+    to express a custom split therefore either loses the patch or, worse,
+    silently resolves it to a different patch that shares its id. The per-city
+    builder has always kept the two apart (a 'split' column beside 'dataset');
+    this brings the global path in line.
 
     ``city_bounds`` (default: so2sat_guppd_bounds.gpkg beside the patches GPKG)
     supplies the city per patch; without it the items carry city=None and
     Phase 4's per-city normalization cannot run on the global split.
+
+    Raises:
+        ValueError: if ``split_col`` names a column the GPKG does not have, or
+            if it yields an empty train, val or test split -- an unmapped or
+            mistyped column would otherwise train on a silently truncated
+            dataset.
     """
-    _SPLIT_MAP = {"training": "train", "validation": "val", "testing": "test"}
     gdf = gpd.read_file(patches_gpkg)
+
+    if split_col is not None and split_col not in gdf.columns:
+        raise ValueError(
+            f"split_col {split_col!r} is not a column of {patches_gpkg.name}; "
+            f"available columns: {sorted(map(str, gdf.columns))}"
+        )
 
     cities = None
     bounds_path = city_bounds or (patches_gpkg.parent / "so2sat_guppd_bounds.gpkg")
@@ -173,23 +209,46 @@ def build_global_items(
 
     items: list[PatchItem] = []
     n_missing = 0
+    unmapped: Counter[str] = Counter()
     for i, row in gdf.iterrows():
         pid = str(row["patch_id"])
+        # Always keyed on 'dataset': it names the directory, and patch_ids
+        # collide across directories.
         path = patch_index.get(str(row["dataset"]), {}).get(pid)
         if path is None:
             n_missing += 1
             continue
-        split = _SPLIT_MAP.get(str(row["dataset"]))
+        raw_split = str(row[split_col] if split_col else row["dataset"])
+        split = _SPLIT_ALIASES.get(raw_split)
         if split is None:
+            unmapped[raw_split] += 1
             continue
         label = int(row[label_col]) - 1   # 1-17 → 0-16
         city = None if cities is None else cities.get(i)
         items.append(PatchItem(path, label, split,
                                city=None if city is None or city != city else str(city)))
+    counts = Counter(it.split for it in items)
+    source = f"column {split_col!r}" if split_col else "column 'dataset'"
     logger.info(
-        f"Global split: {len(items)} patches matched "
-        f"({n_missing} patch_ids had no npy)"
+        f"Global split from {source}: {len(items)} patches matched "
+        f"({n_missing} patch_ids had no npy) — "
+        f"train={counts['train']} val={counts['val']} test={counts['test']}"
     )
+    if unmapped:
+        logger.warning(
+            f"Global split: {sum(unmapped.values())} patches dropped for "
+            f"unrecognised split values {dict(unmapped)}; expected one of "
+            f"{sorted(_SPLIT_ALIASES)}"
+        )
+    if split_col is not None:
+        empty = [s for s in ("train", "val", "test") if not counts[s]]
+        if empty:
+            raise ValueError(
+                f"split_col {split_col!r} produced no {'/'.join(empty)} "
+                f"patches (train={counts['train']} val={counts['val']} "
+                f"test={counts['test']}). Values seen: "
+                f"{dict(Counter(gdf[split_col].astype(str)))}"
+            )
     return items
 
 
@@ -286,6 +345,7 @@ def build_so2sat_items(
     *,
     global_split: bool,
     global_gpkg: Path | None = None,
+    split_col: str | None = None,
     cities_dir: Path | None = None,
     cities: list[str] | None = None,
     label_col: str = "LCZ_class",
@@ -318,10 +378,20 @@ def build_so2sat_items(
     patches every in-scope family holds — so a cross-family comparison is run on
     one population. The default of None is a no-op.
 
+    ``split_col`` (global mode only) reads the train/val/test assignment from a
+    column other than 'dataset', which is what allows a custom split GPKG. See
+    build_global_items for why the two columns must stay separate.
+
     Raises SystemExit on missing inputs (CLI-friendly).
     """
     if orig_test and global_split:
         logger.error("--orig-test and --global-split are mutually exclusive")
+        raise SystemExit(1)
+    if split_col is not None and not global_split:
+        # The per-city builders already read a dedicated 'split' column; only
+        # the global path conflated split with directory, so only it takes the
+        # override. Failing loudly beats silently ignoring the flag.
+        logger.error("--split-col applies to --global-split mode only")
         raise SystemExit(1)
 
     names = [output_name] if isinstance(output_name, str) else list(output_name)
@@ -357,7 +427,8 @@ def build_so2sat_items(
         if not gpkg.exists():
             logger.error(f"Global GPKG not found: {gpkg}")
             raise SystemExit(1)
-        all_items = build_global_items(gpkg, patch_index, label_col)
+        all_items = build_global_items(gpkg, patch_index, label_col,
+                                       split_col=split_col)
         # --cities in global mode selects cities for post-training inference only
         city_dirs: list[Path] = []
         if cities and cities_dir:

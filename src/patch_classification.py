@@ -12,6 +12,10 @@ Three split modes:
   Global (--global-split): uses patches_reference_rxr.gpkg directly.
     The 'dataset' column (training/validation/testing) defines the split — no
     city selection needed, every patch in the GeoPackage is included.
+    --split-col reads the split from another column of that GeoPackage
+    instead, which is how custom splits (leave-one-city-out, region-
+    stratified, k-fold) are expressed. 'dataset' must keep its original value:
+    it also names the on-disk directory, and patch_ids collide across those.
 
   Hybrid (--orig-test): grid-based train/val from the per-city GeoPackages,
     test set = the original So2Sat testing patches (comparable to the global
@@ -110,6 +114,14 @@ def main() -> None:
                    help="Path to global patches GPKG "
                         "(default: {so2sat_dir}/patches_reference_rxr.gpkg). "
                         "Only used with --global-split.")
+    g.add_argument("--split-col", default=None,
+                   help="Read the train/val/test assignment from this column of "
+                        "the global GPKG instead of 'dataset' (--global-split "
+                        "only). Values may be training/validation/testing or "
+                        "train/val/test. Use this for custom splits (LOCO, "
+                        "region-stratified, k-fold): 'dataset' must keep its "
+                        "original value because it also names the on-disk "
+                        "directory, and patch_ids collide across those dirs.")
     g.add_argument("--orig-test", action="store_true",
                    help="Hybrid split: train/val come from the per-city grid split "
                         "(grid-test-cell patches fold into train) but the test set is "
@@ -266,6 +278,7 @@ def main() -> None:
         args.year,
         global_split=args.global_split,
         global_gpkg=args.global_gpkg,
+        split_col=args.split_col,
         cities_dir=args.cities_dir,
         cities=args.cities,
         label_col=args.label_col,
@@ -346,6 +359,15 @@ def main() -> None:
 
     _split_source = ("grid_orig_test" if args.orig_test
                      else "global_so2sat" if args.global_split else "grid")
+    if args.split_col:
+        # Part of the channel-stats cache key, not just a label. A custom split
+        # changes which patches are in train, so the normalizer must not be
+        # shared with the culture-10 run: stats_cache_path's digest only
+        # fingerprints len(items) and the first 64 paths, which two same-sized
+        # folds can match. Naming the column in the key rules that out. It does
+        # NOT cover editing the values inside one column between runs -- use
+        # --recompute-stats for that.
+        _split_source = f"{_split_source}_{args.split_col}"
     channel_mean = channel_std = None
     if args.normalize == "channel":
         train_items = [it for it in all_items if it.split == "train"]
