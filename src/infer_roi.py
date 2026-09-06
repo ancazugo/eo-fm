@@ -74,10 +74,19 @@ def _is_segmentation(model_type: str) -> bool:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _hanning_2d(h: int, w: int) -> np.ndarray:
-    """2D Hanning taper window of shape (h, w), float32."""
-    win_h = np.hanning(h).astype(np.float32)
-    win_w = np.hanning(w).astype(np.float32)
+def _hanning_2d(h: int, w: int, eps: float = 1e-6) -> np.ndarray:
+    """2D Hanning taper window of shape (h, w), float32.
+
+    Floored at ``eps`` rather than the raw np.hanning, whose first/last sample
+    is exactly 0: _patch_positions guarantees the tile's outer edge is covered
+    by exactly one patch, at that patch's own zero-weight border, so an
+    unfloored window leaves weight_sum == 0 (and the prediction unset) along
+    the full 1px perimeter of every tile. eps is far below the smallest
+    legitimate nonzero Hanning sample even at large patch sizes, so it only
+    ever matters at that single-covering-patch edge case.
+    """
+    win_h = np.maximum(np.hanning(h).astype(np.float32), eps)
+    win_w = np.maximum(np.hanning(w).astype(np.float32), eps)
     return win_h[:, None] * win_w[None, :]
 
 
@@ -376,6 +385,9 @@ def infer_roi(
     patch_physical_res_m: float = 320.0,
     patch_physical_stride_m: float | None = None,
     save_confidence: bool = False,
+    coarsen_to_m: float | None = None,
+    coarsen_method: str = "gaussian",
+    gaussian_sigma: float | None = None,
 ) -> Path:
     """Run model inference over a bbox directly from raw source embedding tiles.
 
@@ -419,6 +431,19 @@ def infer_roi(
         save_confidence: Classification only — also write a float32 sidecar
             ``<output>_conf.tif`` with the soft-voted probability of the
             winning class per pixel (0 = nodata). Ignored for segmentation.
+        coarsen_to_m: If given, also write a second, coarser GeoTIFF+PNG
+            (``<output_stem>_<res>m_<method>.tif``) at this resolution in
+            metres — LCZ is a ~100 m concept, not a 10 m one. Built from the
+            finished native-resolution raster via
+            ``utils.lcz_smoothing.majority_pool`` or
+            ``gaussian_likelihood_filter`` (see ``coarsen_method``); never
+            replaces the native-resolution output.
+        coarsen_method: ``"gaussian"`` (default, matching Demuzere et al.
+            2020's per-class Gaussian-likelihood filter) or ``"majority"``
+            (plain block-mode vote, faster and blockier). Only used when
+            ``coarsen_to_m`` is given.
+        gaussian_sigma: Optional single sigma (metres) overriding the
+            per-class default table for the ``"gaussian"`` method.
 
     Returns:
         Path to the saved GeoTIFF.
@@ -580,6 +605,9 @@ def infer_roi(
 
     logger.info(f"Tiles processed: {n_done} done, {n_skip} skipped")
 
+    from utils.lcz_smoothing import repair_seams
+    raster, conf_raster = repair_seams(raster, conf_raster)
+
     # ── Save GeoTIFF ─────────────────────────────────────────────────────────
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -608,6 +636,53 @@ def infer_roi(
     map_title = title if title is not None else f"LCZ {model_type.upper()} — {city_name}"
     save_lcz_map(raster, map_title, png_path, extent=bbox)
     logger.info(f"Saved PNG: {png_path}")
+
+    # ── Coarsened / smoothed output (optional) ──────────────────────────────
+    if coarsen_to_m is not None:
+        from rasterio.transform import Affine
+
+        from utils.lcz_smoothing import gaussian_likelihood_filter, majority_pool
+
+        if coarsen_to_m < resolved_res:
+            raise ValueError(
+                f"coarsen_to_m ({coarsen_to_m}) must be >= the native output "
+                f"resolution ({resolved_res:.4g}) — this coarsens, it does "
+                "not upsample."
+            )
+        factor = max(1, round(coarsen_to_m / resolved_res))
+
+        if coarsen_method == "majority":
+            coarse_raster = majority_pool(raster, factor, num_classes=num_classes)
+        elif coarsen_method == "gaussian":
+            kwargs = {"sigma_by_class": gaussian_sigma} if gaussian_sigma is not None else {}
+            coarse_raster = gaussian_likelihood_filter(
+                raster, native_res_m=resolved_res, out_res_m=coarsen_to_m,
+                num_classes=num_classes, **kwargs,
+            )
+        else:
+            raise ValueError(f"Unknown coarsen_method: {coarsen_method!r}")
+
+        actual_res_m = resolved_res * factor
+        coarse_transform = Affine(
+            actual_res_m, 0.0, out_transform.c, 0.0, -actual_res_m, out_transform.f
+        )
+        coarse_H, coarse_W = coarse_raster.shape
+        suffix = f"_{int(round(coarsen_to_m))}m_{coarsen_method}"
+        coarse_path = output_path.with_name(output_path.stem + suffix + ".tif")
+        with rasterio.open(
+            str(coarse_path), "w", driver="GTiff",
+            height=coarse_H, width=coarse_W, count=1, dtype="uint8",
+            crs=resolved_crs, transform=coarse_transform, nodata=0,
+        ) as dst:
+            dst.write(coarse_raster, 1)
+        logger.info(f"Saved coarsened GeoTIFF ({coarsen_method}, {actual_res_m:.4g}m): {coarse_path}")
+
+        coarse_png_path = coarse_path.with_suffix(".png")
+        save_lcz_map(
+            coarse_raster, f"{map_title} @ {int(round(coarsen_to_m))}m ({coarsen_method})",
+            coarse_png_path, extent=bbox,
+        )
+        logger.info(f"Saved coarsened PNG: {coarse_png_path}")
 
     return output_path
 
@@ -705,6 +780,18 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--accelerator", default="auto",
                    choices=["auto", "gpu", "cpu"],
                    help="Device: auto, gpu, or cpu (default: auto).")
+    p.add_argument("--coarsen-to", type=float, default=None,
+                   help="Also write a second, coarser GeoTIFF+PNG at this "
+                        "resolution in metres (e.g. 100/200/300) — LCZ is a "
+                        "~100 m concept, not a 10 m one. Built from the finished "
+                        "native-resolution map; never replaces it.")
+    p.add_argument("--coarsen-method", choices=["gaussian", "majority"], default="gaussian",
+                   help="'gaussian' (default): per-class Gaussian-likelihood filter "
+                        "(Demuzere et al. 2020). 'majority': plain block-mode vote, "
+                        "faster and blockier. Only used with --coarsen-to.")
+    p.add_argument("--gaussian-sigma", type=float, default=None,
+                   help="Single sigma in metres overriding the per-class default "
+                        "table for --coarsen-method gaussian.")
     return p.parse_args()
 
 
@@ -892,6 +979,9 @@ def main() -> None:
         patch_physical_res_m=args.patch_physical_res,
         patch_physical_stride_m=args.patch_physical_stride,
         save_confidence=args.save_confidence,
+        coarsen_to_m=args.coarsen_to,
+        coarsen_method=args.coarsen_method,
+        gaussian_sigma=args.gaussian_sigma,
     )
 
 
