@@ -48,6 +48,7 @@ from pathlib import Path
 import torch
 import wandb
 from loguru import logger
+from torch.utils.data import DataLoader
 
 # ── src/ must be on sys.path (run from repo root) ────────────────────────────
 
@@ -55,13 +56,18 @@ _src = Path(__file__).parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from datasets.grid_tiles import GridSegDataModule, build_city_tile_items, rasterize_polys  # noqa: F401
+from datasets.grid_tiles import (  # noqa: F401
+    GridSegDataModule,
+    GridSegDataset,
+    build_city_tile_items,
+    rasterize_polys,
+)
 from datasets.channel_stats import (
     compute_grid_channel_stats,
     grid_stats_cache_path,
 )
 from datasets.registry import get_nodata_predicate
-from utils.city_split import assign_city_roles
+from utils.city_split import SO2SAT_CULTURE_CITIES, assign_city_roles
 from datasets.registry import available_embeddings, provenance
 from models import build_model, resolve_arch
 from training import (
@@ -238,14 +244,31 @@ def main() -> None:
                         "always come from the ground-truth gpkg.")
     g.add_argument("--label-col", default="LCZ_class",
                    help="Column name in the GeoPackage for LCZ class (default: LCZ_class).")
-    g.add_argument("--split-mode", choices=["grid", "global"], default="grid",
+    g.add_argument("--split-mode", choices=["grid", "global", "orig_test"], default="grid",
                    help="'grid' (default): the within-city macro-block split. Section 7 "
                         "of the campaign report quarantines those numbers as "
                         "autocorrelation-inflated, so they cannot carry a headline. "
                         "'global': split by CITY, inheriting the So2Sat culture-10 "
                         "assignment, so results are comparable to the patch ladder. "
                         "Enforces tile-split purity, the proximity buffer and the "
-                        "minimum labelled fraction. Requires --label-source gpkg.")
+                        "minimum labelled fraction. Requires --label-source gpkg. "
+                        "'orig_test': segmentation analogue of patch_classification.py "
+                        "--orig-test — grid-train ∪ grid-test -> train, grid-val -> val, "
+                        "every city (no culture-10 distinction). Produces NO test tiles "
+                        "by construction (test is folded into train) — pair with "
+                        "--full-patch-eval for the comparable test number, or this mode "
+                        "reports no test metric at all.")
+    g.add_argument("--full-patch-eval", action="store_true",
+                   help="After the normal test evaluation, run an additional "
+                        "purity-free patch-level pass over every tile in the 10 "
+                        "So2Sat culture cities (the only ones carrying non-training "
+                        "patches), scored only against dataset=='testing' patches. "
+                        "This is the number directly comparable to the patch-"
+                        "classification ladder under EITHER --global-split or "
+                        "--orig-test — 100%% coverage by construction, unlike the "
+                        "purity-restricted *_patch metrics under --split-mode global. "
+                        "Required to get any test number at all under --split-mode "
+                        "orig_test. Reported as *_patch_exact.")
     g.add_argument("--val-inner-cities", type=int, default=6,
                    help="With --split-mode global: how many training-pool cities to "
                         "hold out for early stopping, chosen continent-stratified and "
@@ -385,6 +408,11 @@ def main() -> None:
             n_val_inner=args.val_inner_cities,
             seed=args.seed,
             city_weights=weights,
+        )
+    elif args.split_mode == "orig_test" and not args.full_patch_eval:
+        logger.warning(
+            "--split-mode orig_test folds test tiles into train, so this run "
+            "will produce NO test metric at all without --full-patch-eval."
         )
 
     # ── Build item lists ──────────────────────────────────────────────────────
@@ -652,6 +680,63 @@ def main() -> None:
             uid_to_label=uid_to_label, uid_to_key=uid_to_key, tta=args.tta,
             metric_suffix="_culture_val", dataset_filter="validation",
         )
+
+    # A purity-free patch-level pass over every tile in the culture-10 cities,
+    # scored only against dataset=="testing" patches. Unlike the *_patch metric
+    # above (whose loader was already filtered by --split-mode global's tile
+    # purity/buffer rules, or is empty entirely under --split-mode orig_test),
+    # this covers 100% of the test population by construction -- the same
+    # patches patch_classification.py scores under EITHER --global-split or
+    # --orig-test (both draw their test set from the same 10 cities).
+    if args.full_patch_eval:
+        culture_dirs = [d for d in city_dirs if d.name in SO2SAT_CULTURE_CITIES]
+        if not culture_dirs:
+            logger.warning(
+                "--full-patch-eval: none of the requested --cities are "
+                "So2Sat culture cities (the only ones with dataset=='testing' "
+                "patches) — skipping."
+            )
+        else:
+            logger.info(
+                f"Full patch-level eval over {len(culture_dirs)} culture "
+                "cities (tile purity/buffer NOT enforced) …"
+            )
+            full_items: list = []
+            for city_dir in culture_dirs:
+                items, _ = build_city_tile_items(
+                    city_dir, args.output_name[0], args.year,
+                    "gpkg", args.label_col,
+                    split_mode="eval_only", uid_registry=uid_registry,
+                )
+                full_items.extend(items)
+            if fused:
+                full_items, _ = _fuse_items(full_items, args.output_name, args.year)
+            if not full_items:
+                logger.warning("--full-patch-eval: no tiles found — skipping.")
+            else:
+                full_ds = GridSegDataset(
+                    full_items, "gpkg", dequantize_fn,
+                    erode_px=args.erode_px, emit_patch_uids=True,
+                    normalize=args.normalize, channel_mean=channel_mean,
+                    channel_std=channel_std,
+                    nodata_predicate=get_nodata_predicate(args.embedding_name),
+                )
+                full_loader = DataLoader(
+                    full_ds, batch_size=args.batch_size, shuffle=False,
+                    num_workers=args.num_workers, collate_fn=GridSegDataModule._collate,
+                )
+                uid_to_label_full, uid_to_key_full = _uid_tables(
+                    uid_registry, full_items, None
+                )
+                exact_results = evaluate_segmentation_as_patches(
+                    task, full_loader, device, args.num_classes,
+                    run_dir, _run_label, use_wandb=not args.no_wandb,
+                    uid_to_label=uid_to_label_full, uid_to_key=uid_to_key_full,
+                    tta=args.tta, metric_suffix="_patch_exact",
+                    dataset_filter="testing", restrict_to_dataset=True,
+                )
+                if exact_results:
+                    results.update(exact_results)
 
     results["split_mode"] = args.split_mode
     if city_roles:

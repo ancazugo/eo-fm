@@ -144,3 +144,97 @@ def test_a_bracketed_city_name_is_not_read_as_a_glob_pattern(tmp_path):
         cdir, "AlphaEarthCoop", "2017", "gpkg", "LCZ_class")
     assert len(items) == 3, "bracketed city silently dropped"
     assert len(split_map) == 3
+
+
+# ── eval_only / orig_test split modes ──────────────────────────────────────────
+
+def test_eval_only_keeps_a_tile_that_global_mode_drops_for_mixed_split(tmp_path):
+    """A tile whose patches carry both dataset=='validation' and
+    dataset=='testing' is dropped outright under --split-mode global (tile
+    purity — see tests/test_city_split.py), because a 1.28 km tile is a single
+    training example. A forward-only pass has no leakage to protect against,
+    so --split-mode eval_only must keep it, uneroded, with both patches
+    burned into the UID raster."""
+    import geopandas as gpd
+    from shapely.geometry import box as _box
+
+    from datasets.grid_tiles import build_city_tile_items
+
+    city = "Nairobi"
+    cdir = tmp_path / city
+    (cdir / "AlphaEarthCoop" / "2017" / "test").mkdir(parents=True)
+    np.save(cdir / "AlphaEarthCoop" / "2017" / "test" / f"{city}_00.npy",
+            np.zeros((4, 8, 8), dtype=np.float32))
+
+    cells = gpd.GeoDataFrame(
+        {"grid_id": [0], "is_valid": [True]},
+        geometry=[_box(0, 0, 1280, 1280)], crs="EPSG:32737",
+    )
+    cells.to_file(cdir / f"{city}_grid.gpkg", driver="GPKG")
+
+    patches = gpd.GeoDataFrame(
+        {"patch_id": ["000001", "000002"],
+         "dataset": ["validation", "testing"],
+         "LCZ_class": [3, 9], "grid_id": [0, 0]},
+        geometry=[_box(100, 100, 420, 420), _box(600, 600, 920, 920)],
+        crs="EPSG:32737",
+    )
+    patches.to_file(cdir / f"patches_reference_{city}_split.gpkg", driver="GPKG")
+
+    global_items, _ = build_city_tile_items(
+        cdir, "AlphaEarthCoop", "2017", "gpkg", "LCZ_class",
+        split_mode="global", city_role="culture", uid_registry={},
+    )
+    assert global_items == []
+
+    eval_items, eval_split_map = build_city_tile_items(
+        cdir, "AlphaEarthCoop", "2017", "gpkg", "LCZ_class",
+        split_mode="eval_only", uid_registry={},
+    )
+    assert len(eval_items) == 1
+    assert set(eval_split_map.values()) == {"eval"}
+    assert len(eval_items[0][3]) == 2   # both patches burned into the tile
+
+
+def test_orig_test_folds_grid_test_into_train(tmp_path):
+    """Segmentation analogue of patch_classification.py --orig-test: a tile
+    physically stored under the grid-split's test/ directory resolves to
+    train (folded in, so the original testing patches stay available for
+    training), val/ stays val, train/ stays train."""
+    import geopandas as gpd
+    from shapely.geometry import box as _box
+
+    from datasets.grid_tiles import build_city_tile_items
+
+    city = "Munich"
+    cdir = tmp_path / city
+    emb = cdir / "AlphaEarthCoop" / "2017"
+    for i, sub in enumerate(("train", "val", "test")):
+        (emb / sub).mkdir(parents=True)
+        np.save(emb / sub / f"{city}_{i:02d}.npy",
+                np.zeros((4, 8, 8), dtype=np.float32))
+
+    cells = gpd.GeoDataFrame(
+        {"grid_id": [0, 1, 2], "is_valid": [True] * 3},
+        geometry=[_box(i * 1280, 0, (i + 1) * 1280, 1280) for i in range(3)],
+        crs="EPSG:32632",
+    )
+    cells.to_file(cdir / f"{city}_grid.gpkg", driver="GPKG")
+
+    patches = gpd.GeoDataFrame(
+        {"patch_id": ["000001", "000002", "000003"],
+         "dataset": ["training", "training", "training"],
+         "LCZ_class": [3, 3, 3], "grid_id": [0, 1, 2]},
+        geometry=[_box(i * 1280 + 100, 100, i * 1280 + 420, 420) for i in range(3)],
+        crs="EPSG:32632",
+    )
+    patches.to_file(cdir / f"patches_reference_{city}_split.gpkg", driver="GPKG")
+
+    _, split_map = build_city_tile_items(
+        cdir, "AlphaEarthCoop", "2017", "gpkg", "LCZ_class",
+        split_mode="orig_test", uid_registry={},
+    )
+    resolved = {p.name: s for p, s in split_map.items()}
+    assert resolved[f"{city}_00.npy"] == "train"
+    assert resolved[f"{city}_01.npy"] == "val"
+    assert resolved[f"{city}_02.npy"] == "train"   # folded from grid-test

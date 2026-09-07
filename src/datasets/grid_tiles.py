@@ -29,6 +29,12 @@ from training.augment import augment_batch
 
 _FILENAME_RE = re.compile(r"^(.+)_(\d+)\.npy$")   # {city}_{grid_id}.npy
 
+# So2Sat's original split -> our loader split, folding grid-test into train.
+# Mirrors ``datasets.so2sat._GRID_FOLD`` (patch classification's ``--orig-test``);
+# duplicated rather than imported because the two pipelines' split code has no
+# shared module and this is a 3-entry dict.
+_GRID_FOLD = {"train": "train", "test": "train", "val": "val"}
+
 
 # ── Label helpers ─────────────────────────────────────────────────────────────
 
@@ -155,14 +161,31 @@ def build_city_tile_items(
         patches_reference_{city}.tif (dense pseudo-label distillation).
 
     split_mode:
-        "grid"   — the within-city macro-block split carried by the ``split``
-                   column. Quarantined for headline numbers (campaign §7), kept
-                   for per-city demos.
-        "global" — the So2Sat culture-10 assignment carried by the ``dataset``
-                   column, resolved to one split per *tile* by
-                   :mod:`utils.city_split`, which also enforces tile purity, the
-                   proximity buffer and the minimum labelled fraction.
-                   ``city_role`` is then required.
+        "grid"      — the within-city macro-block split carried by the ``split``
+                      column. Quarantined for headline numbers (campaign §7),
+                      kept for per-city demos.
+        "global"    — the So2Sat culture-10 assignment carried by the
+                      ``dataset`` column, resolved to one split per *tile* by
+                      :mod:`utils.city_split`, which also enforces tile
+                      purity, the proximity buffer and the minimum labelled
+                      fraction. ``city_role`` is then required.
+        "orig_test" — segmentation analogue of ``patch_classification.py
+                      --orig-test``: same ``split`` column as "grid", but
+                      folded (grid-test -> train) so train = grid-train ∪
+                      grid-test, val = grid-val. No culture-10/city-role
+                      distinction — every city trains. Produces no test
+                      tiles by construction; pair with a "eval_only" pass
+                      (below) filtered to ``dataset=="testing"`` for the
+                      comparable test number.
+        "eval_only" — every ``is_valid`` tile, one flat pseudo-split
+                      ("eval"), ignoring tile purity/buffer/min-labelled-frac
+                      entirely. Not a training split — a forward-only pass
+                      has no leakage to protect against — so this is how a
+                      dense model gets scored against the *exact* patch
+                      population (of any ``dataset`` value) a classification
+                      run used, instead of the subset that survives
+                      "global"'s purity filtering. Requires
+                      ``label_source="gpkg"``.
 
     uid_registry: shared ``{(city, dataset, patch_id): uid}`` map. Pass the same
         dict for every city so patch UIDs are unique across the run — bare
@@ -252,6 +275,12 @@ def build_city_tile_items(
             f"  {city} [{city_role}]: {len(gid2split)} tiles kept"
             + (f" — dropped {dropped}" if dropped else "")
         )
+    elif split_mode == "eval_only" and label_source != "gpkg":
+        raise ValueError(
+            "--split-mode eval_only needs the polygon labels: patch-UID "
+            "aggregation reads the split GeoPackage's `dataset`/`patch_id` "
+            "columns, and a label raster does not carry them."
+        )
 
     items = []
     split_map = {}
@@ -275,10 +304,14 @@ def build_city_tile_items(
             geom = id2geom.get(grid_id)
             if geom is None:
                 continue
-            if gid2split is not None:
+            if split_mode == "eval_only":
+                resolved = "eval"
+            elif gid2split is not None:
                 resolved = gid2split.get(grid_id)
                 if resolved is None:
                     continue
+            elif split_mode == "orig_test":
+                resolved = _GRID_FOLD.get(split, split)
             else:
                 resolved = split
             polys = id2polys.get(grid_id, []) if label_source == "gpkg" else []

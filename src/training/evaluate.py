@@ -394,6 +394,7 @@ def evaluate_segmentation_as_patches(
     metric_suffix: str = "_patch",
     save_probs: bool = True,
     dataset_filter: str = "testing",
+    restrict_to_dataset: bool = False,
 ) -> dict[str, float] | None:
     """Score a dense segmentation model at So2Sat **patch** level.
 
@@ -418,7 +419,23 @@ def evaluate_segmentation_as_patches(
     the proximity buffer are dropped whole, and their patches go with them. The
     fraction is logged and stored as ``test_coverage*``. For an exact
     comparison against the 0.6497 / 0.6871 / 0.7055 ladder, intersect on
-    ``patch_id`` and re-score both sides on the intersection.
+    ``patch_id`` and re-score both sides on the intersection -- or, instead of
+    doing that by hand, feed this a ``--split-mode eval_only`` loader (every
+    tile, purity/buffer un-enforced) with ``restrict_to_dataset=True``, which
+    does exactly that automatically and hits 100% coverage by construction
+    (``src/semantic_segmentation.py --full-patch-eval``).
+
+    ``restrict_to_dataset``: filter the scored UIDs down to
+    ``uid_to_key[uid][1] == dataset_filter`` before computing any metric.
+    Required (not optional) when the loader can mix patches of more than one
+    ``dataset`` value inside a single tile -- true for an ``eval_only`` loader,
+    false for every purity-enforced loader ("global"'s own test/culture_val
+    passes), where it would be a no-op. Defaults to ``False`` because it is
+    actively wrong for ``--split-mode grid``: a "grid" test tile can
+    legitimately hold ``dataset=="training"`` patches (grid mode has no
+    culture-10 concept), and filtering those out under the default
+    ``dataset_filter="testing"`` would silently gut that mode's existing
+    metric.
     """
     import wandb
 
@@ -476,6 +493,11 @@ def evaluate_segmentation_as_patches(
         return None
 
     uids = sorted(u for u in prob_sum if u in uid_to_label)
+    if restrict_to_dataset:
+        if uid_to_key is None:
+            raise ValueError("restrict_to_dataset=True requires uid_to_key")
+        uids = [u for u in uids
+                if uid_to_key.get(u, (None, None))[1] == dataset_filter]
     if not uids:
         logger.warning("No evaluated patch UID carries a label.")
         return None
