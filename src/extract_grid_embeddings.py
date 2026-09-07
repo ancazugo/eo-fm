@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import geopandas as gpd
@@ -268,11 +268,22 @@ def main() -> None:
 
     n_saved = n_skipped = n_no_coverage = 0
 
+    # Group tasks by embedding tile and hand out contiguous chunks.  Per-task
+    # submit() lets every worker march through the same list in lockstep, so
+    # each of them loads (and dequantizes) each ~430 MB tessera tile; with a
+    # tile-ordered list and chunksize, one worker owns a run of same-tile grid
+    # cells and the tile is read once for all of them.  Same trap as
+    # extract_so2sat_embeddings.py -- see its module docstring for the
+    # accompanying MALLOC_MMAP_THRESHOLD_ requirement.
+    all_tasks.sort(key=lambda t: (str(t[4][0]), t[0], t[1]))
+
     if args.workers > 1:
         with ProcessPoolExecutor(max_workers=args.workers) as pool:
-            futures = {pool.submit(_process_tile, t): t[:2] for t in all_tasks}
-            for fut in tqdm(as_completed(futures), total=len(futures), unit="tile"):
-                label, ok = fut.result()
+            for _, ok in tqdm(
+                pool.map(_process_tile, all_tasks, chunksize=32),
+                total=len(all_tasks),
+                unit="tile",
+            ):
                 if ok:
                     n_saved += 1
                 else:

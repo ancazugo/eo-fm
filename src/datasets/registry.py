@@ -145,10 +145,19 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         "product": "tessera",
         "version": "v2",
         "source": "global_0.1deg",
-        # Deferred, not cancelled: extraction is still in progress (37% So2Sat
-        # coverage so far). The version comparison moved out of Phase 2 into
-        # PLAN-v3's deferred section and runs once extraction completes.
-        "status": "pending",
+        # Promoted from "pending" 2026-09-07: the condition that gated it --
+        # "extraction is still in progress (37% So2Sat coverage)" -- is resolved.
+        # After the 2026-09-06 tile top-up the 2017 extraction holds 397,415
+        # patches (349,114/24,114/24,187), i.e. 99.2% of So2Sat and slightly
+        # AHEAD of tesserav1.1_global's 390,680. Caveat for cross-embedding work:
+        # v2 is missing 2,679 of patch_manifest_v1's 389,484 patches (0.69%), so
+        # a manifest-filtered v2 row is not on a byte-identical population to a
+        # coop or v1.1 row -- rebuild the manifest with a v2 column if that
+        # matters for a given comparison.
+        # "supported", not "canonical": Phase 2 still makes every cross-family
+        # claim against exactly one Tessera entry (tesserav1.1_global), so v2 is
+        # offered by the CLIs without becoming a second canonical baseline.
+        "status": "supported",
     },
     "osm_evidence": {
         "in_channels": 15,

@@ -39,7 +39,7 @@ TESSERA_GLOBAL = "tesserav1.1_global"
 # PLAN-v3's scope restriction, as data: the only three families any experiment
 # from Phase 2 onward may use.
 IN_SCOPE = {TESSERA_GLOBAL, "alpha_earth_coop", "seamless"}
-OUT_OF_SCOPE = {"tessera", "alpha_earth", TESSERA_V11, "tesserav2"}
+OUT_OF_SCOPE = {"tessera", "alpha_earth", TESSERA_V11}
 
 
 # ── Schema ───────────────────────────────────────────────────────────────────
@@ -114,15 +114,18 @@ def test_comparability_ignores_status():
 
 # ── Task 1.75.0: the PLAN-v3 scope restriction ───────────────────────────────
 
-def test_the_four_out_of_scope_families_are_marked_unavailable():
+def test_the_out_of_scope_families_are_marked_unavailable():
     for name in OUT_OF_SCOPE:
         assert EMBEDDING_REGISTRY[name]["status"] in UNAVAILABLE_STATUSES, name
 
 
-def test_tesserav2_is_pending_not_deprecated():
-    """Deferred, not cancelled — extraction is still running and the version
-    comparison runs once it completes."""
-    assert EMBEDDING_REGISTRY["tesserav2"]["status"] == "pending"
+def test_tesserav2_is_supported_but_not_canonical():
+    """Was "pending" while extraction ran. The 2017 So2Sat extraction completed
+    2026-09-07 (397,415 patches, 99.2%), so the CLIs offer v2 — but the single
+    canonical Tessera entry stays tesserav1.1_global, which is what every
+    Phase 2 cross-family claim is measured against."""
+    assert EMBEDDING_REGISTRY["tesserav2"]["status"] == "supported"
+    assert EMBEDDING_REGISTRY["tesserav2"]["status"] not in UNAVAILABLE_STATUSES
 
 
 def test_available_embeddings_offers_the_three_in_scope_families():
