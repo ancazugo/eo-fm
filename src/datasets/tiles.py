@@ -434,7 +434,7 @@ def _open_tile_tessera11(path: Path) -> xr.DataArray:
     return da.rio.write_crs(crs)
 
 
-@functools.lru_cache(maxsize=2)
+@functools.lru_cache(maxsize=4)
 def _open_tile_tessera_npy_dir(npy_dir: Path) -> xr.DataArray:
     """Open a tessera global tile (v1.1 or v2) from its NPY subdirectory.
 

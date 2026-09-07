@@ -250,6 +250,12 @@ def main() -> None:
 
     # ── Inference ─────────────────────────────────────────────────────────────
     g = add_inference_args(parser)
+    g.add_argument("--no-inference", action="store_true",
+                   help="Skip the post-training full-ROI city rasters. Training "
+                        "and test evaluation still run — this only drops the map "
+                        "generation. In per-city mode --cities selects the "
+                        "TRAINING cities, so without this flag it is impossible "
+                        "to train on all 51 cities and not also rasterise all 51.")
     g.add_argument("--embedding-name", required=True, nargs="+",
                    choices=available_embeddings(),
                    help="Embedding registry key(s), one per --output-name. "
@@ -565,6 +571,10 @@ def main() -> None:
         logger.warning("Fused-embedding run: full-ROI inference from raw tiles "
                        "is not supported yet — skipping.")
         logger.info(f"Run complete. Outputs in {run_dir}")
+        return
+
+    if args.no_inference:
+        logger.info(f"--no-inference: skipping city rasters. Outputs in {run_dir}")
         return
 
     logger.info("Running full-ROI inference …")

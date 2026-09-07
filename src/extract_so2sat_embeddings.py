@@ -10,6 +10,13 @@ wgs84_* bounds) before mosaicking — same as infer_roi — so patches at UTM-zo
 boundaries never contain an adjacent tile's contaminated overhang pixels.
 (Coop patches extracted before 2026-07-16 predate this clip.)
 
+Memory: each tessera tile dequantizes to a ~430 MB float32 array, and
+repeatedly allocating/freeing those makes glibc raise its mmap threshold, after
+which the arrays come from the heap and are never returned -- worker RSS grew
+from ~3 GB to ~40 GB over an hour (8 workers = 320 GB). Run with
+``MALLOC_MMAP_THRESHOLD_=131072 MALLOC_TRIM_THRESHOLD_=131072`` to pin the
+threshold so every tile is mmap-backed and freed straight back to the OS.
+
 Output layout:
     {so2sat_dir}/{split}/{output_name}/{year}/patch_{patch_id}.npy
 
@@ -27,7 +34,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import geopandas as gpd
@@ -193,6 +200,8 @@ def main() -> None:
         # Sort patches by centroid so tiles in the OS page cache are shared
         # across workers processing adjacent patches (critical for tesserav1.1
         # where each tile is ~110 MB and loaded fresh from npy each call).
+        # This is only a pre-sort: tasks are re-sorted by tile below, which is
+        # what actually makes the per-tile LRU hit.
         if args.embedding_name in (
             "tesserav1.1", "tesserav1.1_global", "tesserav2", "aux_struct"
         ):
@@ -229,15 +238,33 @@ def main() -> None:
                     {p: valid_bbox_map[p] for p in matched_paths if p in valid_bbox_map} or None,
                 ))
 
+            # Group tasks by tile.  The centroid sort above orders by latitude
+            # band, so cities at similar latitudes interleave (New York and
+            # Beijing land in the same band) and consecutive tasks keep
+            # evicting each other from the opener's small LRU — every patch
+            # then re-reads and re-dequantizes a ~600 MB tile.  Harmless while
+            # one city was covered; catastrophic once all 51 are.
+            tasks.sort(key=lambda t: (str(t[3][0]), t[0]))
+
+            # Hand out contiguous chunks rather than one task at a time.
+            # submit() lets all workers march through the same tile-ordered
+            # list in lockstep, so every worker loads (and dequantizes) every
+            # tile — 8x the ~600 MB reads.  With chunksize, one worker owns a
+            # run of same-tile patches and the tile is read once for all of
+            # them.
+            # NOTE: worker RSS climbs from ~3 GB to ~40 GB over an hour unless
+            # glibc is told to keep using mmap for the ~430 MB tile arrays --
+            # see the MALLOC_MMAP_THRESHOLD_ note in the module docstring.
+            # max_tasks_per_child would also cap it but is incompatible with
+            # the fork start method (it silently switches to spawn, which
+            # deadlocks here).
             with ProcessPoolExecutor(max_workers=args.workers) as pool:
-                futures = {pool.submit(_process_patch, t): t[0] for t in tasks}
-                for fut in tqdm(
-                    as_completed(futures),
-                    total=len(futures),
+                for _, ok in tqdm(
+                    pool.map(_process_patch, tasks, chunksize=256),
+                    total=len(tasks),
                     desc=split,
                     unit="patch",
                 ):
-                    _, ok = fut.result()
                     if ok:
                         n_saved += 1
                     else:
