@@ -51,3 +51,21 @@ already_complete () {
   [[ -f $log ]] && grep -qE \
     "Run complete\. Outputs in|--no-inference: skipping city rasters\. Outputs in" "$log"
 }
+
+# Free space required on the OUTPUT filesystem before a run may start.
+#
+# On 2026-09-09 /maps hit 126T/126T with zero bytes free. The chains failed in
+# the worst possible way: `python ... > "$log"` TRUNCATES the log before the
+# write is attempted, and truncation needs no free blocks -- so two in-flight
+# runs' full epoch histories were destroyed and replaced with 0-byte files,
+# while the chain raced through every remaining row logging "finished (exit 0)".
+# Checking first means a full disk stops the chain loudly instead of quietly
+# eating the evidence.
+DISK_NEED_MIB=${DISK_NEED_MIB:-2048}
+
+have_disk () {
+  local dir=$1 avail
+  avail=$(df -Pm "$dir" 2>/dev/null | awk 'NR==2 {print $4}')
+  [[ -z "$avail" ]] && return 0        # unreadable df: do not block on it
+  (( avail >= DISK_NEED_MIB ))
+}

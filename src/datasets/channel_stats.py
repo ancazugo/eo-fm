@@ -28,13 +28,21 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import os
+
 import numpy as np
 from loguru import logger
 
 from datasets.registry import provenance
 from utils.constants import DATA_DIR
 
-STATS_CACHE_DIR = DATA_DIR / "cache" / "channel_stats"
+# Overridable so the cache can live off DATA_DIR. DATA_DIR also holds the
+# read-only input patches, so when that filesystem fills up (as /maps did on
+# 2026-09-09, 126T/126T with 0 bytes free) the inputs stay readable but a cache
+# MISS would try to write there and take the run down with it.
+STATS_CACHE_DIR = Path(
+    os.environ.get("EO_FM_STATS_CACHE_DIR", DATA_DIR / "cache" / "channel_stats")
+)
 
 
 def _cache_key(items: list, n_sample: int, seed: int, patch_size: int,
