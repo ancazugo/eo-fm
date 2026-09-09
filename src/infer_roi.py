@@ -91,93 +91,14 @@ def _hanning_2d(h: int, w: int, eps: float = 1e-6) -> np.ndarray:
     return win_h[:, None] * win_w[None, :]
 
 
-def _open_and_clip(
-    path: Path,
-    roi_4326: tuple[float, float, float, float],
-    margin_m: float = 0.0,
-    dequantize_fn=None,
-    normalize: tuple | None = None,
-    valid_bbox_4326: tuple[float, float, float, float] | None = None,
-) -> tuple[np.ndarray, str, Any] | None:
-    """Open a source tile, clip to roi_4326 + margin, return (arr, crs, transform).
-
-    arr is float32 (C, H, W), north-up.  transform is rasterio Affine.
-    Returns None if no valid data remains after clipping.
-
-    valid_bbox_4326: if given, the clip region is intersected with this box
-        before any margin is applied.  Use for coop tiles whose actual pixel
-        extent overshoots the reported UTM-zone boundary: the index clips
-        reported bounds to the zone edge (E=0° for UTM30, W=0° for UTM31),
-        and intersecting here discards the contaminated overhang so that
-        UTM31 tile predictions never overwrite UTM30 clean predictions west
-        of lon=0° (and vice-versa).
-    """
-    from pyproj import Transformer
-    from shapely.geometry import box
-    from shapely.ops import transform as shapely_transform
-
-    try:
-        da = open_tile(path)
-    except Exception as e:
-        logger.warning(f"Failed to open tile {path.name}: {e} — skipping")
-        return None
-    if da.rio.crs is None:
-        return None
-
-    tile_crs_str = da.rio.crs.to_string()
-
-    t = Transformer.from_crs("EPSG:4326", tile_crs_str, always_xy=True)
-
-    # Restrict clip region to tile's reported valid extent (removes contaminated overhang).
-    clip_geom_4326 = box(*roi_4326)
-    if valid_bbox_4326 is not None:
-        clip_geom_4326 = clip_geom_4326.intersection(box(*valid_bbox_4326))
-        if clip_geom_4326.is_empty:
-            return None
-
-    roi_in_tile = shapely_transform(t.transform, clip_geom_4326)
-    minx, miny, maxx, maxy = roi_in_tile.bounds
-
-    if margin_m > 0.0:
-        if da.rio.crs.is_geographic:
-            m = margin_m / 111320.0
-        else:
-            m = margin_m
-        minx -= m; miny -= m; maxx += m; maxy += m
-
-    try:
-        clipped = da.rio.clip_box(minx, miny, maxx, maxy)
-    except Exception:
-        return None
-
-    if clipped.size == 0 or clipped.sizes.get("x", 0) < 1 or clipped.sizes.get("y", 0) < 1:
-        return None
-
-    # North-up
-    if clipped.sizes.get("y", 0) > 1 and float(clipped.y.values[0]) < float(clipped.y.values[-1]):
-        clipped = clipped.isel(y=slice(None, None, -1))
-
-    arr = clipped.values.astype(np.float32)
-    if dequantize_fn is not None:
-        arr = dequantize_fn(arr)
-    if normalize is not None:
-        mean, std = normalize
-        arr = (arr - mean[:, None, None]) / (std[:, None, None] + 1e-6)
-
-    # Compute Affine manually from coordinate arrays.
-    # clipped.rio.transform() uses step = y[1]-y[0] and returns e = -step,
-    # but after isel(y=::-1) the step is negative → e=+10 (south-up), wrong.
-    from rasterio.transform import Affine
-    x_vals = clipped.x.values
-    y_vals = clipped.y.values  # descending (north-up) after the flip above
-    res_x = float(x_vals[1] - x_vals[0]) if len(x_vals) > 1 else float(abs(clipped.rio.resolution()[0]))
-    res_y = float(y_vals[1] - y_vals[0]) if len(y_vals) > 1 else -float(abs(clipped.rio.resolution()[1]))
-    # Top-left corner = centre of top-left pixel ± half pixel
-    transform = Affine(
-        res_x, 0.0, float(x_vals[0]) - res_x / 2,
-        0.0, res_y, float(y_vals[0]) - res_y / 2,
-    )
-    return arr, tile_crs_str, transform
+# These geometry helpers moved to datasets.tiles so that torch-free tools
+# (src/embedding_rgb.py) can use them without importing this module, which
+# pulls in torch. Re-exported here for existing callers.
+from datasets.tiles import (  # noqa: E402
+    open_and_clip as _open_and_clip,
+    setup_output as _setup_output,
+    meters_to_out_res as _meters_to_out_res,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -319,45 +240,6 @@ def _sliding_window_cls(
 # ---------------------------------------------------------------------------
 # Output raster setup
 # ---------------------------------------------------------------------------
-
-def _setup_output(
-    bbox_4326: tuple[float, float, float, float],
-    out_crs: str,
-    out_res: float,
-) -> tuple[Any, int, int]:
-    """Return (transform, H, W) for the output raster in out_crs at out_res."""
-    from pyproj import Transformer
-    from rasterio.transform import from_origin
-    from shapely.geometry import box
-    from shapely.ops import transform as shapely_transform
-
-    t = Transformer.from_crs("EPSG:4326", out_crs, always_xy=True)
-    roi_out = shapely_transform(t.transform, box(*bbox_4326))
-    minx, miny, maxx, maxy = roi_out.bounds
-
-    W = max(1, int(round((maxx - minx) / out_res)))
-    H = max(1, int(round((maxy - miny) / out_res)))
-    transform = from_origin(minx, maxy, out_res, out_res)
-    return transform, H, W
-
-
-def _meters_to_out_res(
-    tile_res_m: float,
-    first_crs: str,
-    out_crs: str,
-    bbox_center_lon: float,
-    bbox_center_lat: float,
-) -> float:
-    """Convert tile resolution in meters to out_crs units at bbox centre."""
-    from pyproj import Transformer
-
-    t_to_tile = Transformer.from_crs("EPSG:4326", first_crs, always_xy=True)
-    t_to_out = Transformer.from_crs(first_crs, out_crs, always_xy=True)
-    x0, y0 = t_to_tile.transform(bbox_center_lon, bbox_center_lat)
-    ox0, oy0 = t_to_out.transform(x0, y0)
-    ox1, oy1 = t_to_out.transform(x0 + tile_res_m, y0)
-    return abs(ox1 - ox0)
-
 
 # ---------------------------------------------------------------------------
 # Main inference function
