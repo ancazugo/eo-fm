@@ -494,6 +494,57 @@ lcz_patch_plot <- function(city, patch = NULL, grid_id = NULL, dataset = NULL,
              panel_in = panel_in)
 }
 
+#' The So2Sat reference raster over an ROI, as LCZ colours on nothing.
+#'
+#' The other half of --labels: the same labels as the city's reference GeoTIFF
+#' rather than as polygons. The two are NOT the same picture, and the difference
+#' is in the data, not the drawing. The polygons are 320 m squares on a 100 m
+#' stride, so they overlap several deep and one place carries several labels;
+#' the tif is one class per cell on a regular grid, EPSG:4326 with a 320 m
+#' latitude step and an independently chosen longitude step -- 414 x 321 m on
+#' the ground at Nairobi. Borders are meaningless here, so none are drawn.
+#'
+#' Nodata is dropped rather than painted, so the panel stays empty where So2Sat
+#' has nothing to say -- the same contract as the polygon version.
+lcz_raster_bare <- function(bbox, city = NULL, path = NULL, axes = FALSE,
+                            scalebar = FALSE, digits = 1, panel_in = 6.5,
+                            max_cells = MAX_CELLS) {
+  if (is.null(path)) {
+    if (is.null(city)) stop("--labels --rasterised needs --city or --input",
+                            call. = FALSE)
+    path <- file.path(SO2SAT_CITIES_DIR, city,
+                      paste0("patches_reference_", city, ".tif"))
+  }
+  rc <- read_lcz_roi(path, bbox, max_cells = max_cells)
+  # Nodata cells are kept and painted "transparent", not dropped. A reference
+  # tif is mostly nodata (the Nairobi one is 94%), and dropping those rows
+  # leaves whole columns missing -- geom_raster then reports the pixels as
+  # unevenly spaced and shifts the ones that remain.
+  d <- terra::as.data.frame(rc, xy = TRUE, na.rm = FALSE)
+  names(d)[3] <- "lcz"
+  lab <- !is.na(d$lcz)
+  if (!any(lab)) stop("Every cell in this ROI is nodata.", call. = FALSE)
+  bad <- setdiff(unique(as.integer(d$lcz[lab])), LCZ_TABLE$code)
+  if (length(bad)) {
+    stop("Raster holds values outside LCZ 1-17: ", paste(bad, collapse = ", "),
+         call. = FALSE)
+  }
+  d$.col <- "transparent"
+  d$.col[lab] <- LCZ_TABLE$colour[match(as.integer(d$lcz[lab]), LCZ_TABLE$code)]
+
+  inf <- lcz_scale_info(rc)
+  tab <- table(LCZ_TABLE$alt_code[match(as.integer(d$lcz[lab]), LCZ_TABLE$code)])
+  message("  ", basename(path), ": ", sum(lab), " labelled cells of ",
+          terra::ncell(rc), ", ", resolution_label(
+            terra::res(rc) * inf$m_per_x * c(1, inf$ratio)), " each -- ",
+          paste(names(tab), unname(tab), sep = " x", collapse = ", "))
+
+  bare_panel(list(geom_raster(data = d, aes(x = x, y = y, fill = .col))),
+             as.vector(terra::ext(rc)), ratio = inf$ratio, rc = rc,
+             axes = axes, scalebar = scalebar, digits = digits,
+             panel_in = panel_in)
+}
+
 # ── Mosaic mode ───────────────────────────────────────────────────────────────
 
 #' Colour columns for one `--colour` choice, and whether they are already 0-255.
@@ -604,6 +655,9 @@ if (sys.nframe() == 0L && !interactive()) {
                       help = paste("draw the So2Sat patches as their LCZ",
                                    "labels, not an image; frame with --patch,",
                                    "--grid-id, --window or --bbox"))
+  parser$add_argument("--rasterised", action = "store_true",
+                      help = paste("with --labels: draw the city's reference",
+                                   "GeoTIFF instead of the patch polygons"))
   parser$add_argument("--grid-id", default = NULL, dest = "grid_id",
                       help = "frame on one split-grid cell by id (needs --city)")
   parser$add_argument("--outline", default = LABEL_OUTLINE_COL,
@@ -635,7 +689,14 @@ if (sys.nframe() == 0L && !interactive()) {
   }
   args <- parser$parse_args(argv)
 
-  p <- if (args$labels) {
+  p <- if (args$labels && args$rasterised) {
+    if (is.null(args$bbox)) stop("--labels --rasterised needs --bbox", call. = FALSE)
+    lcz_raster_bare(as.numeric(strsplit(args$bbox, "[, ]+")[[1]]),
+                    city = args$city, path = args$input, axes = args$axes,
+                    scalebar = args$scalebar, digits = args$digits,
+                    panel_in = max(1, args$width - if (args$axes) 0.81 else 0),
+                    max_cells = args$max_cells)
+  } else if (args$labels) {
     if (is.null(args$city)) stop("--labels needs --city", call. = FALSE)
     lcz_patch_plot(args$city, patch = args$patch, grid_id = args$grid_id,
                    dataset = args$dataset, window = args$window,
