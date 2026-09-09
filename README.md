@@ -871,3 +871,280 @@ missing tile are dropped rather than written as truncated (and later stretched) 
 - Each run logs train/val loss and metrics per epoch, plus final test metrics
 - Metrics (both pipelines): `test_acc`, `test_acc_macro`, `test_f1`, `test_f1_micro`, `test_kappa`, `test_loss`, per-class table, confusion matrix; segmentation adds `val_miou` / `test_miou`
 - Run outputs (checkpoints, prediction rasters) are saved under `{output-dir}/{wandb-run-name}/`
+
+---
+
+## Step 8 — Paper & Poster Figures (R)
+
+Summary figures are made in R (`R/`), run from the repo root so `.Renviron` supplies `DATA_DIR`.
+The interpreter is the conda `r-environment`:
+`/maps/acz25/miniconda3/envs/r-environment/bin/Rscript`.
+
+R has no W&B client, so the results table caches its numbers first — the same pattern
+`R/prepare_city_data.R` uses for the city summaries.
+
+Output is filed by theme under `plots/` — `dataset/` (classes, splits, cities), `embeddings/`
+(projection scatters), `models/` (results table, confusion matrices) and `maps/` (LCZ rasters).
+Each script declares its own subfolder via `save_plot(..., subdir = PLOT_DIR_*)`, defined in
+`R/constants.R`; the paths below are written relative to `plots/`.
+
+```bash
+# W&B -> data/model_metrics.csv (newest finished run per
+# embedding x split x family x preset cell; supersedes are logged)
+python src/export_run_metrics.py
+
+# Saved test_confusion_matrix.npy run artefacts -> data/confusion_matrices.csv
+# (R has no .npy reader in this env)
+python src/export_confusion_matrix.py
+
+Rscript R/prepare_city_data.R   # -> data/so2sat_city_{summary,class_counts}.csv
+Rscript R/plotting.R            # -> plots/dataset/class_*, dataset_*, so2sat_*
+Rscript R/split_maps.R          # -> plots/dataset/split_map_{global,orig_test,orig_test_grid}.png
+Rscript R/metrics_table.R       # -> plots/models/model_metrics_table.{png,pdf,html}
+Rscript R/metrics_table.R --highlight dash|ring|halo|chip|bar|none   # best-value mark (default dash)
+
+# -> plots/models/confusion_matrix_<run>_{proportions,counts}.png  (PNG only)
+# Defaults to the best-kappa culture-10 run; --all loops every run in the CSV.
+Rscript R/confusion_matrix.R [--run <run_name>] [--normalize true|none] [--all]
+
+# Embedding-projection scatter (PCA / UMAP / t-SNE), one point per patch
+Rscript R/embedding_projection.R --list                        # runs available on disk
+Rscript R/embedding_projection.R --run GeoTessera_v2 --all-colours [--legend [bottom|right]]
+Rscript R/embedding_projection.R --run GeoTessera_v2 --method umap --full   # every patch
+Rscript R/embedding_projection.R --run GeoTessera_v2 --colour lon|lat|lonlat --full --legend
+# -> plots/embeddings/projection_<run>_<method>_<colour>.png  (PNG only; no key unless --legend)
+
+# One row per patch: both embeddings' PCA/UMAP coords + location, LCZ, Koppen, M49
+Rscript R/patch_table.R          # -> data/patch_master_table.parquet (--format csv also)
+
+# LCZ raster -> PNG for a lon/lat ROI
+Rscript R/lcz_raster.R --input <file.tif> --bbox W,S,E,N --name <stem> [--legend]
+Rscript R/lcz_raster.R --input <file.tif> --bbox W,S,E,N --name <stem> \
+    --guppd --guppd-highlight Nairobi        # dim every other settlement
+
+# That raster's LCZ mix, as a pie plus a horizontal composition bar
+Rscript R/lcz_composition.R --input <file.tif> --name <stem> [--bbox W,S,E,N] [--labels]
+# -> plots/maps/<stem>_{pie,bar,composition}.png
+
+# ... or the same mix placed into the map itself
+Rscript R/lcz_raster.R --input <file.tif> --bbox W,S,E,N --name <stem> \
+    --distribution pie --pie-corner tl --pie-size 0.10
+Rscript R/lcz_raster.R --input <file.tif> --bbox W,S,E,N --name <stem> \
+    --distribution bar --dist-side bottom|top|left|right
+```
+
+Both marks are drawn **without text**: they are graphical elements for a map, and the map's own
+legend names the classes. `--labels` puts the class and share back on the standalone bar.
+
+`--distribution pie` insets the pie in the panel on the **same translucent white backing as the
+scale bar**, so the two read as one furniture set; `--pie-corner` and `--pie-size` (a fraction of
+the panel width, default 0.10 — about the scale bar's own size, a mark on the map rather than a
+second figure sitting on it) place and size it. `--distribution bar` butts a bare composition strip against
+one edge — horizontal on `bottom`/`top`, vertical on `left`/`right` — spanning the map's full
+width or height, with `--dist-thickness` as a fraction of the map's **width in either
+orientation** (default 0.02, about 3.5 mm on a 7 in figure) — measuring it against the edge it
+happens to span would make the strip down a landscape map's side thinner than the same strip
+along its bottom, and the two should look alike. The strip is a separate
+plot combined through patchwork, which aligns **panel regions**, so it lines up with the map
+rather than with the figure and the tick labels do not push it out of register.
+
+The inset pie must share the map's single `fill` scale (ggplot allows one per aesthetic, and
+`ggnewscale` is not installed here), so it is keyed on the map's long class labels rather than
+the short alt codes. The two always agree: both are counted from the same cropped raster.
+
+`R/lcz_composition.R` counts a GeoTIFF's cells per class with `terra::freq()` (no decimation
+needed — it never materialises the cells) and draws the **same two marks** the dataset figures
+use: the pie from the city map and the stacked composition bar that acts as its legend, here
+laid out horizontally. Both live in **`R/composition.R`**, shared with `R/plotting.R`, so the
+standalone pie and the 52 pies on the city map are one mark and a change to either shows up in
+both figures.
+
+Shares are of **mapped area, not of patches** — a prediction raster and the patch table will not
+agree, and should not. Cells are counted as stored, without reprojecting to an equal-area grid;
+over a city ROI the latitude bias is under a tenth of a percent, which is why this is a city-ROI
+tool. Labels on the horizontal bar are rotated a quarter turn, so what has to clear along the bar
+is one *line height* rather than a line length — that is what lets all 17 LCZ labels sit on one
+bar — and both that spacing and the figure's height are computed from the type at the chosen
+`--width`. Shares under 0.1% get two extra decimals, since at one decimal nine of Nairobi's
+seventeen classes read "0.0%", which says *absent* when the truth is *present and negligible*.
+
+The `--guppd` overlay draws every GUPPD settlement footprint over the ROI, and a city ROI holds
+many — 24 over Nairobi. `--guppd-highlight <name>` draws that one dark and thick and lets the
+rest recede to a thin pale line; with no flag the **largest** settlement over the ROI is chosen
+(the city, on the ROIs this figure is for) and reported, and `--guppd-highlight none` draws them
+all alike. The name is matched against every GUPPD name field — `JRC_NAME_MAIN`, `CIESIN_NAME`,
+`CIESIN_NAME_ADJ` and the comma-separated `JRC_NAME_LIST` — because they disagree: over Nairobi
+the main agglomeration is `JRC_NAME_MAIN = Nairobi` while three smaller entities carry
+`CIESIN_NAME = Nairobi`, and all four belong to the city.
+
+The scale bar carries a **cell-size key** below the distance bar: a small filled square and the
+raster's ground resolution, read off the tif (`--no-resolution` drops it). The square is a *key
+drawn at a legible size*, not a to-scale cell — a 10 m pixel over a city ROI is a quarter of a
+screen pixel. When the cells are anisotropic the key is drawn at their true aspect and labelled
+with both sides: the So2Sat reference tifs are EPSG:4326 with a 320 m latitude step and an
+independent longitude step, so at Nairobi they read **414x321 m**, not "320 m". If the raster had
+to be aggregated to meet `--max-cells`, the key reports the aggregated cell actually drawn and
+says so.
+
+`model_metrics_table` is two stacked blocks sharing one header — culture-10 above, grid split
+below — and each gets **its own hue and its own colour normalisation** (blue `#0072B2` and
+terracotta `#946C51`). The grid split reuses So2Sat's own test cities and is leakage-inflated relative to
+culture-10, so a shared ramp would read as a fair comparison and would flatten the contrast
+inside each block.
+
+The hues stay clear of the **LCZ palette**, since this figure shares a poster with the LCZ maps.
+Verified by simulating protanopia/deuteranopia/tritanopia and measuring CIELAB dE to all 17 LCZ
+colours: blue's worst case is dE 20.3 (LCZ 11) and terracotta's is 21.1 (LCZ 13). The Okabe-Ito
+orange `#D55E00` used before scored **dE 2.2 against LCZ 3 under deuteranopia** — indistinguishable
+— which is why it was replaced; muting the orange is what buys the distance, since a saturated
+orange scores 2-7 at any lightness. Terracotta also separates from blue by dE 46 under the worst
+simulation (a purple that cleared LCZ better managed only 19, because 255-315 degrees is the only
+band LCZ leaves free and it sits close to blue). The tightest margin in the figure is terracotta
+against the neutral grey of `# Params`, dE 18.8 — still clearly different, but do not mute the
+hue further. `# Params` is the exception: one table-wide log10 grey ramp, since model size
+is comparable everywhere and is not a performance metric. Pass `scale_by = "column"` to
+`metrics_table_plot()` to see the shared-ramp alternative.
+
+`R/confusion_matrix.R` is an R port of `src/training/evaluate.py::save_confusion_matrix` +
+`style_lcz_ticklabels`: the tick labels are replaced by the short LCZ codes (`1`-`10`, `A`-`G`),
+each set bold on a chip of its own class colour with the text colour chosen by luminance
+(`contrast_text()`, the same rule the Python `_text_color()` applies). Two departures:
+
+* **Not viridis.** The same CVD audit run against the ramp condemns it — viridis' green midtones
+  are **dE 1.0 from LCZ A (Dense Trees) under tritanopia**, indistinguishable. The replacement is
+  a white-to-magenta ramp (`CM_RAMP`), the only candidate scoring double digits against both the
+  LCZ palette (dE 12.4, LCZ 10 under deuteranopia) and the metrics table's hues (dE 12.7, blue
+  under protanopia). Measure a ramp on its *saturated half*: a white-ended sequential ramp must
+  contain a pale sample near LCZ F, so scoring the whole ramp rejects every candidate. Its dark end
+  is a deep plum, not black, because LCZ E *is* pure black.
+* **The chips are geometry, not styled tick labels.** `ggtext`, `gridtext` and `marquee` are all
+  absent from this env, so there is no `element_markdown()` to hang a background box on — the
+  chips are `geom_tile` + `geom_text` outside the panel under `coord_cartesian(clip = "off")`,
+  the same hand-built route the rest of the stack takes.
+
+The matrix is always the full 17x17, unlike the Python plot's observed-labels axes, so two runs
+compare cell for cell. Cells are sized in inches from the widest label they must hold, so the
+counts variant does not overrun its tiles. Fills are normalised over the whole matrix, not per
+row — the off-diagonal structure is only readable if a cell means the same thing wherever it sits.
+
+`R/patch_table.R` merges everything onto one row per patch, keyed on `uid`, for downstream
+analysis: identity (`uid, dataset, patch_id, split, city`), location (`lon, lat`), label
+(`lcz_class, lcz_code, lcz_name`), climate (`koppen_code, koppen_desc, water`), territory
+(`un_country, iso_a2, iso_a3, m49_code, un_subregion, un_region`) and one coordinate block per
+projection run (`<run>_pca_1..3`, `<run>_umap_1..3`). 397,415 rows x 31 columns, ~44 MB as
+parquet, gitignored and rebuildable.
+
+**The embedding blocks do not share a frame.** `geotessera_v2_umap_1` and
+`alphaearthcoop_umap_1` are separate fits of separate feature spaces, on top of per-run
+`StandardScaler` + PCA; no rotation relates them. Comparing a patch's position between blocks, or
+computing a distance across them, is meaningless — what the join buys is per-patch comparison of
+*structure* (neighbourhoods, cluster membership, how a class or region scatters). t-SNE is
+excluded because it is fitted on a balanced per-class subsample, so only 34,000 of 397,415 rows
+(8.6%) would carry a value; add `"tsne"` to `PROJ_DIMS` if you want it and expect the NAs.
+`un_country` uses the **UN's formal long names** ("United States of America", "Türkiye"), which
+differ from the colloquial names in the projection parquets' own `country` column on 25.8% of
+rows — naming only, with no case where the two disagree about the actual country.
+
+`R/embedding_projection.R` reads the parquets `src/embedding_projection.py` writes and draws the
+first two dimensions of one projection, ~400k patches subsampled to a workable 60k
+(`--max-points`). Three things it does that are not obvious:
+
+* **The third coordinate is the depth channel.** Points are sorted by `<method>_3` before drawing
+  (`--depth asc|desc|none`), so one range of depth values lands under the other. ggplot2 draws
+  rows in data order, so sorting the frame *is* the encoding — there is no `order` aesthetic, and
+  size or alpha would confound depth with a second channel. Runs written before 2026-09 carry only
+  `<method>_x/_y`; those still plot, in file order, with one warning. Re-export to get `pca_1..3`
+  (`--pca-keep`, default 3; UMAP and t-SNE additionally need `--fit-3d`, which is a *second*
+  3-component fit, not a slice of the 2-D one).
+* **The axes are framed on the central 99%** (`--clip`, `1` to disable). PCA on these embeddings
+  grows a long thin arm — on AlphaEarth coop, 1,639 patches (0.41%) sit below PC1 = -10 while the
+  rest of the cloud lives inside +-3 — and under `coord_fixed()` that arm squashes everything into
+  a sliver. The arm is real signal, not corruption: 1,440 of those patches are LCZ 17 (Water), in
+  coastal cities (Cape Town, New York, Mumbai). It is framed out, not removed, and the caption
+  reports how many points fell outside. `--clip 0.999` is *not* enough to clear it.
+* **High-cardinality colour variables collapse.** `--colour` takes any column; `lcz_name` and
+  `split` use the canonical palettes, and anything else (city is 51 levels, country 30) keeps the
+  12 largest and buckets the tail into a grey `Other`, so the key stays a fixed size whatever you
+  colour by. The collapsed share is printed, never hidden.
+
+Two more `--colour` modes classify each patch by **its own coordinates**, not by its city or
+country name, and are built by `R/patch_geo_context.R` and cached to `data/patch_geo_context.csv`
+(delete the file to rebuild; a patch's coordinates never change):
+
+* `subregion` — **UN M49 sub-region**, by point-in-polygon against `spData::world` then a join to
+  the UN's own M49 table. Note the 22 familiar sub-regions are *not* the CSV's `Sub-region Name`
+  column, which is the 17-member tier that lumps all of sub-Saharan Africa together — they come
+  from taking `Intermediate Region Name` wherever the UN defines one (Africa and the Americas)
+  and the sub-region otherwise. Colours are **one hue family per region** shaded within it, so
+  the key reads as five continental blocks rather than 22 unrelated hues.
+* `koppen` — **Köppen-Geiger class** (Beck et al. 2023) sampled from the 1 km 1991–2020 raster,
+  in the official RGB colours parsed straight out of the shipped `legend.txt`.
+
+**Water is a `koppen` category, and only a `koppen` one.** The Köppen raster is land-only, so a
+patch whose centre falls on ocean or a large lake samples nothing — 37,093 patches, 9.3%. That NA
+*is* the answer for a climate reading, and those patches get a slate `Water` entry rather than a
+borrowed classification (an earlier version filled them from the nearest land cell within ~28 km,
+which quietly gave a harbour patch its city's climate). `subregion` deliberately has no such
+class: a sub-region is a *territorial* label, not a physical one, so a patch of harbour belongs
+to the country whose harbour it is and simply takes the containing — or nearest — country's
+sub-region. `spData::world` is 1:110m, so 31,366 patches (7.9%) fall outside every country
+polygon; that is coastline coarseness rather than water, and nearest-country resolves it, largest
+distance 37 km. Neither mode is collapsed to top-N: the full classification is the point.
+
+**Both keys are laid out so like sits with like.** `guide_legend` fills a plain rectangle, so
+consecutive groups run into each other mid-row; invisible spacer levels (unique whitespace
+strings, transparent swatch, blank label — hence `drop = FALSE`) push each group onto a fresh row
+or column. Köppen shows **codes only**, four rows, padded so each column is one main group
+(A / B / C / D / E / Water) — the full names run to 45 characters and force a key wider and taller
+than the panel. The M49 key pads to **one region per row** (five rows, Africa to Oceania), since
+those labels cannot be shortened.
+
+`--colour` also takes three **geographic** modes, derived from the `lon`/`lat` columns the
+exporter writes: `lon` on a **RdYlBu** ramp, `lat` on **BrBG**, and `lonlat` on a **bivariate**
+scale. Both univariate ramps are diverging on purpose — longitude and latitude each have a
+meaningful middle (prime meridian, equator) and two opposed directions, which a sequential ramp
+throws away. **All three are pinned so 0 is the exact centre**: `.unit_mid()` for the bivariate
+axes, and for the two bars the coordinate's *full* range — `±180` longitude, `±90` latitude —
+rather than the data's own. Full range is what puts the interior breaks on the round graticule
+values (60/120 and 30/60) with the compass letters clear of them at the band ends, and it makes
+two runs' colours mean the same thing; the cost is contrast, since So2Sat spans only −123..151
+and −38..56 so neither ramp reaches its extremes. Band ends carry **W/E** and **S/N**, interior
+breaks are bare degrees, and the bivariate key carries all four letters on its sides plus a
+dashed cross on the origin. Seven labels share one bar, so the legend text is set at 0.78 of the
+inherited size — ggplot silently *drops* colliding bar labels rather than shrinking them. The bivariate colours are a bilinear blend of four corners **in CIE Lab**, not sRGB:
+blending two saturated hues in sRGB runs through a muddy dark middle, and mid-range is exactly the
+quadrant most points land in. A bivariate scale has no ggplot guide, so its key is a small 2-D
+square of tiles inset into the panel corner with `patchwork::inset_element` — the same technique
+`R/plotting.R` uses for its map insets, and it renders **only if patchwork is attached**, since
+`ggplot + inset_element(...)` dispatches on patchwork's own `+`. That key is drawn even under the
+default `--legend none`: unlike a legend it costs no layout, and without it the figure cannot be
+read at all.
+
+**There is no colour key and no caption by default** — pass `--legend` and `--caption` for them.
+`--legend` bare means **bottom**, which is what a square panel wants: a bottom key takes height
+rather than stealing width from the cloud, and the figure grows by however many rows the key
+wrapped to (the plot reports that as a `legend_rows` attribute, since only the caller sizes the
+figure). Columns are chosen from label length — 3 for long labels, 6 for short — because ggplot
+will otherwise run the last entries off the edge. `--legend right` gives the old side key.
+These scatters are panelled beside figures that already carry the LCZ key and their own titling,
+and a 17- or 13-entry legend takes more width than the cloud it explains; bare, the figure squares
+up to 6.2 in and the panel gets the whole frame, leaving just the axis names. Nothing is lost:
+run, method, `n`, colour variable, depth column and the count outside the frame all go to the
+console on every call. Note that ggplot silently *clips* an overlong caption at that width rather
+than wrapping it, which is why `--caption` wraps at 72 characters.
+
+Subsampling is by `crc32(uid) %% 1000`, reproducing `stable_subsample_mask` in the Python
+exporter, so the same patches are drawn on every run and two runs stay joinable point for point —
+`patch_id` alone is **not** unique, it restarts at `000000` in each of training/validation/testing.
+`scattermore` and `ggrastr` are absent here, which is what sets the 60k default; `--full` reads the
+full parquet instead of the `_sample` sibling and lifts the cap, drawing every patch (397,415 for
+GeoTessera v2, ~7 s), which is worth it — the subsample loses the fine structure of the dense
+regions. `plot_density()` on the pre-binned density grid is still the cheaper whole-cloud view. t-SNE is fitted on a balanced per-class
+subsample, so most rows have `NA` t-SNE coordinates by construction and the drawn count is much
+smaller — the script reports it.
+
+The table is expected to grow as runs land: columns, column widths, figure size, split hues and
+the caption are all derived from the CSV and from `METRIC_COLS` at draw time, and every label
+lookup is a preference rather than a filter, so a new embedding, split or architecture appears
+with its raw name instead of vanishing. Adding a metric is one entry in `METRIC_COLS` plus one in
+`METRIC_GLOSS`.
