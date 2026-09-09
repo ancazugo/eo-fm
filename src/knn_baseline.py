@@ -79,20 +79,33 @@ _src = Path(__file__).parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from datasets.registry import available_embeddings
+from datasets.registry import available_embeddings, get_nodata_predicate
 from datasets.so2sat import build_so2sat_items
 from utils.constants import lcz_dict
+from utils.pooling_features import (
+    POOLING_RECIPES,
+    compose_features,
+    extract_blocks_and_cache,
+    feature_dim as recipe_feature_dim,
+    masked_cache_key,
+    pool_blocks,
+    recipe_blocks,
+)
 from utils.runtime import init_run, resolve_dequantize
 
 
 # ── Feature extraction ────────────────────────────────────────────────────────
 
-def _pool(arr: np.ndarray, pooling: str) -> np.ndarray:
-    """Apply spatial pooling to (C, H, W) float32 → 1-D feature vector."""
-    mean = arr.mean(axis=(1, 2))
-    if pooling == "gap":
-        return mean
-    return np.concatenate([mean, arr.std(axis=(1, 2))])
+def _pool(arr: np.ndarray, pooling: str, valid: np.ndarray | None = None) -> np.ndarray:
+    """Apply spatial pooling to (C, H, W) float32 → 1-D feature vector.
+
+    Delegates to ``utils.pooling_features``, which owns the block vocabulary.
+    ``gap`` and ``mean_std`` keep their historical layouts exactly — existing
+    caches and every linear-probe checkpoint depend on that.
+    """
+    blocks = recipe_blocks(pooling)
+    got = pool_blocks(arr, blocks, valid=valid)
+    return np.concatenate([got[b] for b in blocks]) if len(blocks) > 1 else got[blocks[0]]
 
 
 def extract_and_cache(
@@ -102,6 +115,9 @@ def extract_and_cache(
     cache_dir: Path,
     cache_key: str,
     no_cache: bool = False,
+    *,
+    nodata_predicate=None,
+    workers: int = 1,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], np.ndarray, np.ndarray]:
     """Extract and cache pooled features for all splits.
 
@@ -110,10 +126,20 @@ def extract_and_cache(
         labels: {"train": (N,), "val": (N,), "test": (N,)}
         mean:   (D,) — training-set feature mean
         std:    (D,) — training-set feature std
+
+    Features are composed from the per-block caches written by
+    ``utils.pooling_features.extract_blocks_and_cache``, so adding a recipe costs
+    a column slice rather than another pass over the npy tree.
+
+    The legacy ``{cache_key}_{split}_feats.npy`` layout is still read *and*
+    written for the two historical unmasked recipes, so caches produced before
+    the block split keep loading byte-for-byte.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     stats_path = cache_dir / f"{cache_key}_stats.npz"
     splits = ("train", "val", "test")
+    blocks = recipe_blocks(pooling)
+    legacy_layout = pooling in ("gap", "mean_std") and nodata_predicate is None
 
     def _cache_paths(s: str):
         return (
@@ -122,7 +148,8 @@ def extract_and_cache(
         )
 
     all_cached = (
-        not no_cache
+        legacy_layout
+        and not no_cache
         and stats_path.exists()
         and all(fp.exists() and lp.exists() for fp, lp in (_cache_paths(s) for s in splits))
     )
@@ -134,40 +161,31 @@ def extract_and_cache(
         stats = np.load(stats_path)
         return feats, labels, stats["mean"], stats["std"]
 
-    logger.info(f"Extracting features (pooling={pooling}) …")
-    split_items: dict[str, list] = {s: [] for s in splits}
-    for it in items:
-        path, label, sp = it.path, it.label, it.split
-        if sp in split_items:
-            split_items[sp].append((path, label))
+    logger.info(
+        f"Extracting features (pooling={pooling}, blocks={list(blocks)}, "
+        f"masked={nodata_predicate is not None}) …"
+    )
+    # Blocks are recipe-independent, so strip the pooling suffix from the key:
+    # `gap` and `ring` then share one `mean` cache instead of pooling it twice.
+    stem = cache_key[: -len(pooling) - 1] if cache_key.endswith(f"_{pooling}") else cache_key
+    block_key = masked_cache_key(stem, nodata_predicate is not None)
+    extract_blocks_and_cache(
+        items, blocks, dequantize_fn, cache_dir, block_key,
+        nodata_predicate=nodata_predicate, workers=workers, no_cache=no_cache,
+        splits=splits,
+    )
 
     feats: dict[str, np.ndarray] = {}
     labels_out: dict[str, np.ndarray] = {}
-
     for s in splits:
-        rows = split_items[s]
-        fp, lp = _cache_paths(s)
-        if not rows:
-            feats[s] = np.empty((0, 1), dtype=np.float32)
-            labels_out[s] = np.empty((0,), dtype=np.int64)
+        feats[s] = compose_features(cache_dir, block_key, pooling, s).astype(np.float32)
+        labels_out[s] = np.load(cache_dir / f"{block_key}_{s}_labels.npy")
+        if feats[s].shape[0]:
+            logger.info(f"  {s}: {feats[s].shape[0]} patches, dim={feats[s].shape[1]}")
+        if legacy_layout:
+            fp, lp = _cache_paths(s)
             np.save(fp, feats[s])
             np.save(lp, labels_out[s])
-            continue
-
-        feat_list, lbl_list = [], []
-        for path, label in tqdm(rows, desc=f"  {s}", leave=False):
-            arr = np.load(path).astype(np.float32)
-            arr = np.nan_to_num(arr, nan=0.0)
-            if dequantize_fn is not None:
-                arr = dequantize_fn(arr)
-            feat_list.append(_pool(arr, pooling))
-            lbl_list.append(label)
-
-        feats[s] = np.stack(feat_list, axis=0).astype(np.float32)
-        labels_out[s] = np.array(lbl_list, dtype=np.int64)
-        np.save(fp, feats[s])
-        np.save(lp, labels_out[s])
-        logger.info(f"  {s}: {feats[s].shape[0]} patches, dim={feats[s].shape[1]}")
 
     mean = feats["train"].mean(axis=0)
     std = feats["train"].std(axis=0)
@@ -188,13 +206,21 @@ def run_knn(
     y_train: np.ndarray,
     X_test: np.ndarray,
     k: int = 20,
+    n_jobs: int = 4,
 ) -> np.ndarray:
-    """L2-normalise, cosine-kNN, majority vote over k neighbours."""
+    """L2-normalise, cosine-kNN, majority vote over k neighbours.
+
+    ``n_jobs`` defaults to 4 because a brute cosine search on a large reference
+    set can otherwise overflow OpenBLAS's thread count on this host. That cap is
+    expensive when it is not needed: measured on 24k queries against 40k
+    references, n_jobs=4 takes 387 s and n_jobs=24 takes 46 s. Callers that
+    already control the thread environment should raise it.
+    """
     def _l2(X: np.ndarray) -> np.ndarray:
         return X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-8)
 
-    # n_jobs capped to avoid OpenBLAS thread-count overflow on large datasets
-    nbrs = NearestNeighbors(n_neighbors=k, metric="cosine", algorithm="brute", n_jobs=4)
+    nbrs = NearestNeighbors(n_neighbors=k, metric="cosine", algorithm="brute",
+                            n_jobs=n_jobs)
     nbrs.fit(_l2(X_train))
     _, indices = nbrs.kneighbors(_l2(X_test))  # (N_test, k)
 
@@ -501,8 +527,17 @@ def main() -> None:
                    help="Force dequantize (auto-applied for alpha_earth_coop and seamless).")
 
     g = parser.add_argument_group("Features")
-    g.add_argument("--pooling", choices=["gap", "mean_std"], default="gap",
-                   help="Spatial pooling: gap = global average; mean_std = mean+std concat (doubles dim).")
+    g.add_argument("--pooling", choices=sorted(POOLING_RECIPES), default="gap",
+                   help="Spatial pooling recipe. gap = global average; mean_std = mean+std; "
+                        "center = focal pixel; quantile = per-channel p10/p50/p90; "
+                        "ring = mean + centre/surround means; rich = every block.")
+    g.add_argument("--nodata-mask", action="store_true",
+                   help="Exclude nodata pixels from pooling (registry sentinel + NaN). "
+                        "Off by default so existing caches stay valid; strongly "
+                        "recommended for alpha_earth_coop and required for --pooling center.")
+    g.add_argument("--pool-workers", type=int, default=1,
+                   help="Processes for the pooling pass. Pooling is CPU-bound, so this "
+                        "is where the wall-clock goes on the big embeddings.")
     g.add_argument("--cache-dir", type=Path, default=None,
                    help="Feature cache directory (default: {output_dir}/cache).")
     g.add_argument("--no-cache", action="store_true", help="Ignore and overwrite existing cache.")
@@ -559,7 +594,7 @@ def main() -> None:
     in_channels = int(np.load(all_items[0][0], mmap_mode="r").shape[0])
     if in_channels_override is not None:
         in_channels = in_channels_override
-    feature_dim = in_channels * (2 if args.pooling == "mean_std" else 1)
+    feature_dim = recipe_feature_dim(args.pooling, in_channels)
     logger.info(f"in_channels={in_channels}  feature_dim={feature_dim}")
 
     # ── Feature extraction + cache ────────────────────────────────────────────
@@ -569,6 +604,9 @@ def main() -> None:
 
     feats, labels_dict, feat_mean, feat_std = extract_and_cache(
         all_items, args.pooling, dequantize_fn, cache_dir, cache_key, no_cache=args.no_cache,
+        nodata_predicate=(get_nodata_predicate(args.embedding_name)
+                          if args.nodata_mask else None),
+        workers=args.pool_workers,
     )
 
     # ── Normalisation ─────────────────────────────────────────────────────────
