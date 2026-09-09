@@ -29,7 +29,10 @@ OPT3=(
 )
 
 PROBE=(
-  --family linear_probe
+  # --preset nano is now required: linear_probe used to accept all five preset
+  # names for the same model, so this relied on the CLI default (large). The
+  # model built is unchanged -- only the name it is asked for.
+  --family linear_probe --preset nano
   --class-weights sqrt_inv_freq
 )
 

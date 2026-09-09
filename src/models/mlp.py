@@ -1,7 +1,15 @@
 """GAP + MLP classification family.
 
 Arch spec string: ``"mlp_<h1>-<h2>-..."`` — hyphen-separated hidden sizes.
-``"mlp_"`` (no hidden layers) is a linear probe equivalent.
+
+``"mlp_"`` (no hidden layers) is a *linear* model, but it is NOT the same as the
+``linear_probe`` family: the probe inserts ``BatchNorm1d(affine=False)`` between
+the pooling and the ``Linear``, so it z-scores pooled features by training-set
+statistics. Both have the same trainable parameter count. With
+``--normalize channel`` the inputs are already per-channel z-scored, and the
+pooled features come out with only a ~1.2-1.4x spread in per-channel std across
+tessera v1.1/v2 and coop, so the two land close in practice — but they train
+differently, because BN normalises by *batch* statistics during training.
 """
 
 from __future__ import annotations
@@ -13,7 +21,8 @@ from models.pooling import pool_mean_std
 from models.registry import ModelFamily, register
 
 MLP_PRESETS: dict[str, str] = {
-    "nano":   "mlp_",            # no hidden layers — linear probe equivalent
+    "nano":   "mlp_",            # no hidden layers — linear, but see the module
+                                 # docstring: not identical to linear_probe
     "small":  "mlp_256",
     "base":   "mlp_512-256",
     "medium": "mlp_512-256-128",

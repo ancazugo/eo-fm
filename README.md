@@ -99,8 +99,12 @@ R/                           # R figure scripts (reads data/wandb_export_*.csv)
 | `semantic_segmentation.py` | `unet` (default), `resnet_unet`, `fcn8`, `attention_unet` |
 
 `linear_probe` is pooling + `BatchNorm1d(affine=False)` + Linear (the "BN + linear"
-probe). Presets are all equivalent (GAP pooling); pass `--arch mean_std` for
-mean+std pooling (doubled feature dim). Normalisation stats are stored in the
+probe). It has **one preset, `nano`** — the only parameters are `Linear(D, num_classes)`,
+so there is no capacity ladder; `--preset small|base|medium|large` is an error rather
+than an alias for the same model. Since `--preset` defaults to `large`, pass
+`--preset nano` explicitly. Pass `--arch mean_std` for mean+std pooling (doubled
+feature dim). Not the same as `mlp --preset nano`, which is the same size and also
+linear but has no BatchNorm. Normalisation stats are stored in the
 checkpoint, so `infer_roi.py --model-type linear_probe` works without a stats file.
 The kNN and per-class GMM density counterparts live in `knn_baseline.py`
 (cached pooled features; `--classifier knn|gmm`).

@@ -71,6 +71,35 @@ def test_new_families_define_every_preset(family):
     assert set(get_family(family).presets) == PRESET_NAMES
 
 
+def test_linear_probe_is_nano_only():
+    # The probe has no capacity knob -- its only parameters are Linear(D,
+    # num_classes), fixed by embedding width and class count. Five preset names
+    # mapping to the same "gap" payload produced byte-identical models under run
+    # names that implied a size difference. Keep it a hard error, not an alias.
+    assert set(get_family("linear_probe").presets) == {"nano"}
+
+    with pytest.raises(ValueError, match="Unknown preset"):
+        build_model(
+            "linear_probe", "small", in_channels=IN_CHANNELS, num_classes=NUM_CLASSES
+        )
+
+
+def test_linear_probe_and_mlp_nano_differ_by_batchnorm():
+    # mlp.py's "mlp_" rung is linear and has the same trainable parameter count,
+    # which invites treating the two as interchangeable. They are not: the probe
+    # z-scores pooled features first.
+    probe = build_model(
+        "linear_probe", "nano", in_channels=IN_CHANNELS, num_classes=NUM_CLASSES
+    )
+    mlp = build_model("mlp", "nano", in_channels=IN_CHANNELS, num_classes=NUM_CLASSES)
+
+    n = lambda m: sum(p.numel() for p in m.parameters() if p.requires_grad)
+    assert n(probe) == n(mlp)
+
+    assert any(isinstance(m, torch.nn.BatchNorm1d) for m in probe.modules())
+    assert not any(isinstance(m, torch.nn.BatchNorm1d) for m in mlp.modules())
+
+
 def test_shallow_cnn_arch_override():
     # patch_classification.py --arch bypasses the presets entirely.
     model = build_model(

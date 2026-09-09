@@ -32,7 +32,7 @@ python src/semantic_segmentation.py \
     --output-dir ${DATA_DIR}/output/lcz-classification/dl
 
 # Linear probe (a classification family — trains like any other model)
-python src/patch_classification.py ... --family linear_probe   # --arch mean_std for mean+std pooling
+python src/patch_classification.py ... --family linear_probe --preset nano   # --arch mean_std for mean+std pooling
 
 # kNN / GMM-density baselines on cached pooled features
 python src/knn_baseline.py --so2sat-dir ... --cities Nairobi \
@@ -109,7 +109,8 @@ src/
     aspp.py                  #   LightASPPHead (classification)
     shallow_cnn.py           #   2-block Conv-BN-ReLU-Pool + GAP + Linear (classification)
     linear_probe.py          #   pooling + BatchNorm1d(affine=False) + Linear (classification);
-                             #   arch payload = pooling ("gap"/"mean_std"); stats live in the checkpoint
+                             #   arch payload = pooling ("gap"/"mean_std"); stats live in
+                             #   the checkpoint; ONE preset (nano), no capacity ladder
     unet.py                  #   DoubleConv, UNet (segmentation)
     resnet_unet.py           #   ResNetUNet (segmentation)
     fcn8.py                  #   FCN8 — miniature FCN-8s, score fusion (segmentation)

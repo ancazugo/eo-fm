@@ -1,8 +1,16 @@
 """Linear probe classification family: pooled features → BatchNorm → Linear.
 
 The arch payload is the pooling mode: ``"gap"`` (global average, D = C) or
-``"mean_std"`` (mean+std concat, D = 2C). All presets default to ``"gap"``;
-pass ``--arch mean_std`` to override.
+``"mean_std"`` (mean+std concat, D = 2C). Pass ``--arch mean_std`` to override.
+
+**There is exactly one preset, ``nano``.** The probe has no capacity knob: its
+only parameters are ``Linear(D, num_classes)``, fixed by the embedding width and
+the class count. The ladder used to carry all five names mapped to the same
+``"gap"`` payload, which meant ``--preset small`` and ``--preset large`` trained
+byte-identical models and wrote runs whose names implied a size difference that
+did not exist. Asking for any other preset is now an error rather than a
+silent alias. Note that ``utils.cli`` defaults ``--preset`` to ``large``, so
+``--family linear_probe`` must pass ``--preset nano`` explicitly.
 
 Feature normalisation is a ``BatchNorm1d(affine=False)`` layer (the "BN +
 linear" probe from the MAE paper): it tracks training-set mean/var as running
@@ -19,11 +27,7 @@ from models.pooling import pool_mean_std
 from models.registry import ModelFamily, register
 
 LINEAR_PROBE_PRESETS: dict[str, str] = {
-    "nano":   "gap",
-    "small":  "gap",
-    "base":   "gap",
-    "medium": "gap",
-    "large":  "gap",
+    "nano": "gap",
 }
 
 
@@ -127,4 +131,5 @@ register(ModelFamily(
     pipeline="classification",
     presets=LINEAR_PROBE_PRESETS,
     build=build_linear_probe,
+    default_preset="nano",
 ))
