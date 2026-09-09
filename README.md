@@ -920,6 +920,8 @@ Rscript R/patch_table.R          # -> data/patch_master_table.parquet (--format 
 # An embedding as a picture: bare by default, no axes, ticks, legend or margin
 Rscript R/embedding_raster.R --input <rgb.tif> --name <stem> [--bbox W,S,E,N | --window Nairobi]
 Rscript R/embedding_raster.R --input <rgb.tif> --window Nairobi --patches --grid --name <stem>
+Rscript R/embedding_raster.R --input <rgb.tif> --bbox W,S,E,N --city Nairobi --patches --grid \
+    --name <stem>                       # overlays over an arbitrary bbox
 Rscript R/embedding_raster.R --input <rgb.tif> --bbox W,S,E,N --axes --scalebar --name <stem>
 # Patch polygons instead of pixels, coloured from a projection run
 Rscript R/embedding_raster.R --mosaic --run GeoTessera_v2 --city Nairobi \
@@ -949,7 +951,8 @@ separate scales array, AlphaEarth is zarr; only `src/datasets/tiles.py` opens th
 What it adds over that command's sidecar PNG is the R stack: `--window <city>` frames the panel
 on **exactly the square `R/split_maps.R` draws** for that city, so an embedding image and the
 black-and-white split panel show the same ground; `--patches` and `--grid` overlay the So2Sat
-patch polygons and the 1280 m split-grid cells; and the result goes through `save_plot()` like
+patch polygons and the 1280 m split-grid cells (over a `--window`, or over any `--bbox` once
+`--city` names where to read them from); and the result goes through `save_plot()` like
 every other figure. Uncovered ground keeps the GeoTIFF's alpha and stays transparent rather than
 being painted — the shipped `Nairobi_v2_pca.tif` stops ~1.7 km short of the Nairobi window's
 southern edge, and that shows as a gap, not as a colour.

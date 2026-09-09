@@ -163,6 +163,32 @@ bbox_roi <- function(bbox) {
 PATCH_OUTLINE_COL <- "#ffffffcc"
 PATCH_OUTLINE_LW  <- 0.3
 
+#' The patches of `city` that fall in an arbitrary frame, for --bbox overlays.
+#'
+#' --window carries its own patches (cropped by centroid, as the split maps do);
+#' this is the other case, where the frame is a bbox and the city has to be named
+#' separately. Selection is by envelope overlap rather than by centroid, so a
+#' patch straddling the edge is drawn and clipped instead of vanishing.
+#'
+#' The city GeoPackages and the RGB rasters are all in the city's UTM zone, but
+#' that is a fact about these files, not a guarantee: a mismatch is an error
+#' here rather than an overlay quietly drawn in the wrong place, because
+#' grid_layer() reads its own file and cannot be reprojected after the fact.
+frame_patches <- function(city, e, crs) {
+  g <- read_patches(city)
+  if (sf::st_crs(g) != sf::st_crs(crs)) {
+    stop("The patches of ", city, " are in ", sf::st_crs(g)$input,
+         " but the raster is in ", sf::st_crs(crs)$input,
+         "; reproject the raster to match, or drop --patches/--grid.",
+         call. = FALSE)
+  }
+  bb <- sf::st_bbox(c(xmin = e[["xmin"]], ymin = e[["ymin"]],
+                      xmax = e[["xmax"]], ymax = e[["ymax"]]), crs = sf::st_crs(g))
+  keep <- lengths(sf::st_intersects(sf::st_geometry(g), sf::st_as_sfc(bb))) > 0
+  if (!any(keep)) stop("No ", city, " patch falls in this frame.", call. = FALSE)
+  g[keep, ]
+}
+
 #' The So2Sat patch outlines over a window, as a `geom_polygon` layer.
 #'
 #' geom_polygon on extracted coordinates rather than geom_sf, which insists on
@@ -242,14 +268,17 @@ bare_panel <- function(layers, e, ratio, crs_for_labels = NULL, rc = NULL,
 #'   exactly as the split map's panel for that city. Overrides `bbox`.
 #' @param patches,grid overlay the So2Sat patch polygons and the 1280 m split
 #'   grid. Both need a `window` (or a `city`), since both are read per city.
-embedding_raster_plot <- function(path, bbox = NULL, window = NULL,
+embedding_raster_plot <- function(path, bbox = NULL, window = NULL, city = NULL,
                                   patches = FALSE, grid = FALSE,
                                   axes = FALSE, scalebar = FALSE, digits = 1,
                                   panel_in = 6.5, max_cells = MAX_CELLS) {
   w <- if (!is.null(window)) split_window(window) else NULL
   roi <- if (!is.null(w)) w$sfc else if (!is.null(bbox)) bbox_roi(bbox) else NULL
-  if ((patches || grid) && is.null(w)) {
-    stop("--patches and --grid need --window <city>.", call. = FALSE)
+  if (patches || grid) {
+    if (is.null(w) && is.null(city)) {
+      stop("--patches and --grid need --window <city> or --city <city>: the ",
+           "patch and grid outlines are read per city.", call. = FALSE)
+    }
   }
 
   rc <- read_rgb_roi(path, roi, max_cells = max_cells)
@@ -260,10 +289,18 @@ embedding_raster_plot <- function(path, bbox = NULL, window = NULL,
        else as.vector(terra::ext(rc))
   inf <- lcz_scale_info(rc)
 
+  # Overlay frame and source: --window brings both, --bbox names the city and
+  # takes the frame from the raster.
+  ov_city <- if (!is.null(w)) w$city else city
+  ov_bb <- if (!is.null(w)) w$bb else e
+  ov_patches <- if (!(patches || grid)) NULL
+                else if (!is.null(w)) w$patches
+                else frame_patches(city, e, terra::crs(rc))
+
   layers <- list(
     geom_raster(data = rgb_cells(rc), aes(x = x, y = y, fill = .col)),
-    if (grid) grid_layer(w$city, w$bb) else NULL,
-    if (patches) patch_layer(w$patches) else NULL
+    if (grid) grid_layer(ov_city, ov_bb) else NULL,
+    if (patches) patch_layer(ov_patches) else NULL
   )
   code <- terra::crs(rc, describe = TRUE)$code
   message("  ", basename(path), ": ", terra::nlyr(rc), " bands, ",
@@ -374,7 +411,8 @@ if (sys.nframe() == 0L && !interactive()) {
   parser$add_argument("--mosaic", action = "store_true",
                       help = "draw patch polygons from a projection run, not pixels")
   parser$add_argument("--run", default = NULL, help = "projection run (substring)")
-  parser$add_argument("--city", default = NULL, help = "city for --mosaic")
+  parser$add_argument("--city", default = NULL,
+                      help = "city supplying --patches/--grid with --bbox; also the city for --mosaic")
   parser$add_argument("--colour", default = "rgb_pca",
                       help = "rgb_pca (pixel model on pooled vectors) or pca|umap|tsne")
   parser$add_argument("--width", type = "double", default = 6)
@@ -403,7 +441,8 @@ if (sys.nframe() == 0L && !interactive()) {
       args$input,
       bbox = if (is.null(args$bbox)) NULL
              else as.numeric(strsplit(args$bbox, "[, ]+")[[1]]),
-      window = args$window, patches = args$patches, grid = args$grid,
+      window = args$window, city = args$city,
+      patches = args$patches, grid = args$grid,
       axes = args$axes, scalebar = args$scalebar, digits = args$digits,
       panel_in = max(1, args$width - if (args$axes) 0.81 else 0),
       max_cells = args$max_cells)
