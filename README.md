@@ -621,7 +621,18 @@ Without `--pseudo-gpkg` the labeled-only path is byte-identical to before.
 
 Runs inference over an arbitrary bounding box from raw source embedding tiles (no pre-extracted grid files needed). Called automatically at the end of `patch_classification.py` and `semantic_segmentation.py`, but can also be run standalone.
 
-`--model-type` accepts any registered family: segmentation families run a sliding window with Hanning-weighted logit blending; classification families run patch-wise majority vote. Reprojects each tile's predictions into a single output GeoTIFF. For classification, `--save-confidence` additionally writes `<output>_conf.tif` with the soft-voted probability of the winning class per pixel (used by `generate_seg_pseudo_rasters.py`).
+`--model-type` accepts any registered family: segmentation families run a sliding window with Hanning-weighted logit blending, classification families accumulate softmax over overlapping patches. Either way the **per-pixel probability volume is kept**, summed onto the output grid with `reproject(Resampling.sum)`, and argmaxed there — so an output cell is a genuine pixel-count-weighted pool of the fine predictions under it, across tile boundaries as well as within a cell. `--save-confidence` writes `<output>_conf.tif` with the pooled probability of the winning class per cell (used by `generate_seg_pseudo_rasters.py`).
+
+**Output resolution is a choice, not a by-product.** LCZ is a ~100 m urban-climate concept; a classification model predicts one class per 320 m patch and a segmentation model one per 10 m pixel, and neither is the resolution the map should be read at.
+
+| flag | default | what it controls |
+|---|---|---|
+| `--target-res` | 320 m (cls) / **100 m (seg)** | resolution of the primary map |
+| `--patch-physical-stride` | `--target-res` | how far the classification window slides — i.e. how many 320 m patches vote per pixel |
+| `--aggregate` | `soft` | how the fine probabilities pool into a cell |
+| `--no-native` | off | suppress the `<output>_<res>m.tif` sidecar at the embedding's own resolution |
+
+`--aggregate soft` averages the probabilities (a confidence-weighted vote); `majority` counts fine argmax votes, matching the `test_*_100m` eval metrics; `gaussian` applies Demuzere et al. 2020's per-class kernel to the probabilities first. Every run also writes the native-resolution map alongside the primary one, so nothing that depended on the 10 m output loses it. `--coarsen-to` is now a *third*, post-hoc coarsening of the finished primary map (see `coarsen_lcz_map.py`).
 
 Legacy linear-probe checkpoints (fc-only state dict from the retired standalone script) are also handled: pass `--model-type linear_probe --stats-file <cache>/<key>_stats.npz` and the checkpoint is converted on load (numerically identical to the old normalisation). Probes trained via `patch_classification.py --family linear_probe` need no stats file.
 
@@ -639,6 +650,7 @@ python src/infer_roi.py \
     --num-classes 17 \
     --patch-size 64 \
     --overlap 32
+# -> London_seg.tif @ 100 m (primary) + London_seg_10m.tif (native sidecar)
 
 # Classification inference (ResNet)
 python src/infer_roi.py \
@@ -651,8 +663,27 @@ python src/infer_roi.py \
     --bbox "-0.51,51.28,0.33,51.69" \
     --output /maps/acz25/phd-thesis-data/output/lcz-classification/dl/my-run/London_cls.tif \
     --num-classes 17 \
-    --patch-size 32
+    --patch-size 32 \
+    --target-res 100
+# -> London_cls.tif @ 100 m, each cell voting among the overlapping 320 m
+#    patches that cover it (omit --target-res for the 320 m one-cell-per-patch map)
 ```
+
+### `coarsen_bakeoff.py`
+
+Answers "which `--aggregate` and which `--target-res`" with numbers instead of a prior. Runs the checkpoint **once** over a city, then pools that single probability volume every way and scores each result against So2Sat patch labels rasterised onto the same grid — so rows differ only in the pooling.
+
+```bash
+python src/coarsen_bakeoff.py \
+    --checkpoint <run_dir>/resnet_small_GeoTessera_v1.1_global_global-best.pt \
+    --family resnet --preset small \
+    --embedding-name tesserav1.1_global --embedding-dir /tessera/v1.1 \
+    --year 2017 --city Nairobi \
+    --cities-dir ${DATA_DIR}/input/So2Sat-LCZ42/v4/cities \
+    --target-res 320 100 --output-dir data/coarsen_bakeoff
+```
+
+A per-city checkpoint has seen the city it is scored on — pass `--splits val test` to restrict scoring to the patches its own grid split held out, and read the result as "which pooling is better", not "how good is this model".
 
 ---
 

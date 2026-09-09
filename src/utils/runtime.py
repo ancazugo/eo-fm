@@ -140,6 +140,9 @@ def run_city_inference(
     batch_size: int,
     year: str,
     margin_m: float,
+    target_res_m: float | None = None,
+    aggregate: str = "soft",
+    write_native: bool = True,
 ) -> None:
     """Full-ROI inference for each city: writes one prediction GeoTIFF per city.
 
@@ -148,6 +151,10 @@ def run_city_inference(
 
     ``normalize`` must be the same ``(mean, std)`` the model was trained with,
     or the maps are wrong; callers pass the arrays they fed to the datamodule.
+
+    ``target_res_m``/``aggregate``/``write_native`` are forwarded to
+    ``infer_roi``: segmentation runs therefore write a 100 m map plus the
+    native 10 m one, rather than only the 10 m one.
     """
     import geopandas as gpd
     from infer_roi import infer_roi
@@ -183,5 +190,8 @@ def run_city_inference(
             city_name=city,
             title=f"LCZ — {city} — {embedding_name} — {model_type}/{preset}",
             margin_m=margin_m,
+            target_res_m=target_res_m,
+            aggregate=aggregate,
+            write_native=write_native,
         )
         logger.info(f"  {city}: saved {tif_path.name}")

@@ -1,18 +1,25 @@
-"""Resolution-coarsening and denoising filters for finished LCZ prediction maps.
+"""Resolution-coarsening and denoising filters for LCZ prediction maps.
 
-Both filters operate on an already-classified (argmaxed) hard-label raster —
-1-indexed LCZ classes 1-17, ``nodata`` (default 0) elsewhere — not on raw model
-probabilities. ``infer_roi.py`` never carries softmax past the sliding-window
-argmax, and Demuzere et al. 2020 (*Sci Data*, "A global map of local climate
-zones") define their Gaussian-likelihood smoothing the same way: on the
-classified map's per-class binary membership masks, not on raw probabilities.
+``majority_pool`` and ``gaussian_likelihood_filter`` operate on an
+already-classified (argmaxed) hard-label raster — 1-indexed LCZ classes 1-17,
+``nodata`` (default 0) elsewhere. That is the form Demuzere et al. 2020 (*Sci
+Data*, "A global map of local climate zones") define their Gaussian-likelihood
+smoothing on: the classified map's per-class binary membership masks. Use them
+on a map that is already on disk (``coarsen_lcz_map.py``), or as a further
+coarsening of a finished ``infer_roi.py`` output.
+
+``smooth_class_volume`` is the same Gaussian applied one level earlier, to a
+``(num_classes, H, W)`` float likelihood volume rather than to one-hotted hard
+labels. ``infer_roi.py`` now keeps the per-pixel softmax volume its sliding
+windows already build, so ``--aggregate gaussian`` smooths real probabilities;
+the paper smooths binary masks only because a published classified map was all
+it had. ``gaussian_likelihood_filter`` is itself implemented as "one-hot →
+``smooth_class_volume``", so the two agree exactly on hard-label input.
 
 ``majority_pool`` is a plain block-mode filter (same algorithm as
 ``training.evaluate._mode_pool``, ported to numpy with this module's
 1-indexed/``nodata=0`` convention rather than that function's torch/batched/
-``-1``-ignore-indexed one). ``gaussian_likelihood_filter`` is the Demuzere-style
-per-class Gaussian-weighted vote, which additionally anti-alias-smooths before
-any resolution change instead of just mode-pooling already-hard labels.
+``-1``-ignore-indexed one).
 """
 
 from __future__ import annotations
@@ -127,6 +134,40 @@ def majority_pool(
     return pooled
 
 
+def smooth_class_volume(
+    volume: np.ndarray,
+    native_res_m: float,
+    sigma_by_class: dict[int, float] | float = DEFAULT_SIGMA_BY_CLASS,
+) -> np.ndarray:
+    """Per-class Gaussian smoothing of a ``(num_classes, H, W)`` likelihood volume.
+
+    Channel ``c - 1`` holds the evidence for LCZ class ``c`` and is convolved
+    with a Gaussian of that class's own sigma (metres, converted to pixels via
+    ``native_res_m``). Demuzere et al. 2020 apply this to *binary membership
+    masks* one-hotted from a finished hard-label map, which is what
+    ``gaussian_likelihood_filter`` does by calling this on a one-hot volume --
+    but the operation is linear and equally well defined on real per-pixel
+    softmax probabilities, which is what ``infer_roi.py --aggregate gaussian``
+    passes in. The paper smooths masks because a published classified map is
+    all it had to work with.
+    """
+    from scipy import ndimage
+
+    if isinstance(sigma_by_class, (int, float)):
+        sigma_by_class = {
+            c: float(sigma_by_class) for c in range(1, volume.shape[0] + 1)
+        }
+
+    out = np.empty_like(volume, dtype=np.float32)
+    for c in range(1, volume.shape[0] + 1):
+        sigma_px = sigma_by_class.get(c, 100.0) / native_res_m
+        out[c - 1] = ndimage.gaussian_filter(
+            volume[c - 1].astype(np.float32), sigma=sigma_px,
+            mode="constant", cval=0.0,
+        )
+    return out
+
+
 def gaussian_likelihood_filter(
     labels: np.ndarray,
     native_res_m: float,
@@ -157,25 +198,18 @@ def gaussian_likelihood_filter(
     arbitrary near-zero-confidence class -- the same ``weight_sum > 0`` idiom
     ``_sliding_window_seg`` already uses for its own blending.
     """
-    from scipy import ndimage
-
     if out_res_m is not None and out_res_m < native_res_m:
         raise ValueError(
             f"out_res_m ({out_res_m}) must be >= native_res_m ({native_res_m}) "
             "-- this filter coarsens, it does not upsample."
         )
-    if isinstance(sigma_by_class, (int, float)):
-        sigma_by_class = {c: float(sigma_by_class) for c in range(1, num_classes + 1)}
 
     H, W = labels.shape
     valid = labels != nodata
-    likelihood = np.zeros((num_classes, H, W), dtype=np.float32)
+    onehot = np.zeros((num_classes, H, W), dtype=np.float32)
     for c in range(1, num_classes + 1):
-        mask = (labels == c).astype(np.float32)
-        sigma_px = sigma_by_class.get(c, 100.0) / native_res_m
-        likelihood[c - 1] = ndimage.gaussian_filter(
-            mask, sigma=sigma_px, mode="constant", cval=0.0
-        )
+        onehot[c - 1] = labels == c
+    likelihood = smooth_class_volume(onehot, native_res_m, sigma_by_class)
 
     factor = max(1, round(out_res_m / native_res_m)) if out_res_m else 1
     if factor > 1:

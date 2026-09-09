@@ -771,6 +771,9 @@ def main() -> None:
         batch_size=args.batch_size,
         year=args.year,
         margin_m=args.margin_m,
+        target_res_m=args.target_res,
+        aggregate=args.aggregate,
+        write_native=args.write_native,
     )
 
     logger.info(f"Run complete. Outputs in {run_dir}")

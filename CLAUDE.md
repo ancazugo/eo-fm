@@ -74,7 +74,17 @@ python src/embedding_rgb.py image --model <models>/colour_tesserav2_pca.npz \
 python src/infer_roi.py --model-type resnet --preset small \
     --checkpoint <run_dir>/<model>-best.pt \
     --embedding-name tesserav1.1 --embedding-dir ... --year 2017 \
-    --city Nairobi --output out.tif
+    --city Nairobi --output out.tif --target-res 100
+# cls default is a 320 m map (one cell per patch); --target-res 100 slides 100 m
+# and pools the overlapping patches. Segmentation defaults to 100 m and also
+# writes out_10m.tif. --aggregate soft|majority|gaussian picks the pooling rule.
+
+# Which pooling rule / resolution? One GPU pass, every combination scored
+python src/coarsen_bakeoff.py \
+    --checkpoint <run_dir>/<model>-best.pt --family resnet --preset small \
+    --embedding-name tesserav1.1_global --embedding-dir /tessera/v1.1 --year 2017 \
+    --city Nairobi --cities-dir ${DATA_DIR}/input/So2Sat-LCZ42/v4/cities \
+    --target-res 320 100 --output-dir data/coarsen_bakeoff
 ```
 
 `pytest` runs the offline `lcz_labels/tests` and `lcz_train/tests` suites (configured in pyproject; no network needed). No linter is configured. Smoke-test the DL pipelines with `--preset nano --max-epochs 1 --no-wandb` on Nairobi.
@@ -95,8 +105,17 @@ src/
                              #   t-SNE-3 distilled into an MLP head) -> RGB GeoTIFF for any ROI
                              #   (`apply`) or a bare PNG of one extracted .npy (`image`);
                              #   one model per embedding, reused across cities/years
-  infer_roi.py               # ENTRY + library: sliding-window ROI inference for ALL families;
-                             #   legacy fc-only probe checkpoints via --stats-file
+  infer_roi.py               # ENTRY + library: sliding-window ROI inference for ALL families.
+                             #   Keeps the per-pixel probability volume and sums it onto the
+                             #   output grid (Resampling.sum) -> --target-res sets the map's
+                             #   resolution (320 m cls / 100 m seg) independently of the
+                             #   model's own sampling, --aggregate soft|majority|gaussian
+                             #   how cells pool; native-res sidecar written alongside.
+                             #   TileProbSource/build_aggregate_volume/load_model_and_normalize
+                             #   are the reusable pieces; legacy fc-only probes via --stats-file
+  coarsen_bakeoff.py         # ENTRY: scores every --aggregate x --target-res against So2Sat
+                             #   patch labels from ONE GPU pass -> coarsen_bakeoff.csv
+  coarsen_lcz_map.py         # ENTRY: post-hoc coarsen/seam-repair a finished prediction GeoTIFF
   ensemble_eval.py           # ENTRY: multi-checkpoint softmax ensemble on the global split + cached probs
   ensemble_stacking.py       # ENTRY: weighted/calibrated/stacked combining + leave-one-city-out audit
   tta_city_adapt.py          # ENTRY: per-city AdaBN/TENT test-time adaptation (negative result; kept as tool)
@@ -133,6 +152,8 @@ src/
                              #     block-wise pooling cache shared by knn_baseline + projection
     runtime.py               #   resolve_device, resolve_dequantize, detect_in_channels,
                              #   init_run (wandb + run_dir), run_city_inference
+    lcz_smoothing.py         #   repair_seams, majority_pool, smooth_class_volume +
+                             #     gaussian_likelihood_filter (Demuzere et al. 2020)
     constants.py, paths.py, wandb.py, gee.py, grid_split.py, plot_lcz.py, ...
   extract_so2sat_embeddings.py / extract_grid_embeddings.py   # data prep (npy extraction)
   download_embeddings.py / download_missing_coop_tiles.py / create_city_grids.py
@@ -160,7 +181,7 @@ lcz_train/                   # Training harness consuming ONLY the lcz_labels St
 - **One generic training loop** (`training/loop.py`) for both pipelines; the task modules (`training/tasks.py`) own loss, metrics and the monitored metric (`val_f1` cls / `val_miou` seg). Checkpoints store `{"model_state_dict", "epoch", <monitor>}` — only the inner model, so they are architecture-defined and backward compatible.
 - **Dequantize is auto-applied** for `alpha_earth_coop` and `seamless` (`utils.runtime.resolve_dequantize`); `--dequantize` is just a force flag. Seamless expands 13→72 channels (in_channels override).
 - **Label conventions**: classification labels LCZ 1-17 → 0-16; segmentation masks 1-17 → 0-16 with nodata 0 → -1 (`ignore_index=-1` everywhere).
-- **infer_roi** routes by family pipeline: segmentation → Hanning-blended per-pixel logits; classification → patch-wise majority vote. Works directly from raw source tiles (no pre-extracted npy needed).
+- **infer_roi keeps probabilities, and resolution is a choice**: segmentation blends per-pixel logits with a Hanning taper, classification accumulates softmax over overlapping patches — then BOTH sum that `(17, H, W)` volume onto the output grid via `reproject(Resampling.sum)` and argmax there, so a cell is a pixel-count-weighted pool of the fine predictions under it (this replaced nearest-neighbour sampling and last-write-wins tile arbitration). `--target-res` sets the map's resolution — 320 m for classification, **100 m for segmentation** — independently of the sliding stride; `--aggregate soft|majority|gaussian` picks the pooling rule; the native-resolution map is written alongside as `<stem>_<res>m.tif`. Works directly from raw source tiles (no pre-extracted npy needed).
 - **linear_probe is a classification family**: `LinearProbeModel` pools internally and normalises via BatchNorm running stats, so it fits the (B,C,H,W) registry contract and its checkpoints are self-contained (no stats npz). Legacy fc-only checkpoints from the retired standalone script load through `infer_roi.py --stats-file` via `models.linear_probe.load_legacy_linear_probe` (numerically identical conversion). The cosine-kNN and per-class GMM density baselines (no trainable model) stay in `knn_baseline.py` (`--classifier knn|gmm`).
 
 ## Environment

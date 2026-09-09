@@ -81,6 +81,16 @@ def add_inference_args(parser: argparse.ArgumentParser) -> argparse._ArgumentGro
                         "(default: patch_size // 2).")
     g.add_argument("--margin-m", type=float, default=200.0,
                    help="Extra metres clipped around city bbox per tile for edge context (default: 200).")
+    g.add_argument("--target-res", type=float, default=None,
+                   help="Resolution in metres of the primary prediction map. Default: "
+                        "the classification patch stride (320 m), and 100 m for "
+                        "segmentation — LCZ is a ~100 m concept, not a 10 m one.")
+    g.add_argument("--aggregate", choices=["soft", "majority", "gaussian"], default="soft",
+                   help="How per-pixel probabilities are pooled into an output cell: "
+                        "'soft' (default) averages them, 'majority' counts argmax votes, "
+                        "'gaussian' applies Demuzere et al. 2020's per-class kernel first.")
+    g.add_argument("--no-native", dest="write_native", action="store_false",
+                   help="Skip the native-resolution <prediction>_<res>m.tif sidecar.")
     return g
 
 

@@ -246,6 +246,112 @@ routes to the same ~0.702 honest kappa — the zero-training corrector banks ess
 it.** Training aux into the model is worth it only for a stronger single model or the small
 rare-class F1 bump, not for headline kappa.
 
+## 8d. Map resolution and pooling rule (2026-09-09)
+
+`infer_roi.py` used to argmax each sliding window immediately, sample the resulting
+fine label field onto the output grid with `Resampling.nearest`, and let the last tile
+written win any overlap. Three consequences, all invisible in a finished map: with a
+stride finer than the patch (`--patch-physical-stride 100` on 320 m patches) each output
+cell took ONE arbitrary fine pixel rather than pooling the cell; the patch grid is
+anchored per clipped tile while the output grid is anchored to the bbox corner, so the
+sampling phase differed tile to tile; and tile overlaps were decided by iteration order.
+
+Both sliding windows already allocated the full `(17, H, W)` probability volume and threw
+it away at the argmax. They now keep it, and it is summed onto the output grid with
+`reproject(Resampling.sum)` — GDAL's `sum` is area-weighted and mass-conserving, so
+summing the volume *and* its validity mask and dividing gives an exact pixel-count-weighted
+pool, across tile boundaries as well as within a cell. `--target-res` sets the map's
+resolution independently of the stride (320 m classification, **100 m segmentation**, with
+the native-resolution map written alongside), and `--aggregate` picks the pooling rule.
+
+**Bake-off** (`src/coarsen_bakeoff.py`, one GPU pass, every combination pooled from the
+same volume, so rows differ ONLY in the pooling). Nairobi, tessera v1.1_global 2017.
+
+*Classification* — `p2-anchor-tessera-seed0`, stride fixed at 100 m. Nairobi is a culture
+city, so a global-split model has never seen it: these are honest held-out numbers.
+
+| aggregate | 320 m kappa | 100 m kappa | 100 m macro-F1 |
+|---|---|---|---|
+| **soft** | **0.3374** | **0.3351** | **0.1311** |
+| majority | 0.3363 | 0.3344 | 0.1311 |
+| gaussian | 0.3318 | 0.3323 | 0.1274 |
+
+*Segmentation* — two architectures, both nano, both trained on Nairobi's own grid tiles,
+so scored only on the val/test-split patches and read as a RELATIVE comparison:
+
+| aggregate | attention_unet @100 m | attention_unet @10 m | fcn8 @100 m |
+|---|---|---|---|
+| soft | 0.1715 | 0.1702 | 0.3845 |
+| majority | 0.1784 | 0.1758 | **0.3885** |
+| gaussian | **0.2380** | 0.2368 | 0.3653 |
+
+**The pooling rule that wins is model-dependent, not pipeline-dependent.** The tempting
+story after the first segmentation run — "per-pixel models are speckled, so the Demuzere
+kernel is the right default for segmentation" — is wrong: `fcn8` reverses it, with
+`gaussian` coming last. Ranks across the three tests:
+
+| aggregate | cls resnet | seg attention_unet | seg fcn8 | worst case |
+|---|---|---|---|---|
+| soft | 1st | 3rd | 2nd | −0.067 |
+| majority | 2nd | 2nd | 1st | −0.060 |
+| gaussian | 3rd | 1st | 3rd | −0.023 |
+
+- `soft` vs `majority` is a wash everywhere measured (≤0.007 kappa apart in all three).
+  `soft` stays the default: it is never meaningfully worse, and the volume it needs
+  already exists. `majority` is the one that is never worse than 2nd, and it matches
+  `training.evaluate._mode_pool`, so it is the choice if you want inference and the
+  `test_*_100m` metrics to use one operator.
+- `gaussian` is the only rule with a LARGE swing, and it swings both ways: +0.067 kappa on
+  `attention_unet`, −0.023 on `fcn8`, −0.005 on the classifier. It is a rescue for a model
+  whose fine field is fragmented, not a default. On `attention_unet` it cut the class-change
+  rate between adjacent 10 m pixels 5× (4.06% → 0.81%) *and raised the number of classes
+  present from 5 to 8* — the per-class sigmas (water 25 m, natural 75 m, LCZ 8/10 250 m)
+  let a spatially coherent minority class win cells that per-pixel argmax was fragmenting.
+  On an already-smooth model the same kernel erases genuine small classes instead.
+- **Practical rule: run `coarsen_bakeoff.py` once per checkpoint** rather than assuming a
+  rule. It is one GPU pass for the whole sweep.
+- **Coarsening is free or better in every one of the eight comparisons.** 100 m beats 10 m
+  for all three segmentation aggregates, and 100 m costs ~0.002 kappa against 320 m for the
+  classifier while gaining ~0.004 macro-F1. Since scoring a 100 m map against 320 m patch
+  labels structurally cannot reward sub-patch detail, "matches 320 m" is the ceiling this
+  protocol can show — so the resolution choice is free, and 100 m is the defensible default.
+
+**Old code vs new, same checkpoint and ROI, scored identically.** The point of the change
+was decoupling stride from output resolution; this is where the accuracy actually came from:
+
+| config | stride | output | pooling | kappa | tile-loop wall |
+|---|---|---|---|---|---|
+| old default | 320 m | 320 m | nearest | 0.3142 | 4:54 |
+| old `--patch-physical-stride 100` | 100 m | 100 m | nearest | 0.3338 | 15:57 |
+| new `--target-res 100` | 100 m | 100 m | sum | 0.3351 | ~same |
+| new `--target-res 320 --patch-physical-stride 100` | 100 m | 320 m | sum | **0.3374** | ~same |
+
+Decomposed: **+0.0196 from the finer stride**, +0.0013 from pooling instead of
+point-sampling at matched stride, +0.0023 from pooling those fine votes back up into 320 m
+cells. So the pooling arithmetic is very nearly an accuracy no-op — the honest claim for it
+is correctness, not score: it is what makes the last row expressible at all (the old code
+forced output resolution to equal the stride), and it removes the last-write-wins tile
+arbitration and the seams. **The accuracy is in the stride**, at ~3.3x the wall time (not
+the 10.24x the patch count suggests — tile I/O dominates).
+
+This is deliberately NOT wired into the default: the request was a 320 m default with 100 m
+available on request, and tripling every end-of-training inference is a cost decision.
+`--target-res 320 --patch-physical-stride 100` is the combination to reach for when the map
+matters more than the run time.
+
+**Seam repair verified.** London `-0.12,51.44,0.12,51.56` spans 8 tiles across EPSG:32630
+and 32631. Both the 100 m map and the 10 m sidecar come out with **zero interior nodata**,
+zero nodata in the ±4 px band at the lon=0 meridian, and no class-10 border stripe. The
+~0.9% nodata that remains is entirely at the ROI corners, where the WGS84 bbox curves
+inside the rectangular UTM raster. `infer_roi` now logs how many pixels `repair_seams`
+actually filled, so a future regression is visible without a separate analysis.
+
+Caveat on the absolute numbers: tessera v1.1_global 2017 holds only **12 of the 30 tiles**
+over Nairobi's bbox (the whole `36.55` column and the `-1.05`/`-1.15` rows are missing),
+so ~50% of the map is nodata and the scores are on the southeastern half of the city.
+That affects every row equally, so the comparison stands; the absolute kappa does not
+transfer.
+
 ## 9. Open directions (not pursued, in rough order of promise)
 
 - **Label-shift-aware adaptation**: estimate each city's class prior from model predictions
