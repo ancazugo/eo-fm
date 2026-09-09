@@ -6,6 +6,7 @@ dist/
 wheels/
 *.egg-info
 lightning_logs/
+plots/
 # Virtual environments
 .venv
 .env
@@ -23,6 +24,12 @@ logs/
 /data/pseudo_labels*/
 /data/so2sat_grid_tiles_0_1deg.gpkg
 /data/so2sat_city_mgrs_codes.json
+# Per-patch merged table: 397k rows, ~44 MB, rebuildable from the projection
+# runs by `Rscript R/patch_table.R`. Derived data, not a reference input.
+/data/patch_master_table.*
+# Per-patch UN M49 + Koppen lookup: 397k rows, 28 MB, rebuilt in ~4 min by
+# `Rscript R/patch_geo_context.R`. Derived data, not a reference input.
+/data/patch_geo_context.csv
 # Exploratory notebooks (embedded outputs, tens of MB)
 notebooks/
 # LaTeX build artifacts
