@@ -58,6 +58,72 @@ PIE_SIZE <- 0.10
 TILE_CACHE <- Sys.getenv("EOFM_TILE_CACHE",
                          unset = file.path(tempdir(), "maptiles"))
 
+# Tile servers maptiles does not ship. Google publishes no documented tile API,
+# so these are the `mt{1..3}.google.com` endpoints its own web client uses --
+# they work without a key, and their terms of use are Google's, not OSM's, so
+# check them before a figure goes anywhere public. `lyrs` picks the layer:
+# s = satellite, y = hybrid (satellite + labels), m = roads, p = terrain.
+EXTRA_PROVIDERS <- list(
+  "Google.Satellite" = list(lyrs = "s", cit = "Imagery \u00a9 Google"),
+  "Google.Hybrid"    = list(lyrs = "y", cit = "Imagery \u00a9 Google"),
+  "Google.Roads"     = list(lyrs = "m", cit = "Map data \u00a9 Google"),
+  "Google.Terrain"   = list(lyrs = "p", cit = "Map data \u00a9 Google")
+)
+
+# Providers whose URL carries an {apikey}. Stadia hosts the Stamen designs
+# (Toner, Terrain, Watercolor) since Stamen retired its own servers in 2023 and
+# answers 401 without a key; a free key covers this kind of use. Set
+# STADIA_API_KEY (or pass --basemap-apikey) and the Stamen styles work like any
+# other provider.
+# A list, not a named vector: `[[` on an absent name must return NULL (most
+# providers need no key), and a character vector errors instead.
+# The first name in each entry is this repo's; the rest are the ones maptiles
+# reads by itself, so an environment already set up for it keeps working.
+API_KEY_ENV <- list(
+  Stadia           = c("STADIA_API_KEY", "STADIA_MAPS"),
+  Thunderforest    = c("THUNDERFOREST_API_KEY", "THUNDERFOREST_MAPS"),
+  Jawg             = "JAWG_API_KEY",
+  MapBox           = "MAPBOX_API_KEY",
+  OpenWeatherMap   = "OPENWEATHERMAP_API_KEY",
+  HERE             = "HERE_API_KEY",
+  GeoportailFrance = "GEOPORTAIL_API_KEY")
+
+#' Resolve a provider name to whatever get_tiles() needs.
+#'
+#' A maptiles name passes straight through; one of the EXTRA_PROVIDERS is built
+#' on the spot with create_provider().
+resolve_provider <- function(name) {
+  if (!is.null(EXTRA_PROVIDERS[[name]])) {
+    e <- EXTRA_PROVIDERS[[name]]
+    return(maptiles::create_provider(
+      name = name,
+      # The trailing "#.jpg" is a URL fragment -- never sent to the server --
+      # and is there only so maptiles can name the cache file. Its
+      # get_extension() greps the URL for an image suffix and, finding none,
+      # falls through without assigning, so `return(ext)` picks up terra::ext
+      # and the download dies with "cannot coerce type 'closure'". Google's
+      # tile endpoint carries no suffix of its own.
+      url = paste0("https://mt{s}.google.com/vt/lyrs=", e$lyrs,
+                   "&x={x}&y={y}&z={z}#.jpg"),
+      sub = c("1", "2", "3"), citation = e$cit))
+  }
+  name
+}
+
+#' The API key for a provider, from the argument or the environment.
+#'
+#' Returns "" when none is needed or none is set -- get_tiles() only reads it
+#' for a provider whose URL carries {apikey}, so an empty string is harmless
+#' everywhere else.
+resolve_apikey <- function(name, apikey = NULL) {
+  if (!is.null(apikey) && nzchar(apikey)) return(apikey)
+  vars <- API_KEY_ENV[[sub("\\..*$", "", name)]]
+  if (is.null(vars)) return("")
+  set <- Sys.getenv(vars, unset = "")
+  set <- set[nzchar(set)]
+  if (length(set)) set[[1]] else ""
+}
+
 # Composition-strip thickness, as a fraction of the map's width. A rule beside
 # the map, not a second figure: at the default 7 in width this is about 3.5 mm.
 DIST_THICKNESS <- 0.02
@@ -378,17 +444,23 @@ scalebar_layers <- function(rc, corner = c("br", "bl", "tr", "tl"),
 #'   through and lightens it, which is one way to keep the class colours on top
 #'   reading as the subject.
 basemap_layer <- function(rc, provider = "OpenStreetMap", zoom = NULL,
-                          alpha = 1, cachedir = TILE_CACHE) {
+                          alpha = 1, cachedir = TILE_CACHE, apikey = NULL) {
   if (!requireNamespace("maptiles", quietly = TRUE)) {
     warning("maptiles is not installed; skipping the basemap.", call. = FALSE)
     return(NULL)
   }
+  key <- resolve_apikey(provider, apikey)
   dir.create(cachedir, recursive = TRUE, showWarnings = FALSE)
-  tl <- try(maptiles::get_tiles(rc, provider = provider, crop = TRUE,
-                                zoom = zoom, cachedir = cachedir),
+  tl <- try(maptiles::get_tiles(rc, provider = resolve_provider(provider),
+                                crop = TRUE, zoom = zoom, cachedir = cachedir,
+                                apikey = key),
             silent = TRUE)
   if (inherits(tl, "try-error") || is.null(tl)) {
+    needs_key <- !nzchar(key) && !is.null(API_KEY_ENV[[sub("\\..*$", "", provider)]])
     warning("Could not fetch ", provider, " tiles; drawing without a basemap. ",
+            if (needs_key) paste0(provider, " needs an API key: set $",
+                                  API_KEY_ENV[[sub("\\..*$", "", provider)]][[1]],
+                                  " or pass --basemap-apikey. "),
             if (inherits(tl, "try-error")) conditionMessage(attr(tl, "condition")),
             call. = FALSE)
     return(NULL)
@@ -684,6 +756,9 @@ attach_dist_bar <- function(p, df, side = c("bottom", "top", "left", "right"),
 #' @param basemap_provider maptiles provider name.
 #' @param basemap_zoom tile zoom level, or NULL to derive it from the extent.
 #' @param basemap_alpha opacity of the backdrop.
+#' @param basemap_apikey key for a provider that needs one (the Stadia-hosted
+#'                  Stamen styles, Thunderforest, Jawg, ...); defaults to the
+#'                  provider family's environment variable.
 #' @param guppd     overlay the GUPPD settlement outlines. Off by default.
 #' @param guppd_highlight settlement to draw prominently while the rest are
 #'                  dimmed. NULL picks the largest over the ROI; NA draws them
@@ -705,6 +780,7 @@ lcz_raster_plot <- function(path, bbox, legend = FALSE, scalebar = TRUE,
                             basemap = FALSE,
                             basemap_provider = "OpenStreetMap",
                             basemap_zoom = NULL, basemap_alpha = 1,
+                            basemap_apikey = NULL,
                             guppd_highlight = NULL, resolution = TRUE,
                             distribution = c("none", "pie", "bar"),
                             dist_side = "bottom", pie_corner = "bl",
@@ -758,7 +834,8 @@ lcz_raster_plot <- function(path, bbox, legend = FALSE, scalebar = TRUE,
   # Added before the class layer, so it draws under it.
   if (basemap) {
     p <- p + basemap_layer(rc, provider = basemap_provider,
-                           zoom = basemap_zoom, alpha = basemap_alpha)
+                           zoom = basemap_zoom, alpha = basemap_alpha,
+                           apikey = basemap_apikey)
   }
   p <- p +
     geom_raster() +
@@ -902,6 +979,11 @@ if (sys.nframe() == 0L && !interactive()) {
                       help = "tile zoom level (default: derived from the extent)")
   parser$add_argument("--basemap-alpha", type = "double", default = 1,
                       dest = "basemap_alpha", help = "opacity of the backdrop")
+  parser$add_argument("--basemap-apikey", default = NULL, dest = "basemap_apikey",
+                      help = paste("key for a provider that needs one; defaults",
+                                   "to $STADIA_API_KEY and friends"))
+  parser$add_argument("--list-basemaps", action = "store_true", dest = "list_basemaps",
+                      help = "print the available provider names and exit")
   parser$add_argument("--guppd", action = "store_true",
                       help = "overlay the GUPPD settlement outlines")
   parser$add_argument("--guppd-highlight", default = NULL, dest = "guppd_highlight",
@@ -933,6 +1015,17 @@ if (sys.nframe() == 0L && !interactive()) {
   # flag as "--bbox=..." first, which argparse does accept, so both spellings
   # work from the shell.
   argv <- commandArgs(trailingOnly = TRUE)
+  # Handled before parsing: --input and --bbox are required, and listing the
+  # providers should not need a raster to list them against.
+  if ("--list-basemaps" %in% argv) {
+    keyed <- names(API_KEY_ENV)
+    for (n in c(names(EXTRA_PROVIDERS), names(maptiles::get_providers()))) {
+      var <- API_KEY_ENV[[sub("\\..*$", "", n)]]
+      cat(n, if (!is.null(var)) paste0("   [needs $", var[[1]], "]") else "",
+          "\n", sep = "")
+    }
+    quit(save = "no")
+  }
   glue <- which(argv %in% c("--bbox", "--width", "--dpi", "--max-cells"))
   glue <- glue[glue < length(argv) & grepl("^-", argv[pmin(glue + 1L, length(argv))])]
   if (length(glue)) {
@@ -952,6 +1045,7 @@ if (sys.nframe() == 0L && !interactive()) {
                   basemap_provider = args$basemap_provider,
                   basemap_zoom = args$basemap_zoom,
                   basemap_alpha = args$basemap_alpha,
+                  basemap_apikey = args$basemap_apikey,
                   guppd = args$guppd,
                   guppd_highlight = if (is.null(args$guppd_highlight)) NULL
                                     else if (tolower(args$guppd_highlight) == "none") NA
