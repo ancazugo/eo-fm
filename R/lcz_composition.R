@@ -119,14 +119,70 @@ lcz_composition_plots <- function(df, width = 7, title = NULL, labels = FALSE) {
          transparent_patchwork())
 }
 
+#' Every LCZ colour once, at equal width: the palette itself, as the same bar.
+#'
+#' Not a composition -- nothing is being composed, and the shares are equal by
+#' construction rather than measured. It is the key to the other two marks,
+#' drawn as the same mark so it can sit beside them: the classes in canonical
+#' 1..G order, each segment identical, no text.
+#'
+#' Squareness is the caller's job, and it is exact rather than approximate. The
+#' unlabelled bar spans 0..1 along its axis and fills the panel across, whatever
+#' BAR_T says, so with `n` equal segments the panel is `n` cells wide and one
+#' cell tall -- the segments are square precisely when the figure is `n` times
+#' as wide as it is tall. lcz_palette_size() picks a figure that also lands on
+#' whole pixels, which a ratio alone does not guarantee.
+lcz_palette_bar <- function(codes = LCZ_TABLE$code, title = NULL,
+                            border_lw = 0.25) {
+  i <- match(codes, LCZ_TABLE$code)
+  if (anyNA(i)) {
+    stop("Not an LCZ code: ", paste(codes[is.na(i)], collapse = ", "),
+         call. = FALSE)
+  }
+  df <- tibble::tibble(
+    key   = factor(LCZ_TABLE$alt_code[i], levels = LCZ_TABLE$alt_code),
+    share = 1 / length(codes),
+    n     = 1)
+  composition_bar(df, LCZ_COLOURS, side = "bottom", horizontal = TRUE,
+                  labels = FALSE, border_lw = border_lw, title = title)
+}
+
+#' Figure size, in inches, that renders `n` segments as `cell_px` exact squares.
+#'
+#' Sized from the pixel up rather than from the inch down: ggsave rounds
+#' width x dpi to whole pixels, so asking for a 7 in bar at 400 dpi gives 2800 px
+#' over 17 segments = 164.7 px each, and the rounding lands unevenly -- some
+#' squares come out a pixel wider than others. Choosing the cell size first
+#' makes every segment identical and the total exact.
+lcz_palette_size <- function(n, cell_px = 120, dpi = 400) {
+  # The quarter-pixel is not a fudge, it is the fix for a real off-by-one:
+  # n * cell_px / dpi is a decimal that binary floating point cannot hold
+  # exactly (17 * 120 / 400 = 5.1 comes back as 5.09999...), and the device
+  # multiplies by dpi and truncates, so the canvas lands one pixel short and one
+  # segment is drawn 119 px wide while the rest are 120. A quarter of a pixel is
+  # too small to change the answer under either truncation or rounding, and big
+  # enough to absorb the representation error.
+  eps <- 0.25 / dpi
+  list(width = n * cell_px / dpi + eps, height = cell_px / dpi + eps, dpi = dpi)
+}
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 if (sys.nframe() == 0L && !interactive()) {
   suppressPackageStartupMessages(library(argparse))
   parser <- ArgumentParser(
     description = "LCZ class composition of a raster, as a pie and a bar.")
-  parser$add_argument("--input", required = TRUE,
+  parser$add_argument("--input", default = NULL,
                       help = "LCZ GeoTIFF (classes 1-17, nodata 0)")
+  parser$add_argument("--palette", action = "store_true",
+                      help = paste("draw the palette itself instead: every LCZ",
+                                   "colour once, equal widths, each segment a",
+                                   "perfect square. Needs no --input"))
+  parser$add_argument("--cell-px", type = "integer", default = 120,
+                      dest = "cell_px",
+                      help = "square size in pixels for --palette (default 120)")
+  parser$add_argument("--no-border", action = "store_true", dest = "no_border",
+                      help = "drop the grey segment outline: colours only")
   parser$add_argument("--name", required = TRUE, help = "output stem under plots/")
   parser$add_argument("--bbox", default = NULL,
                       help = "restrict to west,south,east,north in degrees")
@@ -149,6 +205,21 @@ if (sys.nframe() == 0L && !interactive()) {
     argv <- argv[-(glue + 1L)]
   }
   args <- parser$parse_args(argv)
+
+  if (args$palette) {
+    n <- nrow(LCZ_TABLE)
+    sz <- lcz_palette_size(n, cell_px = args$cell_px, dpi = args$dpi)
+    p <- lcz_palette_bar(title = args$title,
+                         border_lw = if (args$no_border) 0 else 0.25)
+    message("  palette bar: ", n, " classes x ", args$cell_px, " px = ",
+            n * args$cell_px, "x", args$cell_px, " px")
+    save_plot(p, args$name, width = sz$width, height = sz$height,
+              dpi = sz$dpi, subdir = PLOT_DIR_MAPS)
+    quit(save = "no")
+  }
+  if (is.null(args$input)) {
+    stop("--input is required (or use --palette)", call. = FALSE)
+  }
 
   bbox <- if (is.null(args$bbox)) NULL else
     as.numeric(strsplit(args$bbox, "[, ]+")[[1]])

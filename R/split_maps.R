@@ -86,10 +86,13 @@ patch_role <- function(dataset, split, mode = c("global", "orig_test")) {
   factor(role, levels = SPLIT_LEVELS)
 }
 
-# GDAL open options for the city GeoPackages. They live on a read-only mount, so
-# SQLite cannot take even a shared lock on them and a plain read fails outright
-# with "database is locked" -- NOLOCK=YES is the narrow fix (do not lock),
-# rather than IMMUTABLE=YES, which additionally promises the file never changes.
+# GDAL open options for the city GeoPackages. Reading one fails outright with
+# "database is locked" whenever $DATA_DIR has no free space -- SQLite needs
+# writable state even to take a shared lock, and reports the failure as a lock
+# rather than as a full disk, which sends you looking for a process that is not
+# there. NOLOCK=YES skips the locking and reads anyway; it is harmless when the
+# disk is healthy, and narrower than IMMUTABLE=YES, which would additionally
+# promise the file never changes. If this ever matters again, check `df` first.
 GPKG_OPTIONS <- "NOLOCK=YES"
 
 #' All the So2Sat patches of one city.
