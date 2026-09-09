@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 # Cap BLAS / numba thread pools BEFORE numpy / sklearn / numba import. On
@@ -52,9 +53,10 @@ _src = Path(__file__).parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from datasets.registry import EMBEDDING_REGISTRY
+from datasets.registry import EMBEDDING_REGISTRY, get_nodata_predicate
 from datasets.so2sat import build_so2sat_items
 from knn_baseline import extract_and_cache
+from utils.pooling_features import POOLING_RECIPES
 from utils.constants import lcz_dict
 from utils.geo_lookup import CITY_TO_CONTINENT, CITY_TO_COUNTRY, assign_city
 from utils.runtime import init_run, resolve_dequantize
@@ -111,6 +113,11 @@ def build_metadata(all_items: list[tuple], gpkg: Path, bounds_csv: Path) -> pd.D
         logger.warning(f"{n_missing} rows had no GPKG centroid match")
 
     coords = meta[["_cx", "_cy"]].to_numpy()
+    # patch_id restarts at 000000 in each split, so (dataset, patch_id) is the
+    # only unique key. Everything downstream joins and links on `uid`.
+    meta["uid"] = meta["dataset"] + "/" + meta["patch_id"]
+    meta["lon"] = meta["_cx"]
+    meta["lat"] = meta["_cy"]
     meta["city"] = assign_city(coords, bounds_csv)
     meta["country"] = meta["city"].map(CITY_TO_COUNTRY)
     meta["continent"] = meta["city"].map(CITY_TO_CONTINENT)
@@ -119,6 +126,81 @@ def build_metadata(all_items: list[tuple], gpkg: Path, bounds_csv: Path) -> pd.D
         lambda c: f"LCZ {int(c)}: {lcz_dict[int(c)]['name']}"
     )
     return meta
+
+
+# ── R exports ─────────────────────────────────────────────────────────────────
+
+SCHEMA_VERSION = 2
+
+# The R stack (conda `r-environment`) has arrow, nanoparquet, terra and
+# data.table, but NOT scattermore, ggrastr or hexbin — so 400k geom_point rows
+# are not viable there. These two artefacts are what make the R figures instant.
+
+
+def stable_subsample_mask(uids: pd.Series, per_mille: int) -> np.ndarray:
+    """Deterministic subsample by hash of ``uid``, not by RNG draw.
+
+    A per-run RNG draw gives each run *different* patches, so two runs' subsamples
+    cannot be joined. Hashing the uid selects the same patches in every run and
+    for every embedding, which is what lets R put v2 and coop side by side
+    row-for-row and draw paired plots.
+    """
+    from zlib import crc32
+
+    h = uids.map(lambda u: crc32(u.encode()) % 1000).to_numpy()
+    return h < per_mille
+
+
+def density_grid(df: pd.DataFrame, method: str, facets: Sequence[str],
+                 bins: int) -> pd.DataFrame:
+    """Bin a projection to a fixed grid, per facet value.
+
+    Long format (`method, facet, facet_value, bin_x, bin_y, n`) so ggplot can
+    draw it with geom_raster/geom_tile instead of plotting every point.
+    """
+    x, y = f"{method}_x", f"{method}_y"
+    sub = df.dropna(subset=[x, y])
+    if sub.empty:
+        return pd.DataFrame()
+    # One shared extent across facets, or the panels would not be comparable.
+    xe = np.linspace(sub[x].min(), sub[x].max(), bins + 1)
+    ye = np.linspace(sub[y].min(), sub[y].max(), bins + 1)
+    xc, yc = (xe[:-1] + xe[1:]) / 2, (ye[:-1] + ye[1:]) / 2
+
+    out = []
+    for facet in facets:
+        if facet not in sub.columns:
+            continue
+        for value, grp in sub.groupby(facet, observed=True):
+            counts, _, _ = np.histogram2d(grp[x], grp[y], bins=[xe, ye])
+            nz = np.argwhere(counts > 0)
+            if not len(nz):
+                continue
+            out.append(pd.DataFrame({
+                "method": method, "facet": facet, "facet_value": str(value),
+                "bin_x": xc[nz[:, 0]], "bin_y": yc[nz[:, 1]],
+                "n": counts[nz[:, 0], nz[:, 1]].astype(int),
+            }))
+    return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
+
+
+def write_r_exports(meta: pd.DataFrame, run_dir: Path, cache_key: str, args) -> None:
+    """A hash-stable subsample plus a pre-binned density grid, both parquet."""
+    keep = stable_subsample_mask(meta["uid"], args.r_sample_per_mille)
+    sub = meta.loc[keep].drop(columns=["_cx", "_cy"], errors="ignore")
+    sub_path = run_dir / f"projection_{cache_key}_sample.parquet"
+    sub.to_parquet(sub_path, index=False)
+    logger.info(
+        f"R sample → {sub_path.name} ({len(sub)} rows, "
+        f"{args.r_sample_per_mille / 10:.1f}% by uid hash — stable across runs)")
+
+    grids = [density_grid(meta, m, FACETS, args.r_density_bins)
+             for m in args.methods if f"{m}_x" in meta.columns]
+    grids = [g for g in grids if not g.empty]
+    if grids:
+        gpath = run_dir / f"projection_{cache_key}_density.parquet"
+        pd.concat(grids, ignore_index=True).to_parquet(gpath, index=False)
+        logger.info(f"R density grid → {gpath.name}")
 
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
@@ -277,12 +359,21 @@ def main() -> None:
                    help="Embedding type — controls auto-dequantization.")
     g.add_argument("--dequantize", action="store_true",
                    help="Force dequantize (auto for alpha_earth_coop and seamless).")
+    g.add_argument("--patch-manifest", type=Path, default=None,
+                   help="Restrict to the patches in this manifest parquet, so runs on "
+                        "different embeddings cover the same population.")
+    g.add_argument("--max-invalid-frac", type=float, default=1.0,
+                   help="Drop patches whose nodata fraction exceeds this.")
     g.add_argument("--bounds-csv", type=Path,
                    default=_src.parent / "data" / "so2sat_guppd_bounds.csv",
                    help="GUPPD city bounds CSV for nearest-centroid city assignment.")
 
     g = parser.add_argument_group("Features")
-    g.add_argument("--pooling", choices=["gap", "mean_std"], default="gap")
+    g.add_argument("--pooling", choices=sorted(POOLING_RECIPES), default="gap")
+    g.add_argument("--nodata-mask", action="store_true",
+                   help="Exclude nodata pixels from pooling. Off by default so "
+                        "existing caches stay valid.")
+    g.add_argument("--pool-workers", type=int, default=1)
     g.add_argument("--cache-dir", type=Path, default=None,
                    help="Feature cache directory (default: {output_dir}/cache).")
     g.add_argument("--no-cache", action="store_true")
@@ -298,6 +389,23 @@ def main() -> None:
                    help="Balanced subsample size per LCZ class for t-SNE (it doesn't scale).")
     g.add_argument("--plot-max-points", type=int, default=80_000,
                    help="Random subsample for rendering only (parquet keeps all rows).")
+    g.add_argument("--fit-3d", action="store_true",
+                   help="Additionally fit UMAP/t-SNE at 3 components, saved as "
+                        "umap_1..3 / tsne_1..3, so those methods can drive an RGB "
+                        "the way pca_1..3 already can. A SECOND fit, not a slice of "
+                        "one: the first two axes of a 3-D UMAP are not a 2-D UMAP. "
+                        "Roughly doubles the UMAP time (~45-60 min per fit at 400k).")
+    g.add_argument("--pca-keep", type=int, default=3,
+                   help="How many PCs to write as pca_1..pca_k. 3 is what an RGB "
+                        "scatter needs.")
+
+    g = parser.add_argument_group("R export")
+    g.add_argument("--r-sample-per-mille", type=int, default=100,
+                   help="Per-mille of patches in the R subsample, chosen by a stable "
+                        "hash of uid so every run samples the SAME patches and R can "
+                        "join runs row-for-row. 100 = 10%%.")
+    g.add_argument("--r-density-bins", type=int, default=300,
+                   help="Grid resolution for the pre-binned density export.")
 
     g = parser.add_argument_group("Diagnostics")
     g.add_argument("--no-diagnostics", action="store_true")
@@ -323,17 +431,22 @@ def main() -> None:
         args.so2sat_dir, args.output_name, args.year,
         global_split=args.global_split, global_gpkg=args.global_gpkg,
         cities_dir=args.cities_dir, cities=args.cities, label_col=args.label_col,
+        patch_manifest=args.patch_manifest, max_invalid_frac=args.max_invalid_frac,
     )
-    split_counts = {s: sum(1 for _, _, sp in all_items if sp == s) for s in _SPLITS}
+    # PatchItem is a dataclass, not a tuple — attribute access, not unpacking.
+    split_counts = {s: sum(1 for it in all_items if it.split == s) for s in _SPLITS}
     logger.info(f"Total patches: {len(all_items)}  splits: {split_counts}")
 
     # ── Features (reuse knn_baseline cache) ───────────────────────────────────
     run_label = "global" if args.global_split else "_".join(
-        sorted({sp for _, _, sp in all_items}))
+        sorted({it.split for it in all_items}))
     cache_dir = args.cache_dir or (args.output_dir / "cache")
     cache_key = f"{run_label}_{args.output_name}_{args.pooling}"
     feats, _, _, _ = extract_and_cache(
         all_items, args.pooling, dequantize_fn, cache_dir, cache_key, no_cache=args.no_cache,
+        nodata_predicate=(get_nodata_predicate(args.embedding_name)
+                          if args.nodata_mask else None),
+        workers=args.pool_workers,
     )
     present = [s for s in _SPLITS if feats[s].shape[0] > 0]
     X = np.concatenate([feats[s] for s in present], axis=0)
@@ -355,7 +468,11 @@ def main() -> None:
     X_pca = pca.fit_transform(Xs)
     cumvar = float(np.cumsum(pca.explained_variance_ratio_)[-1] * 100)
     logger.info(f"PCA → {n_comp} comps; cumulative variance {cumvar:.1f}%")
+    # pca_x/pca_y are PC1/PC2 and stay as aliases for the existing readers;
+    # pca_1..pca_k are the canonical names, and PC3 is what an RGB scatter needs.
     meta["pca_x"], meta["pca_y"] = X_pca[:, 0], X_pca[:, 1]
+    for i in range(min(args.pca_keep, n_comp)):
+        meta[f"pca_{i + 1}"] = X_pca[:, i]
 
     if "umap" in args.methods:
         import umap
@@ -364,6 +481,20 @@ def main() -> None:
                             n_components=2, random_state=args.seed, verbose=True)
         XY = reducer.fit_transform(X_pca)
         meta["umap_x"], meta["umap_y"] = XY[:, 0], XY[:, 1]
+
+        if args.fit_3d:
+            # A separate 3-component fit rather than the first two axes of it.
+            # The first two components of a 3-D UMAP are NOT a 2-D UMAP -- the
+            # layout is optimised for the dimensionality it was asked for -- so
+            # reusing one for both would quietly degrade the scatter. Two fits
+            # keeps the scatter honest and gives three axes for RGB.
+            logger.info("Running UMAP again at 3 components (for RGB) …")
+            XYZ = umap.UMAP(
+                n_neighbors=args.umap_n_neighbors, min_dist=args.umap_min_dist,
+                n_components=3, random_state=args.seed, verbose=True,
+            ).fit_transform(X_pca)
+            for i in range(3):
+                meta[f"umap_{i + 1}"] = XYZ[:, i]
 
     if "tsne" in args.methods:
         rng = np.random.default_rng(args.seed)
@@ -382,6 +513,17 @@ def main() -> None:
         meta.loc[keep, "tsne_x"] = XY[:, 0]
         meta.loc[keep, "tsne_y"] = XY[:, 1]
 
+        if args.fit_3d:
+            # Same reasoning as UMAP. barnes_hut supports up to 3 components,
+            # which is exactly the ceiling needed here.
+            logger.info("Running t-SNE again at 3 components (for RGB) …")
+            XYZ = TSNE(n_components=3, method="barnes_hut",
+                       perplexity=args.tsne_perplexity,
+                       random_state=args.seed, verbose=1).fit_transform(X_pca[keep])
+            for i in range(3):
+                meta[f"tsne_{i + 1}"] = np.nan
+                meta.loc[keep, f"tsne_{i + 1}"] = XYZ[:, i]
+
     # ── Output dir + persist ──────────────────────────────────────────────────
     run_cfg = dict(task="embedding_projection", embedding=args.output_name,
                    pooling=args.pooling, methods=args.methods, pca_dim=n_comp,
@@ -391,9 +533,24 @@ def main() -> None:
                        wandb_project=args.wandb_project, wandb_entity=args.wandb_entity,
                        no_wandb=args.no_wandb)
 
+    meta["embedding"] = args.output_name
+    meta["embedding_name"] = args.embedding_name
+    meta["pooling"] = args.pooling
+    meta["year"] = str(args.year)
+    meta["run_label"] = run_label
+    meta["schema_version"] = SCHEMA_VERSION
+
     parquet_path = run_dir / f"projection_{cache_key}.parquet"
     meta.drop(columns=["_cx", "_cy"]).to_parquet(parquet_path)
     logger.info(f"Saved projection table → {parquet_path}")
+
+    pd.DataFrame({
+        "component": np.arange(1, n_comp + 1),
+        "explained_variance_ratio": pca.explained_variance_ratio_,
+        "cumulative": np.cumsum(pca.explained_variance_ratio_),
+    }).to_csv(run_dir / "pca_explained_variance.csv", index=False)
+
+    write_r_exports(meta, run_dir, cache_key, args)
 
     # ── Plots (render on a subsample for speed/size) ──────────────────────────
     if len(meta) > args.plot_max_points:
