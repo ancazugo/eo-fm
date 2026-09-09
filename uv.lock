@@ -899,7 +899,7 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "momepy", specifier = ">=1.0.0" },
-    { name = "numpy", specifier = ">=2.4.6" },
+    { name = "numpy", specifier = ">=2.4.6,<2.5" },
     { name = "osm-rasterizer", specifier = ">=0.3.0" },
     { name = "osmnx", specifier = ">=2.1" },
     { name = "pandas", specifier = ">=3.0.3" },
