@@ -39,6 +39,30 @@ python src/knn_baseline.py --so2sat-dir ... --cities Nairobi \
     --output-name GeoTessera_v1.1 --year 2017 --embedding-name tesserav1.1 \
     --pooling gap --output-dir ...   # --classifier gmm for per-class GMM density
 
+# Which patch representation? Scores pooling recipes by probe/kNN kappa on held-out cities
+python src/pooling_bakeoff.py \
+    --so2sat-dir ${DATA_DIR}/input/So2Sat-LCZ42/v4 \
+    --embedding tesserav2:GeoTessera_v2 --embedding alpha_earth_coop:AlphaEarthCoop \
+    --year 2017 --recipes gap mean_std center quantile ring rich \
+    --masked both --common-patches --workers 24 \
+    --output-dir ${DATA_DIR}/output/lcz-classification/embedding_viz
+# -> pooling_bakeoff.csv (long format, written incrementally). `ring`/`rich` are the
+#    only recipes that are NOT permutation-invariant, so they are the ones that can
+#    detect within-patch layout; silhouette metrics are logged as descriptive only.
+
+# Embedding rasters as RGB, through a colour model fitted once and reused
+python src/embedding_rgb.py fit --method pca \
+    --so2sat-dir ${DATA_DIR}/input/So2Sat-LCZ42/v4 \
+    --output-name GeoTessera_v2 --embedding-name tesserav2 --year 2017 \
+    --tile-dir /tessera/v2/large_student --model-dir <models>
+python src/embedding_rgb.py apply --model <models>/colour_tesserav2_pca.npz \
+    --embedding-dir /tessera/v2/large_student --embedding-name tesserav2 \
+    --year 2017 --city Nairobi --output nairobi.tif
+# --method umap|tsne distil the manifold into an MLP head so it can be applied to a
+# raster at all; their axes are non-metric, so read those colours qualitatively.
+# The persisted stretch is what makes two cities comparable; --local-stretch trades
+# that away for contrast within one image.
+
 # Standalone ROI inference from a checkpoint
 python src/infer_roi.py --model-type resnet --preset small \
     --checkpoint <run_dir>/<model>-best.pt \
@@ -57,6 +81,12 @@ src/
   patch_classification.py    # ENTRY: patch classification pipeline
   semantic_segmentation.py   # ENTRY: segmentation pipeline (+--family unet|resnet_unet)
   knn_baseline.py            # ENTRY: cosine-kNN / per-class GMM density baselines on cached pooled features
+  pooling_bakeoff.py         # ENTRY: which patch representation? scores every pooling recipe
+                             #   (gap/mean_std/center/quantile/ring/rich) x nodata masking by
+                             #   linear-probe + kNN kappa on held-out cities -> pooling_bakeoff.csv
+  embedding_rgb.py           # ENTRY + library: fitted per-PIXEL colour models (PCA-3, or UMAP-3/
+                             #   t-SNE-3 distilled into an MLP head) -> RGB GeoTIFF for any ROI;
+                             #   one model per embedding, reused across cities/years
   infer_roi.py               # ENTRY + library: sliding-window ROI inference for ALL families;
                              #   legacy fc-only probe checkpoints via --stats-file
   ensemble_eval.py           # ENTRY: multi-checkpoint softmax ensemble on the global split + cached probs
@@ -83,17 +113,21 @@ src/
     augment.py               #   per-class table, confusion matrix PNG; flips/rot90/noise augmentation
   datasets/
     registry.py              #   EMBEDDING_REGISTRY metadata (in_channels, tile filename patterns)
-    tiles.py                 #   build_tile_index/open_tile/crop_patch for raw source tiles
+    tiles.py                 #   build_tile_index/open_tile/crop_patch for raw source tiles;
+                             #     also owns open_and_clip/setup_output/meters_to_out_res, the ROI
+                             #     geometry shared with infer_roi (kept torch-free on purpose)
     so2sat.py                #   patch items, PatchDataset/PatchDataModule, build_so2sat_items
     grid_tiles.py            #   grid-tile items, GridSegDataset/GridSegDataModule
     downloaders.py           #   GEE / geotessera / source.coop downloaders
   utils/
+    pooling_features.py      #   POOL_BLOCKS/POOLING_RECIPES, pool_blocks, extract_blocks_and_cache —
+                             #     block-wise pooling cache shared by knn_baseline + projection
     runtime.py               #   resolve_device, resolve_dequantize, detect_in_channels,
                              #   init_run (wandb + run_dir), run_city_inference
     constants.py, paths.py, wandb.py, gee.py, grid_split.py, plot_lcz.py, ...
   extract_so2sat_embeddings.py / extract_grid_embeddings.py   # data prep (npy extraction)
   download_embeddings.py / download_missing_coop_tiles.py / create_city_grids.py
-  dequantize_embeddings.py / mosaic_to_tessera11.py / plot_embeddings.py
+  dequantize_embeddings.py / mosaic_to_tessera11.py
 lcz_labels/                  # Overture/OSM LCZ pseudo-labelling package (typer CLI, pydantic
                              #   config, offline pytest suite; see lcz_labels/README.md).
                              #   Block-based (momepy enclosures on the road/rail/water
