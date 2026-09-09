@@ -86,6 +86,12 @@ patch_role <- function(dataset, split, mode = c("global", "orig_test")) {
   factor(role, levels = SPLIT_LEVELS)
 }
 
+# GDAL open options for the city GeoPackages. They live on a read-only mount, so
+# SQLite cannot take even a shared lock on them and a plain read fails outright
+# with "database is locked" -- NOLOCK=YES is the narrow fix (do not lock),
+# rather than IMMUTABLE=YES, which additionally promises the file never changes.
+GPKG_OPTIONS <- "NOLOCK=YES"
+
 #' All the So2Sat patches of one city.
 #'
 #' The geometry is the real 320 m patch polygon, not a stand-in: the squares are
@@ -97,7 +103,7 @@ read_patches <- function(city) {
   if (!file.exists(gpkg)) {
     stop("No split GeoPackage for ", city, ": ", gpkg, call. = FALSE)
   }
-  st_read(gpkg, quiet = TRUE)
+  st_read(gpkg, quiet = TRUE, options = GPKG_OPTIONS)
 }
 
 #' A window's centre in the patches' own CRS.
@@ -170,7 +176,7 @@ grid_layer <- function(city, bb) {
   }
   win <- st_as_text(st_as_sfc(st_bbox(c(xmin = bb[["xmin"]], ymin = bb[["ymin"]],
                                         xmax = bb[["xmax"]], ymax = bb[["ymax"]]))))
-  g <- st_read(gpkg, wkt_filter = win, quiet = TRUE)
+  g <- st_read(gpkg, wkt_filter = win, quiet = TRUE, options = GPKG_OPTIONS)
   if (!nrow(g)) return(NULL)
   # The cells are axis-aligned squares, so their bounding boxes are the cells.
   cb <- as.data.frame(t(vapply(st_geometry(g), st_bbox, numeric(4))))

@@ -76,6 +76,9 @@ STRETCH_PCT = (2.0, 98.0)
 # Pixels transformed at a time. A 4185x5676 city ROI is 23.7M pixels; casting
 # that to float64 in one go is ~12 GB per intermediate.
 CHUNK_PX = 1_000_000
+# Long-edge floor for `--upscale auto`. A 33x33 patch is a thumbnail at its own
+# size; 512 px puts it on screen without inventing any values.
+BARE_MIN_SIDE = 512
 
 
 # ── Colour models ─────────────────────────────────────────────────────────────
@@ -522,6 +525,22 @@ def _localise_stretch(model, tiles, bbox_4326, dequantize_fn, nodata_predicate,
     logger.info(f"--local-stretch: re-fitted on {len(np.concatenate(vals)):,} ROI pixels")
 
 
+def _raw_rgb(sel: np.ndarray) -> np.ndarray:
+    """Three raw channels ``(3, H, W)`` -> uint8 RGB, on a per-image stretch.
+
+    The stretch is refitted on every image, which is exactly what a fitted
+    colour model exists to avoid: two pictures of the same place are not
+    comparable this way, and neither are two places. It is kept because "show me
+    channels 0, 1 and 2" is a real question about an embedding, and because it
+    is the only mode that needs no fitted model at all.
+    """
+    lo = np.nanpercentile(sel.reshape(3, -1), STRETCH_PCT[0], axis=1)
+    hi = np.nanpercentile(sel.reshape(3, -1), STRETCH_PCT[1], axis=1)
+    vals = np.clip((sel - lo[:, None, None]) /
+                   np.maximum(hi - lo, 1e-12)[:, None, None], 0, 1)
+    return np.round(vals * 255).astype(np.uint8)
+
+
 def apply_to_roi(
     model: ColourModel,
     embedding_dir: Path,
@@ -535,6 +554,7 @@ def apply_to_roi(
     out_crs: str | None = None,
     raw_bands: tuple[int, int, int] | None = None,
     local_stretch: bool = False,
+    caption: bool = False,
 ) -> Path:
     """Colour every pixel of an ROI and write an 8-bit 3-band GeoTIFF + PNG."""
     import rasterio.warp
@@ -585,11 +605,7 @@ def apply_to_roi(
 
         if raw_bands is not None:
             sel = arr[list(raw_bands)]
-            lo = np.nanpercentile(sel.reshape(3, -1), STRETCH_PCT[0], axis=1)
-            hi = np.nanpercentile(sel.reshape(3, -1), STRETCH_PCT[1], axis=1)
-            vals = np.clip((sel - lo[:, None, None]) /
-                           np.maximum(hi - lo, 1e-12)[:, None, None], 0, 1)
-            tile_rgb = np.round(vals * 255).astype(np.uint8)
+            tile_rgb = _raw_rgb(sel)
             tile_valid = np.isfinite(sel).all(axis=0)
         else:
             # The nodata test runs on the array as read, before dequantization:
@@ -643,11 +659,120 @@ def apply_to_roi(
                         colour_method=model.method)
     logger.info(f"Saved GeoTIFF → {output_path}")
 
-    _save_png(rgb, alpha, output_path.with_suffix(".png"), model)
+    png = output_path.with_suffix(".png")
+    if caption:
+        _save_captioned_png(rgb, alpha, png, model)
+    else:
+        save_bare_png(rgb, alpha, png)
     return output_path
 
 
-def _save_png(rgb: np.ndarray, alpha: np.ndarray, path: Path, model: ColourModel) -> None:
+def colour_array(
+    path: Path,
+    model: ColourModel | None,
+    *,
+    embedding_name: str,
+    dequantize_fn=None,
+    nodata_predicate=None,
+    raw_bands: tuple[int, int, int] | None = None,
+    stored_channels: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Colour one extracted patch or grid array. Returns ``(rgb (3,H,W), alpha (H,W))``.
+
+    These are the ``.npy`` the pipelines actually train on, written by
+    ``extract_so2sat_embeddings.py`` / ``extract_grid_embeddings.py``. The
+    load / mask / dequantize order below mirrors :func:`sample_pixels` exactly,
+    and that is not incidental tidiness -- it is how the colour model was
+    fitted, so any departure gives colours that quietly disagree with every
+    other image from the same model. Two parts of it are easy to get wrong:
+
+    * the nodata test runs on the array **as read**, before dequantization,
+      because the registry's sentinel is defined in stored units;
+    * the extracted files are **not** uniformly dequantized. A Tessera v2 patch
+      is already real-valued, while an AlphaEarth coop patch holds the stored
+      integers as float32 (measured range -66..72) and must go through
+      ``resolve_dequantize`` here just as it did during the fit.
+    """
+    raw = np.load(path)
+    if raw.ndim != 3:
+        raise SystemExit(f"{path.name}: expected a 3-D (C, H, W) array, got {raw.shape}")
+    # Every extractor writes channels-first, so that is the assumption; a
+    # channels-last file is accepted when its last axis is the only one that can
+    # be the channels. Guessing beyond that would silently transpose an image.
+    if stored_channels is not None and raw.shape[0] != stored_channels:
+        if raw.shape[-1] == stored_channels:
+            raw = np.moveaxis(raw, -1, 0)
+        else:
+            raise SystemExit(
+                f"{path.name}: shape {raw.shape} has no axis of "
+                f"{stored_channels} channels, which is what {embedding_name} stores")
+
+    valid = ~nodata_predicate(raw) if nodata_predicate is not None else None
+    arr = np.nan_to_num(raw.astype(np.float32), nan=0.0)
+    if dequantize_fn is not None:
+        arr = dequantize_fn(arr)
+    c, h, w = arr.shape
+
+    if raw_bands is not None:
+        if max(raw_bands) >= c:
+            raise SystemExit(f"--bands {raw_bands} out of range for {c} channels")
+        sel = arr[list(raw_bands)]
+        rgb = _raw_rgb(sel)
+        finite = np.isfinite(sel).all(axis=0)
+    else:
+        if c != len(model.mean_):
+            raise SystemExit(
+                f"{path.name} has {c} channels, the colour model has "
+                f"{len(model.mean_)} -- model and embedding do not match")
+        rgb = model.to_uint8(arr.reshape(c, -1).T).T.reshape(3, h, w)
+        finite = np.ones((h, w), dtype=bool)
+
+    # Nodata gets an explicit alpha rather than a colour, as apply_to_roi does:
+    # colouring sentinels produces vivid false edges.
+    keep = finite if valid is None else (finite & valid)
+    logger.info(f"{path.name}: {c} channels, {h}x{w} px, {keep.mean():.1%} valid")
+    return rgb, (keep * 255).astype(np.uint8)
+
+
+def _upscale_factor(shape: tuple[int, int], upscale, min_side: int) -> int:
+    """Integer pixel-repeat factor. ``"auto"`` reaches ``min_side`` on the long edge."""
+    if upscale in (None, 1, "1"):
+        return 1
+    if upscale != "auto":
+        k = int(upscale)
+        if k < 1:
+            raise SystemExit("--upscale must be 'auto' or a positive integer")
+        return k
+    return max(1, int(np.ceil(min_side / max(max(shape), 1))))
+
+
+def save_bare_png(rgb: np.ndarray, alpha: np.ndarray, path: Path,
+                  upscale="auto", min_side: int = BARE_MIN_SIDE) -> None:
+    """Write the array and nothing else: one file pixel per array pixel.
+
+    ``imshow`` + ``savefig`` would resample onto the figure's dpi grid, pad by
+    the axes margins and round the output size -- a picture of a plot of the
+    data. ``imsave`` writes the data. A 33x33 patch is unreadable at its own
+    size, so ``upscale="auto"`` repeats pixels up to ``min_side``; nearest
+    neighbour only, because smoothing an embedding image invents values that
+    are not in it.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib.image import imsave
+
+    img = np.dstack([np.moveaxis(rgb, 0, -1), alpha[..., None]])
+    k = _upscale_factor(img.shape[:2], upscale, min_side)
+    if k > 1:
+        img = img.repeat(k, axis=0).repeat(k, axis=1)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    imsave(str(path), img)
+    logger.info(f"Saved PNG -> {path} ({img.shape[1]}x{img.shape[0]} px"
+                + (f", {k}x nearest-neighbour upscale)" if k > 1 else ")"))
+
+
+def _save_captioned_png(rgb: np.ndarray, alpha: np.ndarray, path: Path,
+                        model: ColourModel) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -656,13 +781,20 @@ def _save_png(rgb: np.ndarray, alpha: np.ndarray, path: Path, model: ColourModel
     fig, ax = plt.subplots(figsize=(10, 10 * rgb.shape[1] / max(rgb.shape[2], 1)))
     ax.imshow(img, interpolation="nearest")
     ax.set_axis_off()
-    note = model.meta.get("explained_variance_ratio")
-    caption = f"{model.method.upper()} embedding colour"
-    if note:
-        caption += f" — explained variance {note}"
-    elif "holdout_r2" in model.meta:
-        caption += (f" — distilled, held-out R²={model.meta['holdout_r2']}; "
-                    "axes are non-metric, read colours qualitatively")
+    # A raw-band image is not the model's colour at all: both `apply` and
+    # `image` hand this function a placeholder PCAColour for that mode, so its
+    # note is the caption. Titling it "PCA" would name a basis it never used.
+    raw = str(model.meta.get("note", "")).startswith("raw bands")
+    if raw:
+        caption = str(model.meta["note"])
+    else:
+        caption = f"{model.method.upper()} embedding colour"
+        note = model.meta.get("explained_variance_ratio")
+        if note:
+            caption += f" — explained variance {note}"
+        elif "holdout_r2" in model.meta:
+            caption += (f" — distilled, held-out R²={model.meta['holdout_r2']}; "
+                        "axes are non-metric, read colours qualitatively")
     # Say so on the image itself when the stretch was re-fitted here: the whole
     # point of the persisted stretch is cross-city comparability, and a local
     # one silently looks better while no longer being comparable.
@@ -672,7 +804,7 @@ def _save_png(rgb: np.ndarray, alpha: np.ndarray, path: Path, model: ColourModel
     fig.tight_layout()
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    logger.info(f"Saved PNG → {path}")
+    logger.info(f"Saved captioned PNG → {path}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -743,7 +875,41 @@ def _cmd_apply(args) -> None:
         model, args.embedding_dir, name, args.year, bbox, args.output,
         dequantize_fn=dequantize_fn, nodata_predicate=predicate,
         out_crs=args.out_crs, raw_bands=raw_bands, local_stretch=args.local_stretch,
+        caption=args.caption,
     )
+
+
+def _cmd_image(args) -> None:
+    model = ColourModel.load(args.model) if args.model else None
+    name = args.embedding_name or (model.meta.get("embedding_name") if model else None)
+    if name is None:
+        raise SystemExit("--embedding-name is required when no model is given")
+    if name not in EMBEDDING_REGISTRY:
+        raise SystemExit(f"unknown embedding {name!r}; one of {sorted(EMBEDDING_REGISTRY)}")
+
+    dequantize_fn, ch_override = resolve_dequantize(name, force=args.dequantize)
+    predicate = get_nodata_predicate(name) if not args.no_mask else None
+    raw_bands = tuple(int(b) for b in args.bands.split(",")) if args.colour_mode == "raw" else None
+    if raw_bands is None and model is None:
+        raise SystemExit("--model is required for --colour-mode model")
+    if raw_bands is not None and len(raw_bands) != 3:
+        raise SystemExit("--bands takes exactly three channel indices")
+    # The registry's in_channels is the count AFTER dequantization, so a
+    # non-None override (seamless, 13 stored -> 72) means the file's own channel
+    # count is not the registry's and cannot be used to find the channel axis.
+    stored = None if ch_override is not None else EMBEDDING_REGISTRY[name]["in_channels"]
+
+    rgb, alpha = colour_array(
+        args.input, model, embedding_name=name, dequantize_fn=dequantize_fn,
+        nodata_predicate=predicate, raw_bands=raw_bands, stored_channels=stored,
+    )
+    if args.caption:
+        if raw_bands is not None:
+            model = model or PCAColour()
+            model.meta["note"] = f"raw bands {raw_bands}, per-image stretch"
+        _save_captioned_png(rgb, alpha, args.output, model)
+    else:
+        save_bare_png(rgb, alpha, args.output, upscale=args.upscale)
 
 
 def _city_bbox(city: str) -> tuple[float, float, float, float]:
@@ -869,10 +1035,37 @@ def main() -> None:
                    help="raw reproduces the retired plot_embeddings.py: three raw "
                         "channels stretched per image, not comparable between images.")
     a.add_argument("--bands", default="0,1,2")
+    a.add_argument("--caption", action="store_true",
+                   help="Title the sidecar PNG with the model's provenance. Off by "
+                        "default, so the PNG is just the image -- note that a "
+                        "--local-stretch image then says so nowhere but the GeoTIFF tags.")
     a.add_argument("--local-stretch", action="store_true")
     a.add_argument("--dequantize", action="store_true")
     a.add_argument("--no-mask", action="store_true")
     a.set_defaults(func=_cmd_apply)
+
+    i = sub.add_parser(
+        "image", help="Colour one extracted patch/grid .npy into a bare PNG.")
+    i.add_argument("--input", required=True, type=Path,
+                   help="Extracted (C, H, W) .npy, e.g. .../GeoTessera_v2/2017/patch_006296.npy")
+    i.add_argument("--output", required=True, type=Path)
+    i.add_argument("--model", type=Path, default=None,
+                   help="Fitted colour model; required unless --colour-mode raw.")
+    i.add_argument("--embedding-name", default=None, choices=sorted(EMBEDDING_REGISTRY),
+                   help="Defaults to the model's own embedding_name.")
+    i.add_argument("--colour-mode", choices=["model", "raw"], default="model",
+                   help="raw stretches three channels per image; not comparable "
+                        "between images, and needs no fitted model.")
+    i.add_argument("--bands", default="0,1,2", help="Channels for --colour-mode raw.")
+    i.add_argument("--upscale", default="auto",
+                   help="Integer pixel repeat, or 'auto' to reach "
+                        f"{BARE_MIN_SIDE} px on the long edge. '1' writes the array 1:1.")
+    i.add_argument("--caption", action="store_true",
+                   help="Title the image with the model's provenance instead of "
+                        "writing it bare.")
+    i.add_argument("--dequantize", action="store_true")
+    i.add_argument("--no-mask", action="store_true")
+    i.set_defaults(func=_cmd_image)
 
     n = sub.add_parser("annotate-parquet",
                        help="Add rgb_* columns to a projection parquet.")

@@ -58,10 +58,17 @@ python src/embedding_rgb.py fit --method pca \
 python src/embedding_rgb.py apply --model <models>/colour_tesserav2_pca.npz \
     --embedding-dir /tessera/v2/large_student --embedding-name tesserav2 \
     --year 2017 --city Nairobi --output nairobi.tif
+# ...or colour ONE extracted patch/grid .npy, with no ROI and no tiles involved
+python src/embedding_rgb.py image --model <models>/colour_tesserav2_pca.npz \
+    --input ${DATA_DIR}/input/So2Sat-LCZ42/v4/validation/GeoTessera_v2/2017/patch_006296.npy \
+    --output patch.png                       # --colour-mode raw --bands 0,1,2 needs no model
 # --method umap|tsne distil the manifold into an MLP head so it can be applied to a
 # raster at all; their axes are non-metric, so read those colours qualitatively.
 # The persisted stretch is what makes two cities comparable; --local-stretch trades
 # that away for contrast within one image.
+# Both PNGs are BARE by default -- just the image, one file pixel per array pixel
+# (`image` upscales nearest-neighbour to 512 px on the long edge). --caption puts
+# the model provenance back as a title.
 
 # Standalone ROI inference from a checkpoint
 python src/infer_roi.py --model-type resnet --preset small \
@@ -85,7 +92,8 @@ src/
                              #   (gap/mean_std/center/quantile/ring/rich) x nodata masking by
                              #   linear-probe + kNN kappa on held-out cities -> pooling_bakeoff.csv
   embedding_rgb.py           # ENTRY + library: fitted per-PIXEL colour models (PCA-3, or UMAP-3/
-                             #   t-SNE-3 distilled into an MLP head) -> RGB GeoTIFF for any ROI;
+                             #   t-SNE-3 distilled into an MLP head) -> RGB GeoTIFF for any ROI
+                             #   (`apply`) or a bare PNG of one extracted .npy (`image`);
                              #   one model per embedding, reused across cities/years
   infer_roi.py               # ENTRY + library: sliding-window ROI inference for ALL families;
                              #   legacy fc-only probe checkpoints via --stats-file

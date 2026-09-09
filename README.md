@@ -917,6 +917,15 @@ Rscript R/embedding_projection.R --run GeoTessera_v2 --colour lon|lat|lonlat --f
 # One row per patch: both embeddings' PCA/UMAP coords + location, LCZ, Koppen, M49
 Rscript R/patch_table.R          # -> data/patch_master_table.parquet (--format csv also)
 
+# An embedding as a picture: bare by default, no axes, ticks, legend or margin
+Rscript R/embedding_raster.R --input <rgb.tif> --name <stem> [--bbox W,S,E,N | --window Nairobi]
+Rscript R/embedding_raster.R --input <rgb.tif> --window Nairobi --patches --grid --name <stem>
+Rscript R/embedding_raster.R --input <rgb.tif> --bbox W,S,E,N --axes --scalebar --name <stem>
+# Patch polygons instead of pixels, coloured from a projection run
+Rscript R/embedding_raster.R --mosaic --run GeoTessera_v2 --city Nairobi \
+    --colour rgb_pca|pca|umap|tsne --name <stem>
+# -> plots/embeddings/<stem>.png
+
 # LCZ raster -> PNG for a lon/lat ROI
 Rscript R/lcz_raster.R --input <file.tif> --bbox W,S,E,N --name <stem> [--legend]
 Rscript R/lcz_raster.R --input <file.tif> --bbox W,S,E,N --name <stem> \
@@ -932,6 +941,34 @@ Rscript R/lcz_raster.R --input <file.tif> --bbox W,S,E,N --name <stem> \
 Rscript R/lcz_raster.R --input <file.tif> --bbox W,S,E,N --name <stem> \
     --distribution bar --dist-side bottom|top|left|right
 ```
+
+`R/embedding_raster.R` is the figure end of `src/embedding_rgb.py`. The pixels have to be
+coloured in Python — R cannot read the embedding sources at all (Tessera is int8 `.npy` plus a
+separate scales array, AlphaEarth is zarr; only `src/datasets/tiles.py` opens them) — so
+`embedding_rgb.py apply` paints an ROI into a 4-band uint8 GeoTIFF and this script draws it.
+What it adds over that command's sidecar PNG is the R stack: `--window <city>` frames the panel
+on **exactly the square `R/split_maps.R` draws** for that city, so an embedding image and the
+black-and-white split panel show the same ground; `--patches` and `--grid` overlay the So2Sat
+patch polygons and the 1280 m split-grid cells; and the result goes through `save_plot()` like
+every other figure. Uncovered ground keeps the GeoTIFF's alpha and stays transparent rather than
+being painted — the shipped `Nairobi_v2_pca.tif` stops ~1.7 km short of the Nairobi window's
+southern edge, and that shows as a gap, not as a colour.
+
+For one patch or one grid tile there is no ROI to speak of, so that case lives on the Python
+side: `python src/embedding_rgb.py image --input <patch.npy>` colours an extracted array
+directly and writes the image at one file pixel per array pixel. It is worth knowing why the two
+paths agree — the load/mask/dequantize order in `colour_array()` mirrors the fit-side
+`sample_pixels()` exactly, because the extracted `.npy` are *not* uniformly dequantized (a
+Tessera v2 patch is already real-valued; an AlphaEarth coop patch holds the stored integers as
+float32 and must be dequantized here as it was during the fit). Checked on patch `006296` and
+grid cell `911`: the npy path and the tile-mosaic path give **byte-identical colours**.
+
+`--mosaic` draws patch polygons rather than pixels, and its two colourings are not the same
+picture. `--colour rgb_pca` runs each patch's *pooled* vector through the same per-pixel colour
+model the raster uses, so the two agree — it is the patch's mean colour, the flat version of the
+image. `--colour pca|umap|tsne` uses the projection parquet's own patch-level basis, a different
+fit of a different space, stretched per figure; those axes are comparable to nothing else,
+including the raster beside them. Neither is wrong; reading one as the other is.
 
 Both marks are drawn **without text**: they are graphical elements for a map, and the map's own
 legend names the classes. `--labels` puts the class and share back on the standalone bar.
