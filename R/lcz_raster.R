@@ -80,7 +80,7 @@ EXTRA_PROVIDERS <- list(
 # The first name in each entry is this repo's; the rest are the ones maptiles
 # reads by itself, so an environment already set up for it keeps working.
 API_KEY_ENV <- list(
-  Stadia           = c("STADIA_API_KEY", "STADIA_MAPS"),
+  Stadia           = c("STADIA_API_KEY", "STADIA_MAPS_API_KEY", "STADIA_MAPS"),
   Thunderforest    = c("THUNDERFOREST_API_KEY", "THUNDERFOREST_MAPS"),
   Jawg             = "JAWG_API_KEY",
   MapBox           = "MAPBOX_API_KEY",
@@ -121,7 +121,32 @@ resolve_apikey <- function(name, apikey = NULL) {
   if (is.null(vars)) return("")
   set <- Sys.getenv(vars, unset = "")
   set <- set[nzchar(set)]
-  if (length(set)) set[[1]] else ""
+  if (length(set)) return(set[[1]])
+  # Nothing in the environment, so try the repo's .env. R reads .Renviron and
+  # never .env, but .env is where this project's secrets already live (the
+  # Python side reads it), and a key kept in one place cannot drift from the
+  # other.
+  for (v in vars) {
+    val <- dotenv_value(v)
+    if (nzchar(val)) return(val)
+  }
+  ""
+}
+
+#' One value from the repo's .env, or "" if it is not there.
+#'
+#' A deliberately small parser: KEY=VALUE lines, `#` comments, optional
+#' surrounding quotes, no interpolation and no export of anything into the
+#' session. Nothing else in this stack reads .env, so it stays local rather
+#' than becoming a second environment.
+dotenv_value <- function(name, path = ".env") {
+  if (!file.exists(path)) return("")
+  lines <- readLines(path, warn = FALSE)
+  lines <- lines[!grepl("^\\s*(#|$)", lines)]
+  hit <- grep(paste0("^\\s*(export\\s+)?", name, "\\s*="), lines, value = TRUE)
+  if (!length(hit)) return("")
+  val <- sub("^[^=]*=", "", hit[[1]])
+  trimws(gsub("^['\"]|['\"]$", "", trimws(val)))
 }
 
 # Composition-strip thickness, as a fraction of the map's width. A rule beside
@@ -451,10 +476,13 @@ basemap_layer <- function(rc, provider = "OpenStreetMap", zoom = NULL,
   }
   key <- resolve_apikey(provider, apikey)
   dir.create(cachedir, recursive = TRUE, showWarnings = FALSE)
-  tl <- try(maptiles::get_tiles(rc, provider = resolve_provider(provider),
-                                crop = TRUE, zoom = zoom, cachedir = cachedir,
-                                apikey = key),
-            silent = TRUE)
+  # `zoom` is passed only when it was asked for: get_tiles() derives it from the
+  # extent when the argument is MISSING, and an explicit NULL is not missing --
+  # it reaches the tile arithmetic and dies with "argument of length 0".
+  call_args <- list(x = rc, provider = resolve_provider(provider), crop = TRUE,
+                    cachedir = cachedir, apikey = key)
+  if (!is.null(zoom)) call_args$zoom <- zoom
+  tl <- try(do.call(maptiles::get_tiles, call_args), silent = TRUE)
   if (inherits(tl, "try-error") || is.null(tl)) {
     needs_key <- !nzchar(key) && !is.null(API_KEY_ENV[[sub("\\..*$", "", provider)]])
     warning("Could not fetch ", provider, " tiles; drawing without a basemap. ",

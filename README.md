@@ -958,6 +958,10 @@ Rscript R/embedding_raster.R --input <rgb.tif> --window Nairobi --patches --grid
 Rscript R/embedding_raster.R --input <rgb.tif> --bbox W,S,E,N --city Nairobi --patches --grid \
     --name <stem>                       # overlays over an arbitrary bbox
 Rscript R/embedding_raster.R --input <rgb.tif> --bbox W,S,E,N --axes --scalebar --name <stem>
+# The ground itself, over exactly the frame an embedding image covers
+Rscript R/embedding_raster.R --basemap Google.Satellite --bbox W,S,E,N --name <stem>
+Rscript R/embedding_raster.R --basemap Google.Satellite --patch 006296 --city Nairobi \
+    --name <stem>                       # ... or one So2Sat patch, by id
 # Patch polygons instead of pixels, coloured from a projection run
 Rscript R/embedding_raster.R --mosaic --run GeoTessera_v2 --city Nairobi \
     --colour rgb_pca|pca|umap|tsne --name <stem>

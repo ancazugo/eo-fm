@@ -157,6 +157,101 @@ bbox_roi <- function(bbox) {
                               xmax = bbox[3], ymax = bbox[4]), crs = 4326))
 }
 
+# ── Basemap mode ──────────────────────────────────────────────────────────────
+
+# Pixels along the long edge of the template handed to get_tiles(). Only the
+# extent and CRS of that template matter to maptiles, but its resolution is what
+# the zoom level is derived from, so this is effectively "fetch enough tiles to
+# fill a figure at 400 dpi" rather than an arbitrary number.
+BASEMAP_PX <- 2400
+
+#' The frame of one So2Sat patch, by id.
+#'
+#' The envelope, not the polygon: patches are rotated ~1.6 degrees off the UTM
+#' axes, so the square that contains one is slightly larger than the patch, and
+#' that is the honest frame for an image of the ground the patch covers.
+#'
+#' `patch_id` restarts at 000000 in each of training/validation/testing, so an
+#' id that appears in more than one split is ambiguous and is refused unless
+#' `dataset` picks one.
+patch_frame <- function(city, patch_id, dataset = NULL) {
+  g <- read_patches(city)
+  hit <- g$patch_id == patch_id
+  if (!is.null(dataset)) hit <- hit & g$dataset == dataset
+  if (!any(hit)) {
+    stop("No patch '", patch_id, "' in ", city,
+         if (!is.null(dataset)) paste0(" (dataset ", dataset, ")"), ".",
+         call. = FALSE)
+  }
+  if (sum(hit) > 1L) {
+    stop("Patch '", patch_id, "' appears in ",
+         paste(sort(unique(g$dataset[hit])), collapse = ", "),
+         " -- patch_id restarts in each split. Add --dataset.", call. = FALSE)
+  }
+  bb <- sf::st_bbox(sf::st_geometry(g[hit, ]))
+  message("  patch ", patch_id, " (", g$dataset[hit], ", LCZ ",
+          g$LCZ_class[hit], "): ", round(bb[["xmax"]] - bb[["xmin"]]), " x ",
+          round(bb[["ymax"]] - bb[["ymin"]]), " m in ", sf::st_crs(g)$input)
+  list(bb = bb[c("xmin", "xmax", "ymin", "ymax")], crs = sf::st_crs(g),
+       patches = g[hit, ])
+}
+
+#' Web-map tiles as the image itself, with no embedding raster involved.
+#'
+#' The same backdrop `R/lcz_raster.R --basemap` puts under an LCZ map, drawn
+#' alone: what the ground actually looks like over exactly the frame an
+#' embedding image covers, which is the only way to read one against the other.
+#'
+#' @param frame one of --bbox (degrees), --window <city>, or --patch <id>.
+basemap_plot <- function(provider = "Google.Satellite", bbox = NULL,
+                         window = NULL, city = NULL, patch = NULL,
+                         dataset = NULL, zoom = NULL, apikey = NULL,
+                         patches = FALSE, grid = FALSE, axes = FALSE,
+                         scalebar = FALSE, digits = 1, panel_in = 6.5,
+                         px = BASEMAP_PX) {
+  if (!is.null(patch)) {
+    if (is.null(city)) stop("--patch needs --city", call. = FALSE)
+    f <- patch_frame(city, patch, dataset)
+    e <- f$bb
+    crs <- f$crs
+  } else if (!is.null(window)) {
+    w <- split_window(window)
+    e <- w$bb[c("xmin", "xmax", "ymin", "ymax")]
+    crs <- sf::st_crs(w$patches)
+  } else if (!is.null(bbox)) {
+    r <- bbox_roi(bbox)
+    e <- sf::st_bbox(r)[c("xmin", "xmax", "ymin", "ymax")]
+    crs <- sf::st_crs(4326)
+  } else {
+    stop("--basemap needs a frame: --bbox, --window or --patch.", call. = FALSE)
+  }
+
+  # An empty raster is enough: get_tiles() reads the extent and CRS off it and
+  # picks the zoom from the resolution.
+  tmpl <- terra::rast(
+    terra::ext(e[["xmin"]], e[["xmax"]], e[["ymin"]], e[["ymax"]]),
+    crs = crs$wkt, ncol = px,
+    nrow = max(1L, round(px * (e[["ymax"]] - e[["ymin"]]) /
+                              (e[["xmax"]] - e[["xmin"]]))))
+  bg <- basemap_layer(tmpl, provider = provider, zoom = zoom, apikey = apikey)
+  if (is.null(bg)) stop("No basemap, so there is no image to draw.", call. = FALSE)
+
+  ov_city <- if (!is.null(window)) window else city
+  ov <- if (!(patches || grid)) NULL else frame_patches(ov_city, e, crs$wkt)
+  layers <- list(bg,
+                 if (grid) grid_layer(ov_city, e) else NULL,
+                 if (patches) patch_layer(ov) else NULL)
+
+  # signif(), not round(): a degree frame is a fraction of one and rounds to 0.
+  fmt <- function(v) format(signif(v, 4), trim = TRUE, scientific = FALSE)
+  message("  ", provider, ": ", fmt(e[["xmax"]] - e[["xmin"]]), " x ",
+          fmt(e[["ymax"]] - e[["ymin"]]),
+          if (crs$IsGeographic) " degrees" else " m")
+  bare_panel(layers, e, ratio = lcz_scale_info(tmpl)$ratio, rc = tmpl,
+             axes = axes, scalebar = scalebar, digits = digits,
+             panel_in = panel_in, resolution = FALSE)
+}
+
 # ── Overlays ──────────────────────────────────────────────────────────────────
 
 # Drawn over the image, in a colour that survives both a dark and a light one.
@@ -408,6 +503,18 @@ if (sys.nframe() == 0L && !interactive()) {
   parser$add_argument("--axes", action = "store_true",
                       help = "draw coordinate labels instead of a bare image")
   parser$add_argument("--scalebar", action = "store_true")
+  parser$add_argument("--basemap", default = NULL,
+                      help = paste("draw web-map tiles as the image itself",
+                                   "(a provider name, e.g. Google.Satellite);",
+                                   "frame it with --bbox, --window or --patch"))
+  parser$add_argument("--basemap-zoom", type = "integer", default = NULL,
+                      dest = "basemap_zoom", help = "tile zoom level")
+  parser$add_argument("--basemap-apikey", default = NULL, dest = "basemap_apikey",
+                      help = "key for a provider that needs one")
+  parser$add_argument("--patch", default = NULL,
+                      help = "frame on one So2Sat patch by id (needs --city)")
+  parser$add_argument("--dataset", default = NULL,
+                      help = "split disambiguating --patch (patch_id restarts in each)")
   parser$add_argument("--mosaic", action = "store_true",
                       help = "draw patch polygons from a projection run, not pixels")
   parser$add_argument("--run", default = NULL, help = "projection run (substring)")
@@ -431,7 +538,18 @@ if (sys.nframe() == 0L && !interactive()) {
   }
   args <- parser$parse_args(argv)
 
-  p <- if (args$mosaic) {
+  p <- if (!is.null(args$basemap)) {
+    basemap_plot(args$basemap,
+                 bbox = if (is.null(args$bbox)) NULL
+                        else as.numeric(strsplit(args$bbox, "[, ]+")[[1]]),
+                 window = args$window, city = args$city, patch = args$patch,
+                 dataset = args$dataset, zoom = args$basemap_zoom,
+                 apikey = args$basemap_apikey,
+                 patches = args$patches, grid = args$grid,
+                 axes = args$axes, scalebar = args$scalebar,
+                 digits = args$digits,
+                 panel_in = max(1, args$width - if (args$axes) 0.81 else 0))
+  } else if (args$mosaic) {
     if (is.null(args$city)) stop("--mosaic needs --city", call. = FALSE)
     mosaic_plot(args$run, args$city, colour = args$colour,
                 window = args$window, axes = args$axes, digits = args$digits)
