@@ -7,12 +7,25 @@
 # Merges, keyed on `uid` (= "<dataset>/<patch_id>", the only unique patch key --
 # `patch_id` restarts at 000000 in each of training/validation/testing):
 #
-#   identity   uid, dataset, patch_id, split, city
+#   identity   uid, dataset, patch_id, split
 #   location   lon, lat  (patch centroid, EPSG:4326)
 #   label      lcz_class (1-17), lcz_code (1-10/A-G), lcz_name
+#   settlement urban_rural, so2sat_city, guppd_city, guppd_id, guppd_smod
 #   climate    koppen_code, koppen_desc, water
-#   territory  un_country, iso_a2, iso_a3, m49_code, un_subregion, un_region
+#   territory  so2sat_country, un_country, guppd_country, iso_a2, iso_a3,
+#              m49_code, un_subregion, un_region
 #   embedding  <run>_pca_1..3 and <run>_umap_1..3, one block per projection run
+#
+# THREE NAMES FOR THE PLACE, AND THEY DISAGREE ON PURPOSE. `so2sat_city` is the
+# label So2Sat gave the whole 320 m patch grid of a city bbox; `guppd_city` is
+# the settlement the patch's own centroid falls in, from the full GUPPD layer.
+# A bbox around Melbourne contains countryside (no GUPPD polygon -> rural, no
+# guppd_city) and neighbouring towns (a DIFFERENT guppd_city). Countries follow
+# the same rule: `so2sat_country` is the dataset's colloquial name for the city's
+# country, `un_country` is the UN's formal long name resolved by point-in-polygon
+# on the patch, `guppd_country` is GUPPD's own name for the settlement — NA
+# wherever the patch is rural. Group by whichever answers your question; do not
+# assume any two agree row for row.
 #
 # ONE THING THAT WILL BURN YOU: the embedding blocks DO NOT SHARE A FRAME.
 # `tesserav2_umap_1` and `alphaearthcoop_umap_1` are separate fits of separate
@@ -63,8 +76,8 @@ read_run_block <- function(run, first = FALSE) {
   r <- resolve_run(runs, run)
   dims <- unlist(lapply(names(PROJ_DIMS),
                         function(m) paste0(m, "_", seq_len(PROJ_DIMS[[m]]))))
-  base <- c("uid", "dataset", "patch_id", "split", "city", "lon", "lat",
-            "LCZ_class")
+  base <- c("uid", "dataset", "patch_id", "split", "city", "country",
+            "lon", "lat", "LCZ_class")
   have <- names(arrow::open_dataset(r$full))
   miss <- setdiff(c("uid", dims), have)
   if (length(miss)) {
@@ -100,7 +113,15 @@ build_patch_table <- function(runs = DEFAULT_RUNS) {
     }
   }
 
+  # So2Sat's own city/country labels, kept under names that say whose they are
+  # before geo_context() brings in a second `country` to collide with.
+  out <- rename(out, so2sat_city = city, so2sat_country = country)
+
   out <- geo_context(out)
+
+  # The deliverable of the GUPPD join, as a plain two-level label: inside any
+  # settlement polygon on Earth, or outside every one of them.
+  out$urban_rural <- ifelse(out$guppd_urban, "Urban", "Rural")
 
   lcz <- LCZ_TABLE[, c("code", "alt_code", "name")]
   names(lcz) <- c("LCZ_class", "lcz_code", "lcz_name")
@@ -114,14 +135,16 @@ build_patch_table <- function(runs = DEFAULT_RUNS) {
   out <- out |>
     rename(lcz_class = LCZ_class, un_country = country,
            un_subregion = subregion, un_region = region) |>
-    select(uid, dataset, patch_id, split, city, lon, lat,
+    select(uid, dataset, patch_id, split, lon, lat,
            lcz_class, lcz_code, lcz_name,
+           urban_rural, so2sat_city, guppd_city, guppd_id, guppd_smod,
            koppen_code, koppen_desc, water,
-           un_country, iso_a2, iso_a3, m49_code, un_subregion, un_region,
+           so2sat_country, un_country, guppd_country,
+           iso_a2, iso_a3, guppd_iso3, m49_code, un_subregion, un_region,
            everything())
-  # `read_projection()` adds an `lcz` factor as a convenience for plotting; here
-  # it only duplicates lcz_code and lands between the two embedding blocks.
-  out <- out[, setdiff(names(out), c("lcz", "koppen"))]
+  # `guppd_urban` is the logical `urban_rural` was derived from, and `lcz` is a
+  # factor `read_projection()` adds for plotting that only duplicates lcz_code.
+  out <- out[, setdiff(names(out), c("lcz", "koppen", "guppd_urban"))]
 
   # Blocks contiguous and in run order, so the file reads as identity ->
   # context -> one block per embedding rather than an interleaving.

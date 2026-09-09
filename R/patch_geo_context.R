@@ -12,6 +12,9 @@
 #              country boundaries, then a join to the UN's own M49 table.
 #   koppen     Köppen-Geiger class (Beck et al. 2023), sampled from the 1 km
 #              1991-2020 raster.
+#   guppd      The settlement the patch falls in, from the FULL GUPPD polygon
+#              set — all 123,034 of them, not the So2Sat 51 nor the pop>1M
+#              subset. A patch inside one is urban, outside every one is rural.
 #
 # The result is cached to data/patch_geo_context.csv, keyed by `uid`, because
 # both lookups are slow enough to be annoying and neither ever changes: a
@@ -29,6 +32,12 @@
 #      filled from the nearest land cell — a harbour patch is water, not its
 #      city's climate. Both plots take this one raster as the definition, so
 #      they agree on which patches are wet.
+#   3. GUPPD is a settlement layer, not a partition of the land: **~49% of
+#      So2Sat patches fall outside every polygon**. That is the answer, not a
+#      gap — a So2Sat city bbox is a square around a city, so it necessarily
+#      samples the countryside around it. Those patches are rural and carry no
+#      GUPPD name or country at all; nothing is filled from the nearest
+#      settlement, because a field 20 km from Melbourne is not in Melbourne.
 
 source("R/constants.R")
 
@@ -44,6 +53,14 @@ KOPPEN_TIF <- file.path(DATA_DIR, "input", "GloH2O", "koppen_geiger_tif",
                         "1991_2020", "koppen_geiger_0p00833333.tif")
 KOPPEN_LEGEND <- file.path(DATA_DIR, "input", "GloH2O", "koppen_geiger_tif",
                            "legend.txt")
+
+# The ORIGINAL GUPPD, deliberately: not `big_cities_bbox.gpkg` (the pop>1M
+# subset) and not `data/so2sat_guppd_bounds.csv` (the 51 So2Sat cities). Urban
+# vs rural has to be decided against every settlement on Earth, or a patch in a
+# town that simply is not in either subset would be called rural.
+GUPPD_GPKG <- file.path(DATA_DIR, "input", "NASA", "GUPPD",
+                        "urbanspatial-guppd-v1-gpkg.gpkg")
+GUPPD_LAYER <- "urbanspatial_guppd_v1_polygons"
 
 # ── Reference tables ──────────────────────────────────────────────────────────
 
@@ -142,14 +159,70 @@ lookup_koppen <- function(lon, lat) {
   as.integer(v)
 }
 
+#' The settlement each lon/lat falls in, from the full GUPPD polygon set.
+#'
+#' @return A tibble with one row per point: `guppd_urban` (always TRUE/FALSE,
+#'   never NA — it is the whole point of the lookup), `guppd_id`, `guppd_city`,
+#'   `guppd_country`, `guppd_iso3` and `guppd_smod`, all NA for a rural point.
+#'
+#' `guppd_city` prefers `JRC_NAME_MAIN`, the agglomeration name ("London",
+#' "São Paulo"), and falls back to the transliterated CIESIN name where the JRC
+#' has none — 30,387 polygons carry the literal string "N/A" there, mostly small
+#' clusters. The CIESIN name is the *local* place ("City Of London",
+#' "Boulogne-Billancourt"), so it is a fallback and not the first choice: the
+#' column is meant to answer "which city is this patch in", and for a So2Sat
+#' patch that is the agglomeration.
+lookup_guppd <- function(lon, lat) {
+  if (!file.exists(GUPPD_GPKG)) stop("Missing ", GUPPD_GPKG, call. = FALSE)
+  g <- sf::st_read(GUPPD_GPKG, quiet = TRUE, query = paste(
+    "SELECT SMOD_ID, SMOD_LEVEL, ISO, CNTRY_NAME, JRC_NAME_MAIN,",
+    "CIESIN_NAME_TL, CIESIN_NAME, AREA_SQKM, Shape FROM", GUPPD_LAYER))
+  # Sorted so that if a point ever does land in two polygons, taking the first
+  # hit takes the denser and then the larger one, deterministically. Measured on
+  # a 5,000-patch sample the layer is disjoint here, but that is a property of
+  # the sample, not a documented guarantee of the layer.
+  # SMOD_LEVEL comes back as character through the SQL layer on this driver.
+  g <- g[order(-as.integer(g$SMOD_LEVEL), -as.numeric(g$AREA_SQKM)), ]
+
+  pts <- sf::st_as_sf(data.frame(lon = lon, lat = lat),
+                      coords = c("lon", "lat"), crs = 4326)
+  i <- vapply(sf::st_intersects(pts, g),
+              function(z) if (length(z)) z[[1]] else NA_integer_, integer(1))
+  gd <- sf::st_drop_geometry(g)
+
+  blank <- function(x) is.na(x) | !nzchar(x) | x == "N/A"
+  jrc <- gd$JRC_NAME_MAIN[i]
+  alt <- sub(",.*$", "", gd$CIESIN_NAME_TL[i])          # first of the aliases
+  alt2 <- sub(",.*$", "", gd$CIESIN_NAME[i])
+  name <- ifelse(blank(jrc), ifelse(blank(alt), alt2, alt), jrc)
+  name[blank(name)] <- NA_character_
+
+  message("  guppd: ", format(sum(!is.na(i)), big.mark = ","), " urban, ",
+          format(sum(is.na(i)), big.mark = ","), " rural (",
+          sprintf("%.1f%%", 100 * mean(is.na(i))), ")")
+  tibble::tibble(
+    guppd_urban   = !is.na(i),
+    guppd_id      = gd$SMOD_ID[i],
+    guppd_city    = name,
+    guppd_country = gd$CNTRY_NAME[i],
+    guppd_iso3    = gd$ISO[i],
+    guppd_smod    = as.integer(gd$SMOD_LEVEL[i])
+  )
+}
+
 # ── Cache ─────────────────────────────────────────────────────────────────────
 
 #' Geographic context for every uid in `df`, cached on disk.
 #'
 #' @param df Frame with `uid`, `lon`, `lat`.
 #' @return `df` with `country`, `iso_a2`, `iso_a3`, `m49_code`, `subregion`,
-#'   `region`, `water` and `koppen` (the Köppen code, a factor in the standard
-#'   A->E order) joined on.
+#'   `region`, `water`, `koppen` (the Köppen code, a factor in the standard
+#'   A->E order) and the `guppd_*` block joined on.
+#'
+#' The two lookups are cached and refilled INDEPENDENTLY. The GUPPD block was
+#' added after the cache already held 397k rows, so a pre-existing cache has the
+#' uids but not the columns; the second block below fills them in place rather
+#' than forcing a rebuild of the M49 and Köppen work, which is unchanged.
 geo_context <- function(df, cache = GEO_CONTEXT_CSV) {
   stopifnot(all(c("uid", "lon", "lat") %in% names(df)))
 
@@ -163,6 +236,7 @@ geo_context <- function(df, cache = GEO_CONTEXT_CSV) {
                    water = logical())
   }
 
+  dirty <- FALSE
   need <- df[!df$uid %in% have$uid, c("uid", "lon", "lat")]
   need <- need[!duplicated(need$uid), ]
   if (nrow(need)) {
@@ -178,6 +252,29 @@ geo_context <- function(df, cache = GEO_CONTEXT_CSV) {
                           region = sub$region, koppen_value = kop,
                           water = is.na(kop))
     have <- bind_rows(have, add)
+    dirty <- TRUE
+  }
+
+  # GUPPD block. `guppd_urban` is the done-flag: it is TRUE or FALSE for every
+  # point ever looked up, so NA means "not looked up yet" and cannot be confused
+  # with "rural" (where every OTHER guppd column is legitimately NA).
+  if (!"guppd_urban" %in% names(have)) have$guppd_urban <- NA
+  have$guppd_urban <- as.logical(have$guppd_urban)
+  pend <- df[df$uid %in% have$uid[is.na(have$guppd_urban)], c("uid", "lon", "lat")]
+  pend <- pend[!duplicated(pend$uid), ]
+  if (nrow(pend)) {
+    message("Building GUPPD context for ", format(nrow(pend), big.mark = ","),
+            " patch(es)")
+    gp <- lookup_guppd(pend$lon, pend$lat)
+    j  <- match(pend$uid, have$uid)
+    for (nm in names(gp)) {
+      if (!nm %in% names(have)) have[[nm]] <- gp[[nm]][NA_integer_]
+      have[[nm]][j] <- gp[[nm]]
+    }
+    dirty <- TRUE
+  }
+
+  if (dirty) {
     dir.create(dirname(cache), showWarnings = FALSE, recursive = TRUE)
     readr::write_csv(have, cache)
     message("  wrote ", cache, " (", format(nrow(have), big.mark = ","), " rows)")
@@ -187,7 +284,8 @@ geo_context <- function(df, cache = GEO_CONTEXT_CSV) {
   have$koppen <- factor(leg$code[match(have$koppen_value, leg$value)],
                         levels = leg$code)
   keep <- c("uid", "iso_a2", "iso_a3", "m49_code", "country", "subregion",
-            "region", "koppen", "water")
+            "region", "koppen", "water", "guppd_urban", "guppd_id",
+            "guppd_city", "guppd_country", "guppd_iso3", "guppd_smod")
   left_join(df, have[, intersect(keep, names(have))], by = "uid")
 }
 

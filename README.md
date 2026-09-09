@@ -1028,11 +1028,34 @@ counts variant does not overrun its tiles. Fills are normalised over the whole m
 row — the off-diagonal structure is only readable if a cell means the same thing wherever it sits.
 
 `R/patch_table.R` merges everything onto one row per patch, keyed on `uid`, for downstream
-analysis: identity (`uid, dataset, patch_id, split, city`), location (`lon, lat`), label
-(`lcz_class, lcz_code, lcz_name`), climate (`koppen_code, koppen_desc, water`), territory
-(`un_country, iso_a2, iso_a3, m49_code, un_subregion, un_region`) and one coordinate block per
-projection run (`<run>_pca_1..3`, `<run>_umap_1..3`). 397,415 rows x 31 columns, ~44 MB as
-parquet, gitignored and rebuildable.
+analysis: identity (`uid, dataset, patch_id, split`), location (`lon, lat`), label
+(`lcz_class, lcz_code, lcz_name`), settlement (`urban_rural, so2sat_city, guppd_city, guppd_id,
+guppd_smod`), climate (`koppen_code, koppen_desc, water`), territory (`so2sat_country, un_country,
+guppd_country, iso_a2, iso_a3, guppd_iso3, m49_code, un_subregion, un_region`) and one coordinate
+block per projection run (`<run>_pca_1..3`, `<run>_umap_1..3`). 397,415 rows x 38 columns, ~45 MB
+as parquet, gitignored and rebuildable.
+
+**`urban_rural` is decided per patch against the full GUPPD**, all 123,034 settlement polygons —
+not `big_cities_bbox.gpkg` (pop>1M) and not the 51 So2Sat cities, either of which would call a
+patch in an unlisted town rural. A So2Sat city is a *square around* a city, so the countryside in
+that square is real: **192,165 patches (48.4%) fall outside every settlement on Earth** and are
+`Rural`, with `guppd_city`, `guppd_country`, `guppd_id` and `guppd_smod` all NA. Nothing is
+filled from the nearest polygon — a field 20 km from Melbourne is not in Melbourne. The split
+validates against the labels it never saw: **88–99.6% of patches in the built classes (LCZ 1–8,
+10) are Urban, against 5.5–9.5% in the natural ones** (Dense Trees, Low Plants, Bush/Scrub), with
+Sparsely Built (21.8%) and Water (15.7%) in between where they belong. 101 Urban patches sit in
+polygons GUPPD gives no name at all, in either the JRC or the CIESIN field; they stay Urban with
+a NA `guppd_city`.
+
+**Three names for the place, and they disagree on purpose.** `so2sat_city` is the label So2Sat
+gave a whole city bbox; `guppd_city` is the settlement the patch's own centroid falls in, and on
+**14.8% of Urban patches the two differ** — Hong Kong patches in Guangzhou's polygon (the known
+GUPPD merge), Vancouver's in Langley, Cologne's in Bonn, Düsseldorf and Wuppertal. Countries work
+the same way: `so2sat_country` is the dataset's colloquial name, `un_country` the UN's formal long
+name resolved by point-in-polygon (differing from So2Sat's on 25.8% of rows, naming only), and
+`guppd_country` GUPPD's own name for the settlement — which differs from So2Sat's on only 0.1% of
+Urban rows, all 170 of them Hong Kong, which GUPPD names as its own territory. Group by whichever
+answers your question; do not assume any two agree row for row.
 
 **The embedding blocks do not share a frame.** `geotessera_v2_umap_1` and
 `alphaearthcoop_umap_1` are separate fits of separate feature spaces, on top of per-run
@@ -1069,7 +1092,8 @@ first two dimensions of one projection, ~400k patches subsampled to a workable 6
 
 Two more `--colour` modes classify each patch by **its own coordinates**, not by its city or
 country name, and are built by `R/patch_geo_context.R` and cached to `data/patch_geo_context.csv`
-(delete the file to rebuild; a patch's coordinates never change):
+alongside the GUPPD block above (delete the file to rebuild; a patch's coordinates never change —
+the two lookups refill independently, so adding one does not redo the other):
 
 * `subregion` — **UN M49 sub-region**, by point-in-polygon against `spData::world` then a join to
   the UN's own M49 table. Note the 22 familiar sub-regions are *not* the CSV's `Sub-region Name`
