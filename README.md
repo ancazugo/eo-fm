@@ -967,6 +967,13 @@ Rscript R/embedding_raster.R --mosaic --run GeoTessera_v2 --city Nairobi \
 Rscript R/lcz_raster.R --input <file.tif> --bbox W,S,E,N --name <stem> [--legend]
 Rscript R/lcz_raster.R --input <file.tif> --bbox W,S,E,N --name <stem> \
     --guppd --guppd-highlight Nairobi        # dim every other settlement
+# ... on a web-map backdrop, which turns nodata and the panel transparent
+Rscript R/lcz_raster.R --input <file.tif> --bbox W,S,E,N --name <stem> \
+    --basemap [--basemap-zoom 13] [--basemap-provider CartoDB.Positron] [--basemap-alpha 1]
+# Several --input tiles are merged onto the first one's grid (the Demuzere map
+# ships as 0.5-degree tiles that share a CRS but not a grid, and do not abut)
+Rscript R/lcz_raster.R --input lcz_36.5_-1.5.tif lcz_37.0_-1.5.tif \
+    --bbox W,S,E,N --name <stem> --no-resolution
 
 # That raster's LCZ mix, as a pie plus a horizontal composition bar
 Rscript R/lcz_composition.R --input <file.tif> --name <stem> [--bbox W,S,E,N] [--labels]

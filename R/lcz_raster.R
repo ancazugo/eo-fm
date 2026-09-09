@@ -52,6 +52,12 @@ GUPPD_GPKG <- file.path(DATA_DIR, "input", "NASA", "GUPPD",
 # about the scale bar's own size -- not a second figure sitting on it.
 PIE_SIZE <- 0.10
 
+# Where maptiles keeps the basemap tiles it downloads. A session-local default,
+# so nothing is written into the repo or into $DATA_DIR (which has run full
+# before); set EOFM_TILE_CACHE to a real directory to keep them between runs.
+TILE_CACHE <- Sys.getenv("EOFM_TILE_CACHE",
+                         unset = file.path(tempdir(), "maptiles"))
+
 # Composition-strip thickness, as a fraction of the map's width. A rule beside
 # the map, not a second figure: at the default 7 in width this is about 3.5 mm.
 DIST_THICKNESS <- 0.02
@@ -61,6 +67,62 @@ DIST_THICKNESS <- 0.02
 NODATA_KEY <- "0: nodata"
 
 # ── Reading ───────────────────────────────────────────────────────────────────
+
+#' Merge several LCZ tiles that share a CRS but not a grid.
+#'
+#' The Demuzere et al. global map ships as 0.5-degree tiles in per-region UTM
+#' zones, and adjacent tiles are NOT on a common grid: `lcz_36.5_-1.5` and
+#' `lcz_37.0_-1.5` are both EPSG:32737 at 100 m but their origins differ by
+#' 62 m in x and 43 m in y. `merge()` and `mosaic()` both require alignment, so
+#' each tile is resampled onto one template first -- nearest neighbour, the only
+#' resampling a class raster admits -- built on the FIRST tile's grid so that
+#' tile survives untouched and the shift lands on its neighbours.
+#'
+#' Tiles from different UTM zones are refused rather than silently reprojected:
+#' one of them would have to be resampled twice, and a class map does not
+#' survive that. Crop to a ROI inside one zone, or pass a pre-built mosaic.
+mosaic_tiles <- function(paths) {
+  rs <- lapply(paths, terra::rast)
+  crss <- vapply(rs, function(x) terra::crs(x, describe = TRUE)$code, character(1))
+  if (length(unique(crss)) > 1L) {
+    stop("These tiles are in different CRSs (", paste(unique(crss), collapse = ", "),
+         "); merging them would mean resampling a class raster twice.",
+         call. = FALSE)
+  }
+  e <- Reduce(terra::union, lapply(rs, terra::ext))
+  template <- terra::rast(terra::align(e, rs[[1]]),
+                          resolution = terra::res(rs[[1]]),
+                          crs = terra::crs(rs[[1]]))
+  parts <- lapply(rs, function(x) terra::resample(x, template, method = "near"))
+  out <- Reduce(function(a, b) terra::merge(a, b), parts)
+  message("  merged ", length(paths), " tiles into ", terra::ncell(out),
+          " cells on ", basename(paths[[1]]), "'s grid")
+  seam_fill(out)
+}
+
+#' Fill the hairline of nodata left along a tile join.
+#'
+#' Adjacent Demuzere tiles do not abut: 36.5/-1.5 ends at x = 277418.5 and
+#' 37.0/-1.5 begins at 277480.4, a 62 m gap, so a merged mosaic carries a
+#' one-cell nodata line straight down the join -- a white scratch across the
+#' map that is an artefact of the tiling, not a statement about the ground.
+#'
+#' Only cells with at least six of their eight neighbours classified are
+#' filled, and with the neighbourhood's modal class. A seam cell has seven or
+#' eight; a cell on the mosaic's outer edge has five at most, and real nodata
+#' inside a tile comes in blocks. So this repairs the join and cannot spread
+#' into either kind of genuine gap.
+seam_fill <- function(r, min_neighbours = 6) {
+  gap <- is.na(r)
+  if (!any(terra::values(gap), na.rm = TRUE)) return(r)
+  n <- terra::focal(!gap, w = 3, fun = "sum", na.rm = TRUE)
+  fill <- gap & n >= min_neighbours
+  k <- sum(terra::values(fill), na.rm = TRUE)
+  if (!k) return(r)
+  out <- terra::ifel(fill, terra::focal(r, w = 3, fun = "modal", na.rm = TRUE), r)
+  message("  filled ", k, " nodata cells on the tile seam (modal of 3x3)")
+  out
+}
 
 #' Read an LCZ raster and crop it to a lon/lat ROI.
 #'
@@ -77,11 +139,14 @@ NODATA_KEY <- "0: nodata"
 #'   by an integer factor with `modal`, the reducer that suits a categorical
 #'   layer -- a nearest-neighbour subsample would drop thin classes entirely.
 read_lcz_roi <- function(path, bbox, max_cells = 4e6) {
-  if (!file.exists(path)) stop("No such raster: ", path, call. = FALSE)
+  missing_ <- path[!file.exists(path)]
+  if (length(missing_)) {
+    stop("No such raster: ", paste(missing_, collapse = ", "), call. = FALSE)
+  }
   if (length(bbox) != 4 || anyNA(bbox)) {
     stop("bbox must be four numbers: west, south, east, north.", call. = FALSE)
   }
-  r <- terra::rast(path)
+  r <- if (length(path) == 1L) terra::rast(path) else mosaic_tiles(path)
 
   roi <- sf::st_bbox(c(xmin = bbox[1], ymin = bbox[2],
                        xmax = bbox[3], ymax = bbox[4]), crs = 4326) |>
@@ -286,6 +351,63 @@ scalebar_layers <- function(rc, corner = c("br", "bl", "tr", "tl"),
     ))
   }
   layers
+}
+
+# ── Basemap ─────────────────────────────────────────────────────────────
+
+#' Web-map tiles under the panel, as a single annotation raster.
+#'
+#' `annotation_raster`, not `geom_raster`: a ggplot has exactly one `fill` scale
+#' and the map has already spent it on the LCZ classes (the same constraint the
+#' inset pie runs into). An annotation carries its own colours and takes no
+#' scale at all, which is what lets a full-colour basemap sit under a
+#' categorical layer here.
+#'
+#' `get_tiles()` returns the mosaic in the CRS of whatever it is handed, so
+#' passing the cropped raster puts the tiles on the map's own coordinates -- no
+#' reprojection of either, and the annotation's corners are the tile mosaic's
+#' own extent rather than the ROI's (they differ by up to one tile pixel).
+#'
+#' Requires network access. A failed fetch is a warning and a basemap-less map,
+#' never an error: the map is the figure, the tiles are backdrop.
+#'
+#' @param provider any maptiles provider name ("OpenStreetMap",
+#'   "CartoDB.Positron", "Esri.WorldImagery", ...).
+#' @param zoom tile zoom level, or NULL to let maptiles pick from the extent.
+#' @param alpha opacity of the backdrop. Below 1 the panel background shows
+#'   through and lightens it, which is one way to keep the class colours on top
+#'   reading as the subject.
+basemap_layer <- function(rc, provider = "OpenStreetMap", zoom = NULL,
+                          alpha = 1, cachedir = TILE_CACHE) {
+  if (!requireNamespace("maptiles", quietly = TRUE)) {
+    warning("maptiles is not installed; skipping the basemap.", call. = FALSE)
+    return(NULL)
+  }
+  dir.create(cachedir, recursive = TRUE, showWarnings = FALSE)
+  tl <- try(maptiles::get_tiles(rc, provider = provider, crop = TRUE,
+                                zoom = zoom, cachedir = cachedir),
+            silent = TRUE)
+  if (inherits(tl, "try-error") || is.null(tl)) {
+    warning("Could not fetch ", provider, " tiles; drawing without a basemap. ",
+            if (inherits(tl, "try-error")) conditionMessage(attr(tl, "condition")),
+            call. = FALSE)
+    return(NULL)
+  }
+  a <- terra::as.array(tl)
+  if (dim(a)[[3]] < 3L) {
+    warning("Basemap came back with ", dim(a)[[3]], " band(s); expected RGB.",
+            call. = FALSE)
+    return(NULL)
+  }
+  # Tiles are uint8 and should not contain NA, but a mosaic that reaches past
+  # the provider's coverage can; white is the colour of an absent tile.
+  a[!is.finite(a)] <- 255
+  cols <- grDevices::rgb(a[, , 1], a[, , 2], a[, , 3],
+                         alpha = round(255 * alpha), maxColorValue = 255)
+  m <- matrix(cols, nrow = nrow(a), ncol = ncol(a))
+  e <- as.vector(terra::ext(tl))
+  annotation_raster(m, xmin = e[["xmin"]], xmax = e[["xmax"]],
+                    ymin = e[["ymin"]], ymax = e[["ymax"]], interpolate = TRUE)
 }
 
 # ── GUPPD overlay ─────────────────────────────────────────────────────────────
@@ -555,6 +677,13 @@ attach_dist_bar <- function(p, df, side = c("bottom", "top", "left", "right"),
 #'                  off the raster, so it is the source tif's own resolution
 #'                  unless read_lcz_roi() had to aggregate, in which case it is
 #'                  the aggregated cell actually drawn and that is reported.
+#' @param basemap   draw web-map tiles under the raster. Off by default; when
+#'                  on, nodata cells and the panel background are transparent
+#'                  instead of white, so the backdrop shows through wherever the
+#'                  raster has nothing to say. Needs network access.
+#' @param basemap_provider maptiles provider name.
+#' @param basemap_zoom tile zoom level, or NULL to derive it from the extent.
+#' @param basemap_alpha opacity of the backdrop.
 #' @param guppd     overlay the GUPPD settlement outlines. Off by default.
 #' @param guppd_highlight settlement to draw prominently while the rest are
 #'                  dimmed. NULL picks the largest over the ROI; NA draws them
@@ -573,6 +702,9 @@ attach_dist_bar <- function(p, df, side = c("bottom", "top", "left", "right"),
 lcz_raster_plot <- function(path, bbox, legend = FALSE, scalebar = TRUE,
                             scalebar_corner = "br", title = NULL,
                             legend_ncol = 4, digits = 1, guppd = FALSE,
+                            basemap = FALSE,
+                            basemap_provider = "OpenStreetMap",
+                            basemap_zoom = NULL, basemap_alpha = 1,
                             guppd_highlight = NULL, resolution = TRUE,
                             distribution = c("none", "pie", "bar"),
                             dist_side = "bottom", pie_corner = "bl",
@@ -615,11 +747,25 @@ lcz_raster_plot <- function(path, bbox, legend = FALSE, scalebar = TRUE,
   inf <- lcz_scale_info(rc)
   brk <- function(lo, hi) c(lo, (lo + hi) / 2, hi)
 
-  p <- ggplot(d, aes(x = x, y = y, fill = lcz)) +
+  # With a basemap the two whites have to go transparent -- the nodata fill and
+  # the painted panel -- or the backdrop is covered by the 94% of a reference
+  # tif that is nodata. NA is ggplot's transparent fill.
+  # "transparent", not NA: an NA fill makes ggplot treat the cells as missing
+  # data and drop them with a warning, which is a lie about the raster.
+  nodata_fill <- if (basemap) "transparent" else LCZ_NODATA_COLOUR
+
+  p <- ggplot(d, aes(x = x, y = y, fill = lcz))
+  # Added before the class layer, so it draws under it.
+  if (basemap) {
+    p <- p + basemap_layer(rc, provider = basemap_provider,
+                           zoom = basemap_zoom, alpha = basemap_alpha)
+  }
+  p <- p +
     geom_raster() +
     scale_fill_manual(values = c(LCZ_COLOURS_PY[idx],
-                                 setNames(LCZ_NODATA_COLOUR, NODATA_KEY)),
-                      breaks = keys, name = NULL, drop = TRUE)
+                                 setNames(nodata_fill, NODATA_KEY)),
+                      breaks = keys, name = NULL, drop = TRUE,
+                      na.value = nodata_fill)
 
   # Ground size of one drawn cell. terra::res is in the raster's own units, so
   # it needs the same degrees-to-metres factor the scale bar uses.
@@ -627,7 +773,7 @@ lcz_raster_plot <- function(path, bbox, legend = FALSE, scalebar = TRUE,
   # m_per_x * ratio, which is why the two sides need different factors.
   cell_m <- terra::res(rc) * inf$m_per_x * c(1, inf$ratio)
   if (resolution) {
-    native <- terra::res(terra::rast(path)) * inf$m_per_x * c(1, inf$ratio)
+    native <- terra::res(terra::rast(path[[1]])) * inf$m_per_x * c(1, inf$ratio)
     if (!isTRUE(all.equal(native, cell_m))) {
       message("  resolution key shows the aggregated cell (",
               resolution_label(cell_m), "), not the tif's native ",
@@ -671,7 +817,7 @@ lcz_raster_plot <- function(path, bbox, legend = FALSE, scalebar = TRUE,
       # Painting the panel is what makes nodata white, and it also fills any
       # corner of the ROI the raster does not reach -- far cheaper than
       # materialising millions of white cells.
-      panel.background = element_rect(fill = LCZ_NODATA_COLOUR, colour = NA),
+      panel.background = element_rect(fill = nodata_fill, colour = NA),
       legend.position  = if (legend) "bottom" else "none",
       legend.title     = element_blank(),
       legend.text      = element_text(size = LEGEND_TEXT_PT)
@@ -729,7 +875,9 @@ save_lcz_raster <- function(path, bbox, name, width = 7, legend = FALSE,
 if (sys.nframe() == 0L && !interactive()) {
   suppressPackageStartupMessages(library(argparse))
   parser <- ArgumentParser(description = "Plot an LCZ GeoTIFF over a lon/lat ROI.")
-  parser$add_argument("--input", required = TRUE, help = "LCZ GeoTIFF (classes 1-17, nodata 0)")
+  parser$add_argument("--input", required = TRUE, nargs = "+",
+                      help = paste("LCZ GeoTIFF(s) with classes 1-17 and nodata 0.",
+                                   "Several are merged onto the first one's grid."))
   parser$add_argument("--bbox", required = TRUE,
                       help = "ROI as west,south,east,north in degrees")
   parser$add_argument("--name", required = TRUE, help = "output stem under plots/")
@@ -744,6 +892,16 @@ if (sys.nframe() == 0L && !interactive()) {
   parser$add_argument("--legend-ncol", type = "integer", default = NULL,
                       dest = "legend_ncol",
                       help = "legend columns (default: derived from --width)")
+  parser$add_argument("--basemap", action = "store_true",
+                      help = "draw web-map tiles under the raster (needs network)")
+  parser$add_argument("--basemap-provider", default = "OpenStreetMap",
+                      dest = "basemap_provider",
+                      help = "maptiles provider name (default: OpenStreetMap)")
+  parser$add_argument("--basemap-zoom", type = "integer", default = NULL,
+                      dest = "basemap_zoom",
+                      help = "tile zoom level (default: derived from the extent)")
+  parser$add_argument("--basemap-alpha", type = "double", default = 1,
+                      dest = "basemap_alpha", help = "opacity of the backdrop")
   parser$add_argument("--guppd", action = "store_true",
                       help = "overlay the GUPPD settlement outlines")
   parser$add_argument("--guppd-highlight", default = NULL, dest = "guppd_highlight",
@@ -790,6 +948,10 @@ if (sys.nframe() == 0L && !interactive()) {
   save_lcz_raster(args$input, bbox, args$name, width = args$width,
                   legend = args$legend, dpi = args$dpi,
                   legend_ncol = args$legend_ncol, digits = args$digits,
+                  basemap = args$basemap,
+                  basemap_provider = args$basemap_provider,
+                  basemap_zoom = args$basemap_zoom,
+                  basemap_alpha = args$basemap_alpha,
                   guppd = args$guppd,
                   guppd_highlight = if (is.null(args$guppd_highlight)) NULL
                                     else if (tolower(args$guppd_highlight) == "none") NA
