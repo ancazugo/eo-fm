@@ -405,6 +405,95 @@ embedding_raster_plot <- function(path, bbox = NULL, window = NULL, city = NULL,
              digits = digits, panel_in = panel_in)
 }
 
+# ── Label mode ────────────────────────────────────────────────────────────────
+
+# The patch outline in label mode. Dark rather than the white PATCH_OUTLINE_COL
+# used over an image: here the squares carry the LCZ palette, which runs light
+# over most of its range, and the outlines are the only thing separating one
+# patch from the six or so it overlaps.
+LABEL_OUTLINE_COL <- "grey15"
+LABEL_OUTLINE_LW  <- 0.4
+
+#' The frame of one split-grid cell, by id.
+#'
+#' The cell itself, not the extent of the patches assigned to it: a patch
+#' belongs to the cell containing its centroid, so the union of a cell's patches
+#' overruns it on every side. The cell is what the extracted grid `.npy` covers,
+#' which is what makes this frame and the embedding image of the same cell the
+#' same ground.
+grid_frame <- function(city, grid_id) {
+  gpkg <- file.path(SO2SAT_CITIES_DIR, city, paste0(city, "_grid.gpkg"))
+  if (!file.exists(gpkg)) {
+    stop("No grid GeoPackage for ", city, ": ", gpkg, call. = FALSE)
+  }
+  g <- sf::st_read(gpkg, quiet = TRUE, options = GPKG_OPTIONS)
+  hit <- g$grid_id == grid_id
+  if (!any(hit)) stop("No grid cell '", grid_id, "' in ", city, ".", call. = FALSE)
+  bb <- sf::st_bbox(sf::st_geometry(g[hit, ]))
+  message("  grid ", grid_id, " (", g$split[hit], "): ",
+          round(bb[["xmax"]] - bb[["xmin"]]), " x ",
+          round(bb[["ymax"]] - bb[["ymin"]]), " m")
+  list(bb = bb[c("xmin", "xmax", "ymin", "ymax")], crs = sf::st_crs(g))
+}
+
+#' So2Sat patches as their LCZ labels: the class colour, and an outline.
+#'
+#' The counterpart to an embedding image of the same ground -- what the label
+#' says is there, over exactly the frame the embedding covers. Nothing is drawn
+#' where no patch falls: So2Sat samples a city rather than covering it, and a
+#' painted background would hide that.
+#'
+#' Membership is by the patch's own `grid_id` column, not by intersection: that
+#' column is the authority on which cell a patch belongs to (the split is
+#' assigned per cell), and it is what the extraction used.
+#'
+#' @param patch,grid_id frame and select on one patch, or on one split-grid cell.
+lcz_patch_plot <- function(city, patch = NULL, grid_id = NULL, dataset = NULL,
+                           window = NULL, bbox = NULL, outline = LABEL_OUTLINE_COL,
+                           linewidth = LABEL_OUTLINE_LW, axes = FALSE,
+                           scalebar = FALSE, digits = 1, panel_in = 6.5) {
+  g <- read_patches(city)
+
+  if (!is.null(patch)) {
+    f <- patch_frame(city, patch, dataset)
+    e <- f$bb
+    sel <- f$patches
+  } else if (!is.null(grid_id)) {
+    f <- grid_frame(city, grid_id)
+    e <- f$bb
+    sel <- g[g$grid_id == grid_id, ]
+    if (!nrow(sel)) stop("No patch is assigned to grid ", grid_id, ".", call. = FALSE)
+  } else {
+    e <- if (!is.null(window)) split_window(window)$bb[c("xmin", "xmax", "ymin", "ymax")]
+         else if (!is.null(bbox)) {
+           sf::st_bbox(sf::st_transform(bbox_roi(bbox), sf::st_crs(g)))[
+             c("xmin", "xmax", "ymin", "ymax")]
+         } else stop("Label mode needs --patch, --grid-id, --window or --bbox.",
+                     call. = FALSE)
+    sel <- frame_patches(city, e, sf::st_crs(g)$wkt)
+  }
+
+  bad <- setdiff(sel$LCZ_class, LCZ_TABLE$code)
+  if (length(bad)) {
+    stop("Patch labels outside LCZ 1-17: ", paste(sort(bad), collapse = ", "),
+         call. = FALSE)
+  }
+  sel$.col <- LCZ_TABLE$colour[match(sel$LCZ_class, LCZ_TABLE$code)]
+  tab <- table(LCZ_TABLE$alt_code[match(sel$LCZ_class, LCZ_TABLE$code)])
+  message("  ", nrow(sel), " patch(es): ",
+          paste(names(tab), unname(tab), sep = " x", collapse = ", "))
+
+  xy <- sf::st_coordinates(sf::st_geometry(sel))
+  d <- data.frame(x = xy[, "X"], y = xy[, "Y"], grp = xy[, "L2"])
+  d$fill <- sel$.col[d$grp]
+
+  bare_panel(list(geom_polygon(data = d,
+                               aes(x = x, y = y, group = grp, fill = fill),
+                               colour = outline, linewidth = linewidth)),
+             e, ratio = 1, axes = axes, scalebar = scalebar, digits = digits,
+             panel_in = panel_in)
+}
+
 # ── Mosaic mode ───────────────────────────────────────────────────────────────
 
 #' Colour columns for one `--colour` choice, and whether they are already 0-255.
@@ -511,6 +600,14 @@ if (sys.nframe() == 0L && !interactive()) {
                       dest = "basemap_zoom", help = "tile zoom level")
   parser$add_argument("--basemap-apikey", default = NULL, dest = "basemap_apikey",
                       help = "key for a provider that needs one")
+  parser$add_argument("--labels", action = "store_true",
+                      help = paste("draw the So2Sat patches as their LCZ",
+                                   "labels, not an image; frame with --patch,",
+                                   "--grid-id, --window or --bbox"))
+  parser$add_argument("--grid-id", default = NULL, dest = "grid_id",
+                      help = "frame on one split-grid cell by id (needs --city)")
+  parser$add_argument("--outline", default = LABEL_OUTLINE_COL,
+                      help = "patch outline colour in --labels mode")
   parser$add_argument("--patch", default = NULL,
                       help = "frame on one So2Sat patch by id (needs --city)")
   parser$add_argument("--dataset", default = NULL,
@@ -538,7 +635,16 @@ if (sys.nframe() == 0L && !interactive()) {
   }
   args <- parser$parse_args(argv)
 
-  p <- if (!is.null(args$basemap)) {
+  p <- if (args$labels) {
+    if (is.null(args$city)) stop("--labels needs --city", call. = FALSE)
+    lcz_patch_plot(args$city, patch = args$patch, grid_id = args$grid_id,
+                   dataset = args$dataset, window = args$window,
+                   bbox = if (is.null(args$bbox)) NULL
+                          else as.numeric(strsplit(args$bbox, "[, ]+")[[1]]),
+                   outline = args$outline, axes = args$axes,
+                   scalebar = args$scalebar, digits = args$digits,
+                   panel_in = max(1, args$width - if (args$axes) 0.81 else 0))
+  } else if (!is.null(args$basemap)) {
     basemap_plot(args$basemap,
                  bbox = if (is.null(args$bbox)) NULL
                         else as.numeric(strsplit(args$bbox, "[, ]+")[[1]]),

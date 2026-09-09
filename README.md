@@ -962,6 +962,9 @@ Rscript R/embedding_raster.R --input <rgb.tif> --bbox W,S,E,N --axes --scalebar 
 Rscript R/embedding_raster.R --basemap Google.Satellite --bbox W,S,E,N --name <stem>
 Rscript R/embedding_raster.R --basemap Google.Satellite --patch 006296 --city Nairobi \
     --name <stem>                       # ... or one So2Sat patch, by id
+# What the label says is there, over the same frame: LCZ colours, nothing else
+Rscript R/embedding_raster.R --labels --city Nairobi --patch 006296 --name <stem>
+Rscript R/embedding_raster.R --labels --city Nairobi --grid-id 911 --name <stem>
 # Patch polygons instead of pixels, coloured from a projection run
 Rscript R/embedding_raster.R --mosaic --run GeoTessera_v2 --city Nairobi \
     --colour rgb_pca|pca|umap|tsne --name <stem>
