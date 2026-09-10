@@ -50,6 +50,8 @@ PLOT_DIR_MODELS     <- "models"       # results table, confusion matrices
 PLOT_DIR_MAPS       <- "maps"         # LCZ rasters for an ROI
 PLOT_DIR_RASTERS    <- "rasters"      # one place as a picture: embedding RGB,
                                       #   its labels, the imagery under it
+PLOT_DIR_COMPOSITION <- "composition" # what a map is made of, without the map:
+                                      #   class-mix bars and pies on their own
 CITY_SUMMARY_CSV  <- file.path("data", "so2sat_city_summary.csv")
 CITY_CLASS_CSV    <- file.path("data", "so2sat_city_class_counts.csv")
 

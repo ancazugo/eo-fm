@@ -66,7 +66,7 @@ EMBEDDING_LABELS <- c("GeoTessera_v2"          = "Tessera v2",
                       "EmbeddedSeamless"       = "Seamless")
 
 SPLIT_LABELS <- c("global_so2sat"  = "Culture-10",
-                  "grid_orig_test" = "Grid split",
+                  "grid_orig_test" = "Gridded",
                   "grid"           = "Per-city grid")
 
 # The Model column names the architecture, not the preset: "ResNet34" says what
@@ -80,16 +80,32 @@ ARCH_LABELS <- c(
   "mobilenetv4_conv_large" = "MobileNetV4-L",
   "resnet18" = "ResNet18", "resnet34" = "ResNet34",
   "resnet50" = "ResNet50", "resnet101" = "ResNet101", "resnet152" = "ResNet152",
-  "densenet121" = "DenseNet121", "densenet169" = "DenseNet169",
-  "densenet201" = "DenseNet201", "densenet161" = "DenseNet161",
   "efficientnet_b1" = "EfficientNet-B1", "efficientnet_b5" = "EfficientNet-B5",
   "efficientnet_b7" = "EfficientNet-B7",
   "convnext_tiny" = "ConvNeXt-T", "convnext_base" = "ConvNeXt-B",
-  "convnext_large" = "ConvNeXt-L", "gap" = "Linear probe (GAP)")
+  "convnext_large" = "ConvNeXt-L", "gap" = "GAP")
 
-# Row order within an embedding block, smallest/simplest family first. Families
-# not listed sort alphabetically after these.
-FAMILY_ORDER <- c("shallow_cnn", "mobilenet", "densenet", "resnet")
+# Acronyms are expanded where the reader first meets them, then used short. The
+# table is read top to bottom, so "first" is the first row of the sorted frame --
+# resolved in read_metrics() after arrange(), never here.
+ARCH_FIRST_USE <- c("GAP" = "Global Average Pooling (GAP)")
+
+# Families excluded from the figure, with the reason. This is a *display*
+# decision, so it lives here rather than in src/export_run_metrics.py: the CSV
+# stays a faithful cache of W&B and the rows come back by deleting a line.
+#
+#   densenet  dropped 2026-09-10 at the author's request -- the two surviving
+#             DenseNet cells are coop-only and pre-date the current run set, so
+#             they compared nothing.
+DROP_FAMILIES <- c("densenet")
+
+# Row order within an embedding block. The linear probe leads: it is the floor
+# every other row is measured against -- pooled features and one linear layer,
+# three orders of magnitude fewer parameters than the CNNs beneath it -- so a
+# block reads as "this is what the embedding alone gives you, and this is what
+# each architecture adds". After it, simplest family first. Families not listed
+# sort alphabetically after these.
+FAMILY_ORDER <- c("linear_probe", "shallow_cnn", "mobilenet", "resnet")
 
 #' Apply a label lookup, keeping unmatched values as themselves.
 relabel <- function(x, lookup) {
@@ -231,6 +247,13 @@ read_metrics <- function(path = METRICS_CSV) {
          call. = FALSE)
   }
 
+  dropped <- df$family %in% DROP_FAMILIES
+  if (any(dropped)) {
+    message("  dropping ", sum(dropped), " row(s) from excluded famil(ies): ",
+            paste(sort(unique(df$family[dropped])), collapse = ", "))
+    df <- df[!dropped, , drop = FALSE]
+  }
+
   df |>
     mutate(
       embedding_label = relabel(embedding, EMBEDDING_LABELS),
@@ -244,7 +267,23 @@ read_metrics <- function(path = METRICS_CSV) {
     # Split leads: the splits are not comparable to each other, so they are
     # stacked tables that happen to share a header.
     arrange(split_label, embedding_label, is.na(family_rank), family_rank,
-            family, n_params)
+            family, n_params) |>
+    mutate(model_label = expand_first_use(model_label))
+}
+
+#' Expand an acronym the first time it is drawn, and only then.
+#'
+#' Operates on the frame in its final row order, so what it calls "first" is the
+#' topmost row of the table as printed. Every later occurrence keeps the short
+#' form, which is the point: the long one is a definition, not a name, and
+#' repeating it down a column would make the Model column the widest in the
+#' table for no information.
+expand_first_use <- function(labels) {
+  for (short in names(ARCH_FIRST_USE)) {
+    i <- match(short, labels)
+    if (!is.na(i)) labels[i] <- unname(ARCH_FIRST_USE[short])
+  }
+  labels
 }
 
 # ── Geometry ──────────────────────────────────────────────────────────────────

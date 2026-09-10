@@ -935,6 +935,9 @@ python src/export_confusion_matrix.py
 Rscript R/prepare_city_data.R   # -> data/so2sat_city_{summary,class_counts}.csv
 Rscript R/plotting.R            # -> plots/dataset/class_*, dataset_*, so2sat_*
 Rscript R/split_maps.R          # -> plots/dataset/split_map_{global,orig_test,orig_test_grid}.png
+#   ... and each panel alone: split_map_{london,nairobi}_{cultural,gridded}.png
+#   `gridded` always carries the 1,280 m split grid, drawn amber (GRID_COL) so it
+#   reads as the cell lattice it is rather than as another patch outline
 Rscript R/metrics_table.R       # -> plots/models/model_metrics_table.{png,pdf,html}
 Rscript R/metrics_table.R --highlight dash|ring|halo|chip|bar|none   # best-value mark (default dash)
 
@@ -1001,7 +1004,9 @@ Rscript R/lcz_raster.R --input lcz_36.5_-1.5.tif lcz_37.0_-1.5.tif \
 
 # That raster's LCZ mix, as a pie plus a horizontal composition bar
 Rscript R/lcz_composition.R --input <file.tif> --name <stem> [--bbox W,S,E,N] [--labels]
-# -> plots/maps/<stem>_{pie,bar,composition}.png
+# -> plots/maps/<stem>_{pie,bar,composition}.png; --subdir composition puts them
+#    in plots/composition/ instead, for marks that stand alone rather than
+#    accompanying a map
 
 # ... or the same mix placed into the map itself
 Rscript R/lcz_raster.R --input <file.tif> --bbox W,S,E,N --name <stem> \

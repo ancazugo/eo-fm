@@ -184,6 +184,11 @@ if (sys.nframe() == 0L && !interactive()) {
   parser$add_argument("--no-border", action = "store_true", dest = "no_border",
                       help = "drop the grey segment outline: colours only")
   parser$add_argument("--name", required = TRUE, help = "output stem under plots/")
+  parser$add_argument("--subdir", default = PLOT_DIR_MAPS,
+                      help = paste("folder under plots/ to write to (default",
+                                   PLOT_DIR_MAPS, "-- these marks usually",
+                                   "accompany a map; PLOT_DIR_COMPOSITION is",
+                                   "where they go when they stand alone)"))
   parser$add_argument("--bbox", default = NULL,
                       help = "restrict to west,south,east,north in degrees")
   parser$add_argument("--title", default = NULL,
@@ -214,7 +219,7 @@ if (sys.nframe() == 0L && !interactive()) {
     message("  palette bar: ", n, " classes x ", args$cell_px, " px = ",
             n * args$cell_px, "x", args$cell_px, " px")
     save_plot(p, args$name, width = sz$width, height = sz$height,
-              dpi = sz$dpi, subdir = PLOT_DIR_MAPS)
+              dpi = sz$dpi, subdir = args$subdir)
     quit(save = "no")
   }
   if (is.null(args$input)) {
@@ -232,9 +237,9 @@ if (sys.nframe() == 0L && !interactive()) {
                              labels = args$labels)
 
   save_plot(p$pie, paste0(args$name, "_pie"), width = w, height = w,
-            dpi = args$dpi, subdir = PLOT_DIR_MAPS)
+            dpi = args$dpi, subdir = args$subdir)
   save_plot(p$bar, paste0(args$name, "_bar"), width = w, height = p$bar_height,
-            dpi = args$dpi, subdir = PLOT_DIR_MAPS)
+            dpi = args$dpi, subdir = args$subdir)
   save_plot(p$panel, paste0(args$name, "_composition"), width = w,
-            height = w + p$bar_height, dpi = args$dpi, subdir = PLOT_DIR_MAPS)
+            height = w + p$bar_height, dpi = args$dpi, subdir = args$subdir)
 }

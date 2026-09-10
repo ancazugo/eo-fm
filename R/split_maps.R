@@ -162,11 +162,16 @@ panel_window <- function(g, centre = NULL, size = NULL, pad = EXTENT_PAD) {
 # Nairobi's 1,485 do): the split is assigned to every cell regardless, and a
 # ragged outline of the occupied ones would not read as a grid.
 
-# Mid grey and a touch heavier than the patch outlines: the grid is what decides
-# the split under --orig-test, so it has to be legible as structure in its own
-# right, while staying light enough not to read as another patch boundary.
-GRID_COL <- "grey45"
-GRID_LW  <- 0.35
+# The grid is what decides the split under --orig-test, so it is the subject of
+# the figure that carries it, not furniture. A grey hairline could not be that:
+# over the black training fill it disappeared, and everywhere else it read as one
+# more patch outline -- which inverts the meaning, since a cell is 1,280 m and a
+# patch 320 m. So it gets a colour the greyscale of the split roles leaves free,
+# and enough weight to survive the patch texture underneath. Amber is the same
+# ink R/embedding_raster.R's GRID_OVERLAY_COL uses for the same cells over an
+# embedding image, so the two figure families name the grid the same way.
+GRID_COL <- "#ffcc00"
+GRID_LW  <- 0.7
 
 #' The split grid over one window, as a `geom_rect` layer. NULL if the city has
 #' no grid file.
@@ -335,6 +340,40 @@ split_pair <- function(mode, windows = WINDOWS, gap = PANEL_GAP, grid = FALSE) {
     theme(plot.background = element_rect(fill = "transparent", colour = NA))
 }
 
+# ── Single panels ─────────────────────────────────────────────────────────────
+#
+# The pairs above are the argument; one panel on its own is the illustration, and
+# a talk or a poster column often wants only the second half of it. So every
+# panel is also written by itself, at the same 7 km window and the same
+# typography, named <city>_<mode> in the vocabulary the results table uses:
+#
+#   cultural  the published culture-10 split (split_pair("global"))
+#   gridded   the --orig-test hybrid, with the 1,280 m split grid drawn -- the
+#             grid is the whole reason this panel differs from its cultural
+#             twin, so the standalone version always carries it.
+
+PANEL_MODES <- list(
+  cultural = list(mode = "global",    grid = FALSE),
+  gridded  = list(mode = "orig_test", grid = TRUE)
+)
+
+#' Every (city x mode) panel as its own figure.
+#'
+#' Square: coord_fixed already constrains the panel, so equal width and height
+#' spend the whole page on it rather than letterboxing.
+save_split_panels <- function(windows = WINDOWS, modes = PANEL_MODES,
+                              size = 4) {
+  for (nm in names(modes)) {
+    m <- modes[[nm]]
+    for (win in windows) {
+      message("Figure: ", win$city, ", ", nm, " split, single panel")
+      save_plot(split_panel(win, mode = m$mode, grid = m$grid),
+                paste0("split_map_", tolower(win$city), "_", nm),
+                width = size, height = size, subdir = PLOT_DIR_DATASET)
+    }
+  }
+}
+
 # ── Figures ───────────────────────────────────────────────────────────────────
 
 if (sys.nframe() == 0L && !interactive()) {
@@ -351,6 +390,8 @@ if (sys.nframe() == 0L && !interactive()) {
   save_plot(split_pair("orig_test", grid = TRUE), "split_map_orig_test_grid",
             width = 8, height = 3.9,
             subdir = PLOT_DIR_DATASET)
+
+  save_split_panels()
 
   message("Done.")
 }
