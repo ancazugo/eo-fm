@@ -976,6 +976,8 @@ Rscript R/embedding_raster.R --labels --city Nairobi --grid-id 911 \
 # Patch polygons instead of pixels, coloured from a projection run
 Rscript R/embedding_raster.R --mosaic --run GeoTessera_v2 --city Nairobi \
     --colour rgb_pca|pca|umap|tsne --name <stem>
+# --patches draws the 320 m label squares white and hairline, --grid the 1280 m
+# split cells in amber at twice the weight: two overlays, two different questions
 # Every bare panel is framed in grey15; --no-border makes the figure the panel exactly
 # -> plots/rasters/<stem>.png   (plots/embeddings/ keeps the projection scatters)
 

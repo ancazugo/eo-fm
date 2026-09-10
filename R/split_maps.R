@@ -170,7 +170,7 @@ GRID_LW  <- 0.35
 
 #' The split grid over one window, as a `geom_rect` layer. NULL if the city has
 #' no grid file.
-grid_layer <- function(city, bb) {
+grid_layer <- function(city, bb, colour = GRID_COL, linewidth = GRID_LW) {
   gpkg <- file.path(SO2SAT_CITIES_DIR, city, paste0(city, "_grid.gpkg"))
   if (!file.exists(gpkg)) {
     warning("No grid GeoPackage for ", city, "; drawing without the grid.",
@@ -185,8 +185,8 @@ grid_layer <- function(city, bb) {
   cb <- as.data.frame(t(vapply(st_geometry(g), st_bbox, numeric(4))))
   geom_rect(data = cb,
             aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
-            inherit.aes = FALSE, fill = NA, colour = GRID_COL,
-            linewidth = GRID_LW)
+            inherit.aes = FALSE, fill = NA, colour = colour,
+            linewidth = linewidth)
 }
 
 # ── Hatching ──────────────────────────────────────────────────────────────────

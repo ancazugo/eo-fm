@@ -264,7 +264,8 @@ basemap_plot <- function(provider = "Google.Satellite", bbox = NULL,
   ov_city <- if (!is.null(window)) window else city
   ov <- if (!(patches || grid)) NULL else frame_patches(ov_city, e, crs$wkt)
   layers <- list(bg,
-                 if (grid) grid_layer(ov_city, e) else NULL,
+                 if (grid) grid_layer(ov_city, e, GRID_OVERLAY_COL,
+                                      GRID_OVERLAY_LW) else NULL,
                  if (patches) patch_layer(ov) else NULL)
 
   # signif(), not round(): a degree frame is a fraction of one and rounds to 0.
@@ -282,6 +283,15 @@ basemap_plot <- function(provider = "Google.Satellite", bbox = NULL,
 # Drawn over the image, in a colour that survives both a dark and a light one.
 PATCH_OUTLINE_COL <- "#ffffffcc"
 PATCH_OUTLINE_LW  <- 0.3
+
+# The split grid over an image. R/split_maps.R draws it grey45 and hairline,
+# which is right on a white page and vanishes on a magenta-and-blue embedding --
+# and worse, once seen it reads as one more patch square. So it gets a colour no
+# LCZ palette entry and no patch outline uses, and twice the weight: the two
+# overlays answer different questions (which 320 m squares carry a label, and
+# which 1280 m cell decided train/val/test) and must not be confused.
+GRID_OVERLAY_COL <- "#ffcc00"
+GRID_OVERLAY_LW  <- 0.9
 
 #' The patches of `city` that fall in an arbitrary frame, for --bbox overlays.
 #'
@@ -429,7 +439,8 @@ embedding_raster_plot <- function(path, bbox = NULL, window = NULL, city = NULL,
 
   layers <- list(
     geom_raster(data = rgb_cells(rc), aes(x = x, y = y, fill = .col)),
-    if (grid) grid_layer(ov_city, ov_bb) else NULL,
+    if (grid) grid_layer(ov_city, ov_bb, GRID_OVERLAY_COL,
+                         GRID_OVERLAY_LW) else NULL,
     if (patches) patch_layer(ov_patches) else NULL
   )
   code <- terra::crs(rc, describe = TRUE)$code
