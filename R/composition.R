@@ -62,6 +62,15 @@ bar_segments <- function(df, fmt = fmt_share, horizontal = FALSE,
 BAR_T   <- 0.16   # bar thickness on the non-share axis (thin by design)
 LAB_PAD <- 0.05   # gap between the bar edge and its label column
 
+# The horizontal bar is thinner than the vertical one, and deliberately so.
+# Vertically it is a *figure*: a column of segments read top to bottom beside a
+# map or a pie, and it needs width to be that. Horizontally it is a *rule* --
+# something laid along an edge, or under a pie, that says how the whole divides
+# without ever competing with what it accompanies. At 0.16 the horizontal strip
+# came out 1.1 in deep on a 7 in figure and read as a second chart; a tenth of
+# that width is enough to carry seventeen colours and no more.
+BAR_T_H <- 0.06
+
 # The same, for a horizontal bar. Its labels are rotated 90 degrees, so what
 # has to clear along the bar is the *line height*, not the line length -- which
 # is the only reason 17 LCZ labels fit along one bar at all. Unlike the vertical
@@ -80,7 +89,7 @@ horizontal_gap <- function(width, pt = LEGEND_TEXT_PT) {
 #' up the rest, so the whole panel scales off the longest label.
 horizontal_height <- function(labels, label_room = 1, pt = LEGEND_TEXT_PT) {
   lab_in <- max(systemfonts::string_width(labels, size = pt, res = 72)) / 72
-  (BAR_T + LAB_PAD + label_room) / label_room * lab_in
+  (BAR_T_H + LAB_PAD + label_room) / label_room * lab_in
 }
 
 # One line of label type as a fraction of the bar's height. The bars are ~6.2 in
@@ -170,30 +179,31 @@ composition_bar <- function(df, palette, side = NULL, title = NULL,
   }
   seg <- bar_segments(df, fmt = fmt, horizontal = horizontal, gap = gap)
   # Unlabelled, the bar is a bare strip filling its panel edge to edge: no
-  # label column and no pad, so its saved aspect ratio is exactly BAR_T and it
+  # label column and no pad, so its saved aspect ratio is exactly `bar_t` and it
   # can be butted against a map of matching size.
   if (!labels) { label_room <- 0; pad <- 0 } else pad <- LAB_PAD
+  bar_t <- if (horizontal) BAR_T_H else BAR_T
   # `near` = the labels are on the low side of the across-axis, so the bar is
   # pushed up/right to leave them room.
   near <- side %in% c("left", "bottom")
   bar_lo <- if (near) label_room + pad else 0
-  lab_at <- if (near) bar_lo - pad else BAR_T + pad
-  across_max <- if (near) bar_lo + BAR_T else BAR_T + pad + label_room
+  lab_at <- if (near) bar_lo - pad else bar_t + pad
+  across_max <- if (near) bar_lo + bar_t else bar_t + pad + label_room
 
   # Texture for any segment named in `hatch_keys`, drawn over its fill.
   hatched <- seg |> filter(as.character(key) %in% hatch_keys)
   hatch <- if (nrow(hatched) > 0) {
     map(seq_len(nrow(hatched)), function(i) {
-      hatch_lines(bar_lo, bar_lo + BAR_T, hatched$lo[i], hatched$hi[i])
+      hatch_lines(bar_lo, bar_lo + bar_t, hatched$lo[i], hatched$hi[i])
     }) |> list_rbind()
   } else NULL
 
   # The only orientation-dependent part: which screen axis carries the stack.
   rect <- if (horizontal) {
-    geom_rect(aes(xmin = lo, xmax = hi, ymin = bar_lo, ymax = bar_lo + BAR_T,
+    geom_rect(aes(xmin = lo, xmax = hi, ymin = bar_lo, ymax = bar_lo + bar_t,
                   fill = key), colour = "grey25", linewidth = border_lw)
   } else {
-    geom_rect(aes(xmin = bar_lo, xmax = bar_lo + BAR_T, ymin = lo, ymax = hi,
+    geom_rect(aes(xmin = bar_lo, xmax = bar_lo + bar_t, ymin = lo, ymax = hi,
                   fill = key), colour = "grey25", linewidth = border_lw)
   }
   # Rotated a quarter turn on a horizontal bar; `hjust` still measures along the

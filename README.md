@@ -1006,7 +1006,20 @@ Rscript R/lcz_raster.R --input lcz_36.5_-1.5.tif lcz_37.0_-1.5.tif \
 Rscript R/lcz_composition.R --input <file.tif> --name <stem> [--bbox W,S,E,N] [--labels]
 # -> plots/maps/<stem>_{pie,bar,composition}.png; --subdir composition puts them
 #    in plots/composition/ instead, for marks that stand alone rather than
-#    accompanying a map
+#    accompanying a map. The horizontal bar is a rule, not a chart: BAR_T_H in
+#    R/composition.R keeps it a tenth as deep as it is long.
+#
+# The same mix for the reference map, over the same bounds, so the two are
+# comparable. Demuzere et al. 2022 is one global GeoTIFF, so any city is a
+# --bbox away and no tile merge is involved:
+Rscript R/lcz_composition.R --subdir composition \
+    --input ${DATA_DIR}/input/Demuzere_2022_complete/lcz_filter_v3.tif \
+    --bbox=-0.62897183,51.27180859,0.40216756,51.78404384 --name london_demuzere
+# lcz_filter_v3 (the Gaussian-filtered map the authors recommend) is the same
+# file src/sample_unlabeled_patches.py draws its weak labels from. It is NOT the
+# per-tile Demuzere_et_al_2022_LCZ/ set that plots/maps/nairobi_demuzere.png is
+# drawn from: those tiles are reprojected to local UTM and differ by ~0.7% of
+# cells over Nairobi, and they do not cover Bogota at all.
 
 # ... or the same mix placed into the map itself
 Rscript R/lcz_raster.R --input <file.tif> --bbox W,S,E,N --name <stem> \

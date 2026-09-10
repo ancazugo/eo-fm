@@ -110,7 +110,7 @@ lcz_composition_plots <- function(df, width = 7, title = NULL, labels = FALSE) {
   labs <- sprintf("%s (%s)", as.character(df$key), fmt_share_fine(df$share, df$n))
   # Unlabelled, the strip's height follows its own coordinate aspect so the
   # rectangle fills the figure exactly; labelled, it follows the type.
-  bar_h <- if (labels) horizontal_height(labs) else width * BAR_T
+  bar_h <- if (labels) horizontal_height(labs) else width * BAR_T_H
   bar <- composition_bar(df, LCZ_COLOURS, side = "bottom", horizontal = TRUE,
                          fmt = fmt_share_fine, label_room = 1, labels = labels,
                          gap = horizontal_gap(width), title = title)
@@ -128,7 +128,7 @@ lcz_composition_plots <- function(df, width = 7, title = NULL, labels = FALSE) {
 #'
 #' Squareness is the caller's job, and it is exact rather than approximate. The
 #' unlabelled bar spans 0..1 along its axis and fills the panel across, whatever
-#' BAR_T says, so with `n` equal segments the panel is `n` cells wide and one
+#' BAR_T_H says, so with `n` equal segments the panel is `n` cells wide and one
 #' cell tall -- the segments are square precisely when the figure is `n` times
 #' as wide as it is tall. lcz_palette_size() picks a figure that also lands on
 #' whole pixels, which a ratio alone does not guarantee.
