@@ -172,6 +172,20 @@ bbox_roi <- function(bbox) {
 # fill a figure at 400 dpi" rather than an arbitrary number.
 BASEMAP_PX <- 2400
 
+#' An empty raster over `e`, as the frame handed to get_tiles().
+#'
+#' Nothing is read from it but the extent, the CRS and the resolution: maptiles
+#' derives the zoom level from the last of those, and returns its mosaic in the
+#' CRS it was handed, so a template in the city's UTM zone keeps both the tiles
+#' and the vectors on the page unreprojected.
+tile_template <- function(e, crs, px = BASEMAP_PX) {
+  terra::rast(
+    terra::ext(e[["xmin"]], e[["xmax"]], e[["ymin"]], e[["ymax"]]),
+    crs = crs$wkt, ncol = px,
+    nrow = max(1L, round(px * (e[["ymax"]] - e[["ymin"]]) /
+                              (e[["xmax"]] - e[["xmin"]]))))
+}
+
 #' The frame of one So2Sat patch, by id.
 #'
 #' The envelope, not the polygon: patches are rotated ~1.6 degrees off the UTM
@@ -233,13 +247,7 @@ basemap_plot <- function(provider = "Google.Satellite", bbox = NULL,
     stop("--basemap needs a frame: --bbox, --window or --patch.", call. = FALSE)
   }
 
-  # An empty raster is enough: get_tiles() reads the extent and CRS off it and
-  # picks the zoom from the resolution.
-  tmpl <- terra::rast(
-    terra::ext(e[["xmin"]], e[["xmax"]], e[["ymin"]], e[["ymax"]]),
-    crs = crs$wkt, ncol = px,
-    nrow = max(1L, round(px * (e[["ymax"]] - e[["ymin"]]) /
-                              (e[["xmax"]] - e[["xmin"]]))))
+  tmpl <- tile_template(e, crs, px)
   bg <- basemap_layer(tmpl, provider = provider, zoom = zoom, apikey = apikey)
   if (is.null(bg)) stop("No basemap, so there is no image to draw.", call. = FALSE)
 
@@ -431,6 +439,13 @@ embedding_raster_plot <- function(path, bbox = NULL, window = NULL, city = NULL,
 LABEL_OUTLINE_COL <- "grey15"
 LABEL_OUTLINE_LW  <- 0.4
 
+# Opacity of the class fill. Opaque by default: on an empty background the fill
+# IS the figure. Over a basemap it has to be let down, or the labels hide the
+# imagery they were drawn to be read against -- but only when asked, so the
+# label figures already on disk keep their exact colours.
+LABEL_FILL_ALPHA <- 1
+LABEL_FILL_ALPHA_BASEMAP <- 0.6
+
 #' The frame of one split-grid cell, by id.
 #'
 #' The cell itself, not the extent of the patches assigned to it: a patch
@@ -469,7 +484,9 @@ lcz_patch_plot <- function(city, patch = NULL, grid_id = NULL, dataset = NULL,
                            window = NULL, bbox = NULL, outline = LABEL_OUTLINE_COL,
                            linewidth = LABEL_OUTLINE_LW, axes = FALSE,
                            scalebar = FALSE, digits = 1, panel_in = 6.5,
-                           border = BARE_BORDER_COL) {
+                           border = BARE_BORDER_COL, basemap = NULL,
+                           zoom = NULL, apikey = NULL,
+                           fill_alpha = LABEL_FILL_ALPHA) {
   g <- read_patches(city)
 
   if (!is.null(patch)) {
@@ -505,11 +522,25 @@ lcz_patch_plot <- function(city, patch = NULL, grid_id = NULL, dataset = NULL,
   d <- data.frame(x = xy[, "X"], y = xy[, "Y"], grp = xy[, "L2"])
   d$fill <- sel$.col[d$grp]
 
-  bare_panel(list(geom_polygon(data = d,
+  # With imagery underneath, the frame is the patches' own CRS -- the city
+  # GeoPackages are in the city's UTM zone, so the tiles come back on the same
+  # axes the polygons are already drawn on and neither side is reprojected.
+  tmpl <- if (is.null(basemap)) NULL
+          else tile_template(e, sf::st_crs(g))
+  bg <- if (is.null(tmpl)) NULL
+        else basemap_layer(tmpl, provider = basemap, zoom = zoom, apikey = apikey)
+  if (!is.null(basemap) && is.null(bg)) {
+    stop("No basemap, so the labels would sit on nothing.", call. = FALSE)
+  }
+
+  bare_panel(list(bg,
+                  geom_polygon(data = d,
                                aes(x = x, y = y, group = grp, fill = fill),
-                               colour = outline, linewidth = linewidth)),
-             e, ratio = 1, axes = axes, scalebar = scalebar, digits = digits,
-             panel_in = panel_in, border = border)
+                               colour = outline, linewidth = linewidth,
+                               alpha = fill_alpha)),
+             e, ratio = if (is.null(tmpl)) 1 else lcz_scale_info(tmpl)$ratio,
+             rc = tmpl, axes = axes, scalebar = scalebar, digits = digits,
+             panel_in = panel_in, resolution = FALSE, border = border)
 }
 
 #' The So2Sat reference raster over an ROI, as LCZ colours on nothing.
@@ -678,6 +709,11 @@ if (sys.nframe() == 0L && !interactive()) {
                                    "GeoTIFF instead of the patch polygons"))
   parser$add_argument("--grid-id", default = NULL, dest = "grid_id",
                       help = "frame on one split-grid cell by id (needs --city)")
+  parser$add_argument("--fill-alpha", type = "double", default = NULL,
+                      dest = "fill_alpha",
+                      help = paste("opacity of the LCZ fill in --labels mode;",
+                                   "default 1 alone,", LABEL_FILL_ALPHA_BASEMAP,
+                                   "over a basemap"))
   parser$add_argument("--outline", default = LABEL_OUTLINE_COL,
                       help = "patch outline colour in --labels mode")
   parser$add_argument("--patch", default = NULL,
@@ -729,7 +765,13 @@ if (sys.nframe() == 0L && !interactive()) {
                    outline = args$outline, axes = args$axes,
                    scalebar = args$scalebar, digits = args$digits,
                    panel_in = max(1, args$width - if (args$axes) 0.81 else 0),
-                   border = border)
+                   border = border, basemap = args$basemap,
+                   zoom = args$basemap_zoom, apikey = args$basemap_apikey,
+                   # Over imagery the fill has to be let down by default, or
+                   # there is no point having fetched the tiles.
+                   fill_alpha = if (!is.null(args$fill_alpha)) args$fill_alpha
+                                else if (is.null(args$basemap)) LABEL_FILL_ALPHA
+                                else LABEL_FILL_ALPHA_BASEMAP)
   } else if (!is.null(args$basemap)) {
     basemap_plot(args$basemap,
                  bbox = if (is.null(args$bbox)) NULL

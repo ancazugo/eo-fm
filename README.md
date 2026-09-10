@@ -968,6 +968,9 @@ Rscript R/embedding_raster.R --labels --city Nairobi --grid-id 911 --name <stem>
 Rscript R/embedding_raster.R --labels --city Nairobi --bbox W,S,E,N --name <stem>
 Rscript R/embedding_raster.R --labels --rasterised --city Nairobi --bbox W,S,E,N \
     --name <stem>                       # the reference tif, not the polygons
+# ... or the labels over the imagery, the fill let down to 0.6 so both read
+Rscript R/embedding_raster.R --labels --city Nairobi --grid-id 911 \
+    --basemap Google.Satellite [--fill-alpha 0.6] --name <stem>
 # Patch polygons instead of pixels, coloured from a projection run
 Rscript R/embedding_raster.R --mosaic --run GeoTessera_v2 --city Nairobi \
     --colour rgb_pca|pca|umap|tsne --name <stem>
