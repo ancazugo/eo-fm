@@ -223,16 +223,25 @@ patch_frame <- function(city, patch_id, dataset = NULL) {
 #' alone: what the ground actually looks like over exactly the frame an
 #' embedding image covers, which is the only way to read one against the other.
 #'
-#' @param frame one of --bbox (degrees), --window <city>, or --patch <id>.
+#' @param frame one of --bbox (degrees), --window <city>, --patch <id> or
+#'   --grid-id <id>. The last two frame the imagery on exactly the ground one
+#'   extracted array covers, which is what makes it readable against that
+#'   array's embedding image and its labels.
 basemap_plot <- function(provider = "Google.Satellite", bbox = NULL,
                          window = NULL, city = NULL, patch = NULL,
-                         dataset = NULL, zoom = NULL, apikey = NULL,
+                         grid_id = NULL, dataset = NULL, zoom = NULL,
+                         apikey = NULL,
                          patches = FALSE, grid = FALSE, axes = FALSE,
                          scalebar = FALSE, digits = 1, panel_in = 6.5,
                          px = BASEMAP_PX, border = BARE_BORDER_COL) {
   if (!is.null(patch)) {
     if (is.null(city)) stop("--patch needs --city", call. = FALSE)
     f <- patch_frame(city, patch, dataset)
+    e <- f$bb
+    crs <- f$crs
+  } else if (!is.null(grid_id)) {
+    if (is.null(city)) stop("--grid-id needs --city", call. = FALSE)
+    f <- grid_frame(city, grid_id)
     e <- f$bb
     crs <- f$crs
   } else if (!is.null(window)) {
@@ -244,7 +253,8 @@ basemap_plot <- function(provider = "Google.Satellite", bbox = NULL,
     e <- sf::st_bbox(r)[c("xmin", "xmax", "ymin", "ymax")]
     crs <- sf::st_crs(4326)
   } else {
-    stop("--basemap needs a frame: --bbox, --window or --patch.", call. = FALSE)
+    stop("--basemap needs a frame: --bbox, --window, --patch or --grid-id.",
+         call. = FALSE)
   }
 
   tmpl <- tile_template(e, crs, px)
@@ -777,6 +787,7 @@ if (sys.nframe() == 0L && !interactive()) {
                  bbox = if (is.null(args$bbox)) NULL
                         else as.numeric(strsplit(args$bbox, "[, ]+")[[1]]),
                  window = args$window, city = args$city, patch = args$patch,
+                 grid_id = args$grid_id,
                  dataset = args$dataset, zoom = args$basemap_zoom,
                  apikey = args$basemap_apikey,
                  patches = args$patches, grid = args$grid,

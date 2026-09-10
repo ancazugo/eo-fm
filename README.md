@@ -962,6 +962,8 @@ Rscript R/embedding_raster.R --input <rgb.tif> --bbox W,S,E,N --axes --scalebar 
 Rscript R/embedding_raster.R --basemap Google.Satellite --bbox W,S,E,N --name <stem>
 Rscript R/embedding_raster.R --basemap Google.Satellite --patch 006296 --city Nairobi \
     --name <stem>                       # ... or one So2Sat patch, by id
+Rscript R/embedding_raster.R --basemap Google.Satellite --grid-id 911 --city Nairobi \
+    --name <stem>                       # ... or one split-grid cell, by id
 # What the label says is there, over the same frame: LCZ colours, nothing else
 Rscript R/embedding_raster.R --labels --city Nairobi --patch 006296 --name <stem>
 Rscript R/embedding_raster.R --labels --city Nairobi --grid-id 911 --name <stem>
