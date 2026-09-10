@@ -576,9 +576,30 @@ lcz_patch_plot <- function(city, patch = NULL, grid_id = NULL, dataset = NULL,
 #'
 #' Nodata is dropped rather than painted, so the panel stays empty where So2Sat
 #' has nothing to say -- the same contract as the polygon version.
-lcz_raster_bare <- function(bbox, city = NULL, path = NULL, axes = FALSE,
+lcz_raster_bare <- function(bbox = NULL, city = NULL, path = NULL,
+                            patch = NULL, grid_id = NULL, dataset = NULL,
+                            axes = FALSE,
                             scalebar = FALSE, digits = 1, panel_in = 6.5,
                             max_cells = MAX_CELLS, border = BARE_BORDER_COL) {
+  # --patch and --grid-id name a frame in the city's UTM zone; the reference tif
+  # is EPSG:4326, so the frame is carried across as its envelope there. That
+  # envelope is a hair larger than the cell (about a metre at Nairobi, where the
+  # UTM grid runs 0.05 degrees off true north), and the panel is then in degrees
+  # rather than metres -- so the raster and vector versions of one cell cover
+  # the same ground without being the same rectangle.
+  if (is.null(bbox)) {
+    if (is.null(city)) stop("--labels --rasterised needs --bbox, or --city ",
+                            "with --patch or --grid-id.", call. = FALSE)
+    f <- if (!is.null(patch)) patch_frame(city, patch, dataset)
+         else if (!is.null(grid_id)) grid_frame(city, grid_id)
+         else stop("--labels --rasterised needs --bbox, --patch or --grid-id.",
+                   call. = FALSE)
+    ll <- sf::st_bbox(sf::st_transform(
+      sf::st_as_sfc(sf::st_bbox(c(xmin = f$bb[["xmin"]], ymin = f$bb[["ymin"]],
+                                  xmax = f$bb[["xmax"]], ymax = f$bb[["ymax"]]),
+                                crs = f$crs)), 4326))
+    bbox <- as.numeric(ll[c("xmin", "ymin", "xmax", "ymax")])
+  }
   if (is.null(path)) {
     if (is.null(city)) stop("--labels --rasterised needs --city or --input",
                             call. = FALSE)
@@ -771,9 +792,11 @@ if (sys.nframe() == 0L && !interactive()) {
   border <- if (args$no_border) NULL else args$border
 
   p <- if (args$labels && args$rasterised) {
-    if (is.null(args$bbox)) stop("--labels --rasterised needs --bbox", call. = FALSE)
-    lcz_raster_bare(as.numeric(strsplit(args$bbox, "[, ]+")[[1]]),
-                    city = args$city, path = args$input, axes = args$axes,
+    lcz_raster_bare(if (is.null(args$bbox)) NULL
+                    else as.numeric(strsplit(args$bbox, "[, ]+")[[1]]),
+                    city = args$city, path = args$input, patch = args$patch,
+                    grid_id = args$grid_id, dataset = args$dataset,
+                    axes = args$axes,
                     scalebar = args$scalebar, digits = args$digits,
                     panel_in = max(1, args$width - if (args$axes) 0.81 else 0),
                     max_cells = args$max_cells, border = border)

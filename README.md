@@ -970,6 +970,8 @@ Rscript R/embedding_raster.R --labels --city Nairobi --grid-id 911 --name <stem>
 Rscript R/embedding_raster.R --labels --city Nairobi --bbox W,S,E,N --name <stem>
 Rscript R/embedding_raster.R --labels --rasterised --city Nairobi --bbox W,S,E,N \
     --name <stem>                       # the reference tif, not the polygons
+Rscript R/embedding_raster.R --labels --rasterised --city Nairobi --grid-id 911 \
+    --name <stem>                       # ... framed on a cell instead of a bbox
 # ... or the labels over the imagery, the fill let down to 0.6 so both read
 Rscript R/embedding_raster.R --labels --city Nairobi --grid-id 911 \
     --basemap Google.Satellite [--fill-alpha 0.6] --name <stem>
