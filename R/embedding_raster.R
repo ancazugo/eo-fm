@@ -48,6 +48,13 @@ suppressPackageStartupMessages({
   library(ggplot2)
 })
 
+# The frame around a bare panel. These images are read against each other --
+# an embedding, its labels, the imagery under it, all of the same ground -- and
+# several of them end at a pale or transparent edge, which without a rule fades
+# into the page and takes the frame's extent with it.
+BARE_BORDER_COL <- "grey15"
+BARE_BORDER_LW  <- 0.4
+
 # Cell-count budget before the raster is decimated, as in read_lcz_roi().
 MAX_CELLS <- 4e6
 
@@ -208,7 +215,7 @@ basemap_plot <- function(provider = "Google.Satellite", bbox = NULL,
                          dataset = NULL, zoom = NULL, apikey = NULL,
                          patches = FALSE, grid = FALSE, axes = FALSE,
                          scalebar = FALSE, digits = 1, panel_in = 6.5,
-                         px = BASEMAP_PX) {
+                         px = BASEMAP_PX, border = BARE_BORDER_COL) {
   if (!is.null(patch)) {
     if (is.null(city)) stop("--patch needs --city", call. = FALSE)
     f <- patch_frame(city, patch, dataset)
@@ -249,7 +256,7 @@ basemap_plot <- function(provider = "Google.Satellite", bbox = NULL,
           if (crs$IsGeographic) " degrees" else " m")
   bare_panel(layers, e, ratio = lcz_scale_info(tmpl)$ratio, rc = tmpl,
              axes = axes, scalebar = scalebar, digits = digits,
-             panel_in = panel_in, resolution = FALSE)
+             panel_in = panel_in, resolution = FALSE, border = border)
 }
 
 # ── Overlays ──────────────────────────────────────────────────────────────────
@@ -307,7 +314,8 @@ patch_layer <- function(g, colour = PATCH_OUTLINE_COL, linewidth = PATCH_OUTLINE
 #' the window's CRS and extent instead of a raster.
 bare_panel <- function(layers, e, ratio, crs_for_labels = NULL, rc = NULL,
                        axes = FALSE, scalebar = FALSE, digits = 1,
-                       panel_in = 6.5, resolution = TRUE) {
+                       panel_in = 6.5, resolution = TRUE,
+                       border = BARE_BORDER_COL, border_lw = BARE_BORDER_LW) {
   brk <- function(lo, hi) c(lo, (lo + hi) / 2, hi)
   p <- ggplot()
   for (l in layers) if (!is.null(l)) p <- p + l
@@ -346,10 +354,18 @@ bare_panel <- function(layers, e, ratio, crs_for_labels = NULL, rc = NULL,
     # an alpha-0 region reads as absent instead of as a colour.
     p +
       theme_void() +
-      theme(plot.margin = margin(0, 0, 0, 0),
-            panel.background = element_rect(fill = "transparent", colour = NA),
-            plot.background = element_rect(fill = "transparent", colour = NA),
-            legend.position = "none")
+      theme(
+        # A stroke centred on the panel edge loses its outer half to the canvas
+        # boundary, so a bordered panel gets a margin of its own linewidth.
+        # Without a border the figure still IS the panel, exactly.
+        plot.margin = if (is.null(border)) margin(0, 0, 0, 0)
+                      else margin(1, 1, 1, 1),
+        panel.border = if (is.null(border)) element_blank()
+                       else element_rect(fill = NA, colour = border,
+                                         linewidth = border_lw),
+        panel.background = element_rect(fill = "transparent", colour = NA),
+        plot.background = element_rect(fill = "transparent", colour = NA),
+        legend.position = "none")
   }
 
   attr(p, "eo_aspect") <- ratio * (e[["ymax"]] - e[["ymin"]]) /
@@ -366,7 +382,8 @@ bare_panel <- function(layers, e, ratio, crs_for_labels = NULL, rc = NULL,
 embedding_raster_plot <- function(path, bbox = NULL, window = NULL, city = NULL,
                                   patches = FALSE, grid = FALSE,
                                   axes = FALSE, scalebar = FALSE, digits = 1,
-                                  panel_in = 6.5, max_cells = MAX_CELLS) {
+                                  panel_in = 6.5, max_cells = MAX_CELLS,
+                                  border = BARE_BORDER_COL) {
   w <- if (!is.null(window)) split_window(window) else NULL
   roi <- if (!is.null(w)) w$sfc else if (!is.null(bbox)) bbox_roi(bbox) else NULL
   if (patches || grid) {
@@ -402,7 +419,7 @@ embedding_raster_plot <- function(path, bbox = NULL, window = NULL, city = NULL,
           terra::nrow(rc), "x", terra::ncol(rc), " cells, EPSG:",
           if (is.na(code)) "?" else code)
   bare_panel(layers, e, inf$ratio, rc = rc, axes = axes, scalebar = scalebar,
-             digits = digits, panel_in = panel_in)
+             digits = digits, panel_in = panel_in, border = border)
 }
 
 # ── Label mode ────────────────────────────────────────────────────────────────
@@ -451,7 +468,8 @@ grid_frame <- function(city, grid_id) {
 lcz_patch_plot <- function(city, patch = NULL, grid_id = NULL, dataset = NULL,
                            window = NULL, bbox = NULL, outline = LABEL_OUTLINE_COL,
                            linewidth = LABEL_OUTLINE_LW, axes = FALSE,
-                           scalebar = FALSE, digits = 1, panel_in = 6.5) {
+                           scalebar = FALSE, digits = 1, panel_in = 6.5,
+                           border = BARE_BORDER_COL) {
   g <- read_patches(city)
 
   if (!is.null(patch)) {
@@ -491,7 +509,7 @@ lcz_patch_plot <- function(city, patch = NULL, grid_id = NULL, dataset = NULL,
                                aes(x = x, y = y, group = grp, fill = fill),
                                colour = outline, linewidth = linewidth)),
              e, ratio = 1, axes = axes, scalebar = scalebar, digits = digits,
-             panel_in = panel_in)
+             panel_in = panel_in, border = border)
 }
 
 #' The So2Sat reference raster over an ROI, as LCZ colours on nothing.
@@ -508,7 +526,7 @@ lcz_patch_plot <- function(city, patch = NULL, grid_id = NULL, dataset = NULL,
 #' has nothing to say -- the same contract as the polygon version.
 lcz_raster_bare <- function(bbox, city = NULL, path = NULL, axes = FALSE,
                             scalebar = FALSE, digits = 1, panel_in = 6.5,
-                            max_cells = MAX_CELLS) {
+                            max_cells = MAX_CELLS, border = BARE_BORDER_COL) {
   if (is.null(path)) {
     if (is.null(city)) stop("--labels --rasterised needs --city or --input",
                             call. = FALSE)
@@ -542,7 +560,7 @@ lcz_raster_bare <- function(bbox, city = NULL, path = NULL, axes = FALSE,
   bare_panel(list(geom_raster(data = d, aes(x = x, y = y, fill = .col))),
              as.vector(terra::ext(rc)), ratio = inf$ratio, rc = rc,
              axes = axes, scalebar = scalebar, digits = digits,
-             panel_in = panel_in)
+             panel_in = panel_in, border = border)
 }
 
 # ── Mosaic mode ───────────────────────────────────────────────────────────────
@@ -561,7 +579,7 @@ mosaic_columns <- function(colour) {
 #' The join is on `uid` -- "<dataset>/<patch_id>" -- because `patch_id` restarts
 #' at 000000 in each of training/validation/testing and is not unique on its own.
 mosaic_plot <- function(run = NULL, city, colour = "rgb_pca", window = NULL,
-                        axes = FALSE, digits = 1) {
+                        axes = FALSE, digits = 1, border = BARE_BORDER_COL) {
   r <- resolve_run(list_projections(), run)
   spec <- mosaic_columns(colour)
   have <- names(arrow::open_dataset(r$full))
@@ -613,7 +631,7 @@ mosaic_plot <- function(run = NULL, city, colour = "rgb_pca", window = NULL,
   e <- w$bb[c("xmin", "xmax", "ymin", "ymax")]
   bare_panel(list(geom_polygon(data = dd,
                                aes(x = x, y = y, group = grp, fill = fill))),
-             e, ratio = 1, axes = axes, digits = digits)
+             e, ratio = 1, axes = axes, digits = digits, border = border)
 }
 
 # ── Saving ────────────────────────────────────────────────────────────────────
@@ -621,7 +639,7 @@ mosaic_plot <- function(run = NULL, city, colour = "rgb_pca", window = NULL,
 #' Render to plots/embeddings/<name>.png, at the panel's own aspect.
 save_embedding_raster <- function(p, name, width = 6, dpi = 400) {
   save_plot(p, name, width = width, height = width * attr(p, "eo_aspect"),
-            dpi = dpi, subdir = PLOT_DIR_EMBEDDINGS)
+            dpi = dpi, subdir = PLOT_DIR_RASTERS)
 }
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -673,6 +691,10 @@ if (sys.nframe() == 0L && !interactive()) {
                       help = "city supplying --patches/--grid with --bbox; also the city for --mosaic")
   parser$add_argument("--colour", default = "rgb_pca",
                       help = "rgb_pca (pixel model on pooled vectors) or pca|umap|tsne")
+  parser$add_argument("--border", default = BARE_BORDER_COL,
+                      help = "frame colour around the bare panel")
+  parser$add_argument("--no-border", action = "store_true", dest = "no_border",
+                      help = "draw no frame; the figure is then exactly the panel")
   parser$add_argument("--width", type = "double", default = 6)
   parser$add_argument("--dpi", type = "integer", default = 400)
   parser$add_argument("--digits", type = "integer", default = 1)
@@ -689,13 +711,15 @@ if (sys.nframe() == 0L && !interactive()) {
   }
   args <- parser$parse_args(argv)
 
+  border <- if (args$no_border) NULL else args$border
+
   p <- if (args$labels && args$rasterised) {
     if (is.null(args$bbox)) stop("--labels --rasterised needs --bbox", call. = FALSE)
     lcz_raster_bare(as.numeric(strsplit(args$bbox, "[, ]+")[[1]]),
                     city = args$city, path = args$input, axes = args$axes,
                     scalebar = args$scalebar, digits = args$digits,
                     panel_in = max(1, args$width - if (args$axes) 0.81 else 0),
-                    max_cells = args$max_cells)
+                    max_cells = args$max_cells, border = border)
   } else if (args$labels) {
     if (is.null(args$city)) stop("--labels needs --city", call. = FALSE)
     lcz_patch_plot(args$city, patch = args$patch, grid_id = args$grid_id,
@@ -704,7 +728,8 @@ if (sys.nframe() == 0L && !interactive()) {
                           else as.numeric(strsplit(args$bbox, "[, ]+")[[1]]),
                    outline = args$outline, axes = args$axes,
                    scalebar = args$scalebar, digits = args$digits,
-                   panel_in = max(1, args$width - if (args$axes) 0.81 else 0))
+                   panel_in = max(1, args$width - if (args$axes) 0.81 else 0),
+                   border = border)
   } else if (!is.null(args$basemap)) {
     basemap_plot(args$basemap,
                  bbox = if (is.null(args$bbox)) NULL
@@ -714,12 +739,13 @@ if (sys.nframe() == 0L && !interactive()) {
                  apikey = args$basemap_apikey,
                  patches = args$patches, grid = args$grid,
                  axes = args$axes, scalebar = args$scalebar,
-                 digits = args$digits,
+                 digits = args$digits, border = border,
                  panel_in = max(1, args$width - if (args$axes) 0.81 else 0))
   } else if (args$mosaic) {
     if (is.null(args$city)) stop("--mosaic needs --city", call. = FALSE)
     mosaic_plot(args$run, args$city, colour = args$colour,
-                window = args$window, axes = args$axes, digits = args$digits)
+                window = args$window, axes = args$axes, digits = args$digits,
+                border = border)
   } else {
     if (is.null(args$input)) stop("--input is required (or use --mosaic)", call. = FALSE)
     embedding_raster_plot(
@@ -730,7 +756,7 @@ if (sys.nframe() == 0L && !interactive()) {
       patches = args$patches, grid = args$grid,
       axes = args$axes, scalebar = args$scalebar, digits = args$digits,
       panel_in = max(1, args$width - if (args$axes) 0.81 else 0),
-      max_cells = args$max_cells)
+      max_cells = args$max_cells, border = border)
   }
   save_embedding_raster(p, args$name, width = args$width, dpi = args$dpi)
 }

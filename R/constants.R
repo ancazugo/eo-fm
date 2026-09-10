@@ -48,6 +48,8 @@ PLOT_DIR_DATASET    <- "dataset"      # what the data is: classes, splits, citie
 PLOT_DIR_EMBEDDINGS <- "embeddings"   # projection scatters, density grids
 PLOT_DIR_MODELS     <- "models"       # results table, confusion matrices
 PLOT_DIR_MAPS       <- "maps"         # LCZ rasters for an ROI
+PLOT_DIR_RASTERS    <- "rasters"      # one place as a picture: embedding RGB,
+                                      #   its labels, the imagery under it
 CITY_SUMMARY_CSV  <- file.path("data", "so2sat_city_summary.csv")
 CITY_CLASS_CSV    <- file.path("data", "so2sat_city_class_counts.csv")
 

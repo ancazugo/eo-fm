@@ -67,7 +67,8 @@ python src/embedding_rgb.py image --model <models>/colour_tesserav2_pca.npz \
 # The persisted stretch is what makes two cities comparable; --local-stretch trades
 # that away for contrast within one image.
 # Both PNGs are BARE by default -- just the image, one file pixel per array pixel
-# (`image` upscales nearest-neighbour to 512 px on the long edge). --caption puts
+# (`image` upscales nearest-neighbour to 512 px on the long edge; --border frames
+# it to match R/embedding_raster.R). --caption puts
 # the model provenance back as a title.
 
 # Standalone ROI inference from a checkpoint

@@ -80,6 +80,12 @@ CHUNK_PX = 1_000_000
 # size; 512 px puts it on screen without inventing any values.
 BARE_MIN_SIDE = 512
 
+# Frame drawn around a bare image by ``--border``, as (R, G, B) and a width in
+# FILE pixels. Matches R/embedding_raster.R's BARE_BORDER_COL ("grey15") so a
+# patch coloured here and one drawn there carry the same frame.
+BARE_BORDER_RGB = (38, 38, 38)
+BARE_BORDER_PX = 6
+
 
 # ── Colour models ─────────────────────────────────────────────────────────────
 
@@ -746,8 +752,26 @@ def _upscale_factor(shape: tuple[int, int], upscale, min_side: int) -> int:
     return max(1, int(np.ceil(min_side / max(max(shape), 1))))
 
 
+def _draw_border(img: np.ndarray, width: int, colour=BARE_BORDER_RGB) -> np.ndarray:
+    """Paint an opaque frame into the outermost ``width`` pixels, in place.
+
+    Drawn INTO the image rather than around it, so the file keeps the size the
+    upscale gave it and one file pixel still maps to a known array pixel. The
+    cost is the outer ring of data, which on an upscaled image is a fraction of
+    one array pixel; at ``--upscale 1`` it is a real pixel per side, which is
+    why the border is not on by default.
+    """
+    w = min(width, min(img.shape[0], img.shape[1]) // 2)
+    if w < 1:
+        return img
+    px = np.array([*colour, 255], dtype=img.dtype)
+    img[:w, :], img[-w:, :], img[:, :w], img[:, -w:] = px, px, px, px
+    return img
+
+
 def save_bare_png(rgb: np.ndarray, alpha: np.ndarray, path: Path,
-                  upscale="auto", min_side: int = BARE_MIN_SIDE) -> None:
+                  upscale="auto", min_side: int = BARE_MIN_SIDE,
+                  border: int = 0) -> None:
     """Write the array and nothing else: one file pixel per array pixel.
 
     ``imshow`` + ``savefig`` would resample onto the figure's dpi grid, pad by
@@ -765,6 +789,8 @@ def save_bare_png(rgb: np.ndarray, alpha: np.ndarray, path: Path,
     k = _upscale_factor(img.shape[:2], upscale, min_side)
     if k > 1:
         img = img.repeat(k, axis=0).repeat(k, axis=1)
+    if border:
+        img = _draw_border(img, border)
     path.parent.mkdir(parents=True, exist_ok=True)
     imsave(str(path), img)
     logger.info(f"Saved PNG -> {path} ({img.shape[1]}x{img.shape[0]} px"
@@ -909,7 +935,8 @@ def _cmd_image(args) -> None:
             model.meta["note"] = f"raw bands {raw_bands}, per-image stretch"
         _save_captioned_png(rgb, alpha, args.output, model)
     else:
-        save_bare_png(rgb, alpha, args.output, upscale=args.upscale)
+        save_bare_png(rgb, alpha, args.output, upscale=args.upscale,
+                      border=args.border)
 
 
 def _city_bbox(city: str) -> tuple[float, float, float, float]:
@@ -1060,6 +1087,11 @@ def main() -> None:
     i.add_argument("--upscale", default="auto",
                    help="Integer pixel repeat, or 'auto' to reach "
                         f"{BARE_MIN_SIDE} px on the long edge. '1' writes the array 1:1.")
+    i.add_argument("--border", nargs="?", type=int, const=BARE_BORDER_PX, default=0,
+                   metavar="PX",
+                   help="Frame the image with a dark rule, painted into the "
+                        f"outer PX file pixels (default {BARE_BORDER_PX}). Off "
+                        "by default: at --upscale 1 it costs a real pixel a side.")
     i.add_argument("--caption", action="store_true",
                    help="Title the image with the model's provenance instead of "
                         "writing it bare.")

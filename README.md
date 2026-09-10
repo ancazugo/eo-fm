@@ -971,7 +971,8 @@ Rscript R/embedding_raster.R --labels --rasterised --city Nairobi --bbox W,S,E,N
 # Patch polygons instead of pixels, coloured from a projection run
 Rscript R/embedding_raster.R --mosaic --run GeoTessera_v2 --city Nairobi \
     --colour rgb_pca|pca|umap|tsne --name <stem>
-# -> plots/embeddings/<stem>.png
+# Every bare panel is framed in grey15; --no-border makes the figure the panel exactly
+# -> plots/rasters/<stem>.png   (plots/embeddings/ keeps the projection scatters)
 
 # LCZ raster -> PNG for a lon/lat ROI
 Rscript R/lcz_raster.R --input <file.tif> --bbox W,S,E,N --name <stem> [--legend]
