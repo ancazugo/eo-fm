@@ -945,6 +945,14 @@ Rscript R/metrics_table.R --highlight dash|ring|halo|chip|bar|none   # best-valu
 # Defaults to the best-kappa culture-10 run; --all loops every run in the CSV.
 Rscript R/confusion_matrix.R [--run <run_name>] [--normalize true|none] [--all]
 
+# A matrix with no row in the results table -- a segmentation run, an ad-hoc
+# evaluation -- is named directly and cached beside the classification set
+# rather than into it, so re-running the plain export cannot drop it:
+python src/export_confusion_matrix.py --output data/confusion_matrices_seg.csv \
+    --matrix seg-v2-global-unet-small=<run_dir>/test_confusion_matrix_patch_exact.npy
+Rscript R/confusion_matrix.R --input data/confusion_matrices_seg.csv \
+    --run seg-v2-global-unet-small --normalize true|none
+
 # Embedding-projection scatter (PCA / UMAP / t-SNE), one point per patch
 Rscript R/embedding_projection.R --list                        # runs available on disk
 Rscript R/embedding_projection.R --run GeoTessera_v2 --all-colours [--legend [bottom|right]]

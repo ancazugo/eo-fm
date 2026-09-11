@@ -54,8 +54,31 @@ def parse_args() -> argparse.Namespace:
                         "(default: $DATA_DIR/output/lcz-classification/dl)")
     p.add_argument("--matrix-name", default="test_confusion_matrix.npy",
                    help="matrix filename inside each run dir")
+    p.add_argument("--matrix", action="append", default=[], metavar="NAME=PATH",
+                   help="export this .npy directly, as run NAME. Repeatable. "
+                        "Given at least once, --metrics-csv is not read at all: "
+                        "the run set is exactly what is named here. For matrices "
+                        "that belong to no row of the results table -- a "
+                        "segmentation run, an ad-hoc evaluation -- pair it with "
+                        "its own --output so the classification cache is left "
+                        "alone.")
     p.add_argument("--output", type=Path, default=Path("data/confusion_matrices.csv"))
     return p.parse_args()
+
+
+def named_matrices(specs: list[str]) -> list[tuple[str, Path]]:
+    """Parse NAME=PATH arguments, splitting on the FIRST '=' only.
+
+    A run name never contains '=' but a path may, and getting this backwards
+    would silently truncate the path rather than fail.
+    """
+    out = []
+    for spec in specs:
+        name, sep, path = spec.partition("=")
+        if not sep or not name or not path:
+            raise SystemExit(f"--matrix wants NAME=PATH, got {spec!r}")
+        out.append((name, Path(path)))
+    return out
 
 
 def main() -> None:
@@ -66,21 +89,32 @@ def main() -> None:
         from utils.paths import OUTPUT_DIR
         run_root = OUTPUT_DIR / "lcz-classification" / "dl"
 
-    with args.metrics_csv.open() as fh:
-        runs = list(csv.DictReader(fh))
-    logger.info(f"{len(runs)} runs in {args.metrics_csv}; matrices under {run_root}")
+    # Two ways to name a run set. --matrix gives (name, path) outright and is
+    # the escape hatch for a matrix with no results-table row; otherwise the run
+    # set is the table, and the path is assembled per run.
+    if args.matrix:
+        named = named_matrices(args.matrix)
+        runs = [{"run_name": n, "__path": p} for n, p in named]
+        logger.info(f"{len(runs)} matrix/matrices named on the command line")
+    else:
+        with args.metrics_csv.open() as fh:
+            runs = list(csv.DictReader(fh))
+        logger.info(f"{len(runs)} runs in {args.metrics_csv}; "
+                    f"matrices under {run_root}")
 
     rows: list[dict] = []
     missing: list[str] = []
 
     for run in runs:
         name = run["run_name"]
-        path = run_root / name / args.matrix_name
+        path = run.get("__path") or run_root / name / args.matrix_name
         if not path.exists():
             # Skip, never fail: a still-training cell must not block the export.
             missing.append(name)
             continue
 
+        # float is what a normalised or averaged matrix comes back as; the counts
+        # are still integral, and int() below is exact for anything under 2^53.
         cm = np.load(path)
         if cm.shape != (NUM_CLASSES, NUM_CLASSES):
             logger.warning(f"{name}: expected {NUM_CLASSES}x{NUM_CLASSES}, "

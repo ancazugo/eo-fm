@@ -1,6 +1,7 @@
 # confusion_matrix.R ─ LCZ confusion matrix for the paper and poster.
 #
-#     Rscript R/confusion_matrix.R [--run <run_name>] [--normalize true|none] [--all]
+#     Rscript R/confusion_matrix.R [--run <run_name>] [--normalize true|none]
+#                                  [--all] [--input <csv>]
 #
 # Reads data/confusion_matrices.csv (written by src/export_confusion_matrix.py —
 # R has no .npy reader in this env, so the run artefacts are cached first, the
@@ -319,11 +320,12 @@ save_confusion_matrix <- function(cm, run, normalize = "true",
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 main <- function(args = commandArgs(trailingOnly = TRUE)) {
-  run <- NULL; normalize <- "true"; all_runs <- FALSE
+  run <- NULL; normalize <- "true"; all_runs <- FALSE; input <- CM_CSV
   i <- 1
   while (i <= length(args)) {
     switch(args[i],
       "--run"       = { run <- args[i + 1]; i <- i + 1 },
+      "--input"     = { input <- args[i + 1]; i <- i + 1 },
       "--normalize" = { normalize <- args[i + 1]; i <- i + 1 },
       "--all"       = { all_runs <- TRUE },
       stop("Unknown argument '", args[i], "'", call. = FALSE))
@@ -333,7 +335,7 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
     stop("--normalize must be 'true' or 'none'", call. = FALSE)
   }
 
-  cm <- read_confusion()
+  cm <- read_confusion(input)
   runs <- if (all_runs) sort(unique(cm$run_name))
           else if (!is.null(run)) run
           else default_run(cm)
