@@ -962,7 +962,10 @@ Rscript R/metrics_table_mirror.R   # -> plots/models/metrics_table_mirror.{png,p
 #   deeper half and the shallower half is centred in it, so the type size is the
 #   same on both sides (the halves have 7 and 4 models per cell) -- which is the
 #   whole point of one table. Each half is still normalised and best-marked
-#   within itself: the two tasks are not one ranking.
+#   within itself: the two tasks are not one ranking. A star on the left half's
+#   headers marks the metrics aggregated to the So2Sat patch -- they share a
+#   header with the right half's, which is what makes them readable across, and
+#   the star is what says they are not natively the same measurement.
 
 Rscript R/metrics_table.R --task segmentation   # -> plots/models/seg_metrics_table.{png,pdf,html}
 #   The same table, same hues and same column heads, from data/seg_metrics.csv

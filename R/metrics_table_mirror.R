@@ -26,27 +26,19 @@
 
 source("R/metrics_table.R")
 
-# Which task goes on which side, and what the half is called above it.
+# Which task goes on which side. The halves are not titled: the Model column
+# names them well enough -- U-Nets on one side, ResNets on the other -- and a
+# banner over each half competed with the column headers it sat on top of.
 SIDES <- list(
-  left  = list(key = "L", task = "segmentation",
-               header = "Semantic segmentation"),
-  right = list(key = "R", task = "classification",
-               header = "Patch classification")
+  left  = list(key = "L", task = "segmentation"),
+  right = list(key = "R", task = "classification")
 )
 
-# The mirror's own geometry. Everything else comes from R/metrics_table.R.
-SIDE_HDR_Y  <- 2.55   # the half's name, rows above the first row
-SIDE_RULE_Y <- 2.15   # rule under it
-Y_ABOVE_M   <- 3.05   # panel top, rows above the first row (room for both)
-SIDE_PT     <- BODY_PT * 1.15
-
-# The note under the caption. Says what the reader cannot see: that the left
-# half's numbers are a patch-exact restriction and the two halves are separate
-# rankings.
-MIRROR_NOTE <- paste(
-  "Left: segmentation scored on the So2Sat patches it covers exactly",
-  "(mIoU per-pixel at 10 m, and not computed on the gridded split).",
-  "Each half is normalised and marked within itself.")
+# What the asterisk on the segmentation half's headers means. It is a glossary
+# term, so it goes on the caption's one line with the rest of them rather than
+# into a note of its own.
+STAR <- "*"
+STAR_GLOSS <- "aggregated to the So2Sat patch"
 
 #' Evaluate `expr` with METRIC_COLS temporarily bound to `cols`.
 #'
@@ -98,6 +90,19 @@ assign_rows <- function(dfs) {
 
 # ── Columns ───────────────────────────────────────────────────────────────────
 
+#' Mark the metrics that are an aggregation, not a native measurement.
+#'
+#' A segmentation run predicts pixels; its OA here is those predictions pooled
+#' onto the So2Sat patches they cover exactly. Under the same header as the
+#' classification half's OA -- which is the point, they are meant to be read
+#' across -- that difference is invisible, so the header carries a star. mIoU
+#' has no star: it IS per-pixel, and is the one column with no counterpart.
+star_headers <- function(metrics) {
+  starred <- grepl("_patch_exact$", names(metrics))
+  metrics[starred] <- paste0(metrics[starred], STAR)
+  metrics
+}
+
 #' One side's columns, in OUTWARD order (nearest the axis first).
 #'
 #' Keys are side-prefixed: the two halves both have an "embedding" and a
@@ -111,7 +116,7 @@ side_spec <- function(df, metrics, key) {
     list(list(key = "params", header = "# Params",
               values = df$params_label, align = "num")),
     lapply(names(metrics), function(m)
-      list(key = m, header = unname(metrics[m]),
+      list(key = m, header = unname(star_headers(metrics)[m]),
            values = fmt_metric(df[[m]]), align = "num")))
   lapply(c(text, num), function(c) { c$key <- paste0(key, ".", c$key); c })
 }
@@ -256,16 +261,6 @@ mirror_table_plot <- function(dfs, profiles, highlight = "dash") {
   headers <- data.frame(x = lay$anchor, label = lay$header, hjust = lay$hjust,
                         stringsAsFactors = FALSE)
 
-  # The half's name, over the columns that belong to it. Without it the reader
-  # has only the metric headers to tell the two tasks apart, and OA is OA.
-  side_hdr <- do.call(rbind, lapply(names(SIDES), function(s) {
-    k <- SIDES[[s]]$key
-    cols <- lay[substr(lay$key, 1, 1) == k, ]
-    data.frame(x0 = min(cols$left), x1 = max(cols$left + cols$width),
-               label = SIDES[[s]]$header, stringsAsFactors = FALSE)
-  }))
-  side_hdr$x <- (side_hdr$x0 + side_hdr$x1) / 2
-
   # --- rules -----------------------------------------------------------------
   # A split boundary spans the page; an embedding boundary inside a split spans
   # only its own half, and stops at the axis so it never cuts the Split label.
@@ -274,9 +269,14 @@ mirror_table_plot <- function(dfs, profiles, highlight = "dash") {
 
   emb_rules <- do.call(rbind, lapply(names(SIDES), function(s) {
     d <- dfs[[s]]; k <- SIDES[[s]]$key
-    blk <- paste(d$split_label, d$embedding_label)
-    rows <- d$.row[c(FALSE, blk[-1] != blk[-length(blk)])]
-    rows <- setdiff(rows, split_rows)
+    # Within a split only. Comparing consecutive rows across the whole frame
+    # also fires where one split ends and the next begins -- and with the
+    # halves centred in their blocks that row is NOT the block top, so it
+    # survived the split-rule filter and drew a stray hairline above the first
+    # row of the shallower half.
+    same  <- d$split_label[-1] == d$split_label[-nrow(d)]
+    moved <- d$embedding_label[-1] != d$embedding_label[-nrow(d)]
+    rows <- d$.row[c(FALSE, same & moved)]
     if (!length(rows)) return(NULL)
     cols <- lay[substr(lay$key, 1, 1) == k, ]
     # Out to the page edge, in to the Embedding column's inner edge.
@@ -301,8 +301,13 @@ mirror_table_plot <- function(dfs, profiles, highlight = "dash") {
   gloss_cols <- c(profiles$right$metrics,
                   profiles$left$metrics[!profiles$left$metrics %in%
                                           profiles$right$metrics])
+  star_term <- sprintf('bold("%s")*" %s"', STAR, STAR_GLOSS)
+  # The star's own term has to be inside the width the glossary is fitted to,
+  # or shrink-to-fit would fit the line and then push it off the page.
+  star_w <- str_w(paste0(STAR, " ", STAR_GLOSS, "      "), pt = CAP_PT)
   cap <- with_metrics(gloss_cols,
-                      metric_caption(total_w = x_right + 2 * PAD_OUT))
+                      metric_caption(total_w = x_right + 2 * PAD_OUT - star_w))
+  cap$expr <- paste(cap$expr, star_term, sep = '*"      "*')
 
   p <- ggplot() +
     geom_tile(data = cells, aes(x = x, y = -row, fill = fill, width = w),
@@ -340,12 +345,6 @@ mirror_table_plot <- function(dfs, profiles, highlight = "dash") {
     geom_text(data = headers, aes(x = x, y = HEADER_Y, label = label,
                                   hjust = hjust),
               size = LABEL_SIZE_MM, fontface = "bold", colour = TEXT_COL) +
-    geom_text(data = side_hdr, aes(x = x, y = SIDE_HDR_Y, label = label),
-              size = SIDE_PT / .pt, fontface = "bold", colour = TEXT_COL,
-              hjust = 0.5) +
-    geom_segment(data = side_hdr,
-                 aes(x = x0, xend = x1, y = SIDE_RULE_Y, yend = SIDE_RULE_Y),
-                 linewidth = 0.4, colour = RULE_COL) +
     geom_segment(data = rules,
                  aes(x = x, xend = xend, y = y, yend = y, linewidth = lw,
                      colour = colour)) +
@@ -356,11 +355,8 @@ mirror_table_plot <- function(dfs, profiles, highlight = "dash") {
     scale_y_continuous(expand = expansion(0)) +
     annotate("text", x = x_right, y = -n - 1.1, label = cap$expr, parse = TRUE,
              hjust = 1, vjust = 1, size = cap$size_mm, colour = CAPTION_COL) +
-    annotate("text", x = x_right, y = -n - NOTE_DROP, label = MIRROR_NOTE,
-             hjust = 1, vjust = 1, fontface = "italic", size = cap$size_mm,
-             colour = CAPTION_COL) +
     coord_cartesian(xlim = c(-PAD_OUT, x_right + PAD_OUT),
-                    ylim = c(-n - Y_BELOW - NOTE_ROOM, Y_ABOVE_M), clip = "off") +
+                    ylim = c(-n - Y_BELOW, Y_ABOVE), clip = "off") +
     theme_eofm() +
     theme(
       axis.title = element_blank(), axis.text = element_blank(),
@@ -371,7 +367,7 @@ mirror_table_plot <- function(dfs, profiles, highlight = "dash") {
   margin_in <- 2 * MARGIN_PT / 72
   structure(p,
             fig_width  = x_right + 2 * PAD_OUT + margin_in,
-            fig_height = (n + Y_ABOVE_M + Y_BELOW + NOTE_ROOM) * ROW_H + margin_in)
+            fig_height = (n + Y_ABOVE + Y_BELOW) * ROW_H + margin_in)
 }
 
 # ── Entry point ───────────────────────────────────────────────────────────────
