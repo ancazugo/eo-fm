@@ -1,6 +1,7 @@
 # lcz_raster.R ─ Plot an LCZ GeoTIFF over a lon/lat ROI, on the canonical palette.
 #
 #     Rscript R/lcz_raster.R --input <file.tif> --bbox <W,S,E,N> --name <stem>
+#         [--distribution bar --dist-side bottom --x-axis top]
 #
 # or, as a library:
 #
@@ -802,6 +803,10 @@ attach_dist_bar <- function(p, df, side = c("bottom", "top", "left", "right"),
 #'   (vertical).
 #' @param pie_corner corner for the "pie", as scalebar_corner.
 #' @param pie_size pie diameter as a fraction of the panel width.
+#' @param x_axis edge carrying the longitude labels, "bottom" or "top". Worth
+#'   moving when the class-mix bar is at the bottom: the two then sit at
+#'   opposite edges instead of the coordinates being read across a strip of
+#'   colour that has nothing to do with them.
 lcz_raster_plot <- function(path, bbox, legend = FALSE, scalebar = TRUE,
                             scalebar_corner = "br", title = NULL,
                             legend_ncol = 4, digits = 1, guppd = FALSE,
@@ -812,9 +817,10 @@ lcz_raster_plot <- function(path, bbox, legend = FALSE, scalebar = TRUE,
                             guppd_highlight = NULL, resolution = TRUE,
                             distribution = c("none", "pie", "bar"),
                             dist_side = "bottom", pie_corner = "bl",
-                            pie_size = PIE_SIZE,
+                            pie_size = PIE_SIZE, x_axis = c("bottom", "top"),
                             panel_in = 6.5, max_cells = 4e6) {
   distribution <- match.arg(distribution)
+  x_axis <- match.arg(x_axis)
   rc <- read_lcz_roi(path, bbox, max_cells = max_cells)
 
   # The value column is named after the file, so take it positionally rather
@@ -907,7 +913,8 @@ lcz_raster_plot <- function(path, bbox, legend = FALSE, scalebar = TRUE,
     # and then rejects the mismatched lengths. A function is applied to whatever
     # breaks survive, so the edge labels come through.
     scale_x_continuous(breaks = brk(e[["xmin"]], e[["xmax"]]),
-                       labels = degree_labeller(rc, "x", digits)) +
+                       labels = degree_labeller(rc, "x", digits),
+                       position = x_axis) +
     scale_y_continuous(breaks = brk(e[["ymin"]], e[["ymax"]]),
                        labels = degree_labeller(rc, "y", digits)) +
     theme_eofm() +
@@ -1035,6 +1042,12 @@ if (sys.nframe() == 0L && !interactive()) {
   parser$add_argument("--pie-size", type = "double", default = PIE_SIZE,
                       dest = "pie_size",
                       help = "pie diameter as a fraction of the panel width")
+  parser$add_argument("--x-axis", default = "bottom", dest = "x_axis",
+                      choices = c("bottom", "top"),
+                      help = paste("edge carrying the longitude labels. Pair",
+                                   "--x-axis top with --dist-side bottom so the",
+                                   "coordinates and the class-mix bar sit at",
+                                   "opposite edges"))
   parser$add_argument("--digits", type = "integer", default = 1,
                       help = "decimal places on the coordinate labels")
   parser$add_argument("--max-cells", type = "double", default = 4e6, dest = "max_cells")
@@ -1080,6 +1093,7 @@ if (sys.nframe() == 0L && !interactive()) {
                                     else args$guppd_highlight,
                   resolution = !args$no_resolution,
                   distribution = args$distribution, dist_side = args$dist_side,
+                  x_axis = args$x_axis,
                   dist_thickness = args$dist_thickness,
                   pie_corner = args$pie_corner, pie_size = args$pie_size,
                   scalebar = !args$no_scalebar,

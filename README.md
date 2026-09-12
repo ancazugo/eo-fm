@@ -1053,6 +1053,12 @@ Rscript R/lcz_raster.R --list-basemaps       # providers, and which need a key
 Rscript R/lcz_raster.R --input lcz_36.5_-1.5.tif lcz_37.0_-1.5.tif \
     --bbox W,S,E,N --name <stem> --no-resolution
 
+# The class-mix bar below the map, coordinates above it: with both at the bottom
+# the longitude labels are read across a strip of colour that has nothing to do
+# with them (--x-axis top works on its own too)
+Rscript R/lcz_raster.R --input <file.tif> --bbox W,S,E,N --name <stem> \
+    --distribution bar --dist-side bottom --x-axis top
+
 # That raster's LCZ mix, as a pie plus a horizontal composition bar
 Rscript R/lcz_composition.R --input <file.tif> --name <stem> [--bbox W,S,E,N] [--labels]
 # -> plots/maps/<stem>_{pie,bar,composition}.png; --subdir composition puts them
