@@ -40,6 +40,13 @@ SIDES <- list(
 STAR <- "*"
 STAR_GLOSS <- "aggregated to the So2Sat patch"
 
+# Metrics a half carries in its own table but not in this one. mIoU is the
+# segmentation table's fifth column and belongs there; here it would be a column
+# with nothing facing it across the axis, on a split where it is not even
+# computed. Dropping it also makes the two halves four columns each, so the
+# figure is a reflection rather than an approximation of one.
+MIRROR_DROP <- c("test_miou")
+
 #' Evaluate `expr` with METRIC_COLS temporarily bound to `cols`.
 #'
 #' read_metrics(), column_fills() and column_bests() all resolve METRIC_COLS
@@ -57,35 +64,53 @@ with_metrics <- function(cols, expr) {
 
 #' Give both halves row numbers on one shared grid.
 #'
-#' A split's block is as deep as its DEEPER half, and the shallower one is
-#' CENTRED in it. The alternative -- stretching the shorter half's rows to fill
-#' the block -- would put the two halves at different type sizes, which is
-#' precisely what the figure must not do: the point of one table is that a
-#' number on the left and a number on the right are read the same way. Centring
-#' is then what keeps the leftover space from reading as a gap torn in one side:
-#' the short half sits opposite the middle of the long one, beside the split
-#' label they share.
+#' Alignment happens at the EMBEDDING block, not at the split.
 #'
-#' @return the input frames with a `.row` column, plus a block table.
+#' Each (split, embedding) block is as deep as its deeper half and the
+#' shallower one is centred in it. The alternative -- stretching the shorter
+#' half's rows -- would put the two halves at different type sizes, which is
+#' precisely what the figure must not do: the point of one table is that a
+#' number on the left and a number on the right are read the same way. So the
+#' leftover space has to go somewhere, and the question is only where.
+#'
+#' Centring at the split put all of it in one gap: four segmentation rows, then
+#' six blank ones, and the reader had to count to work out which embedding the
+#' rows opposite belonged to. Centring at the embedding spreads the same space
+#' into a band above and below each block, and lands the Tessera and AlphaEarth
+#' blocks opposite each other across the axis -- so the embedding hairlines line
+#' up on both sides and the two halves can be read row-band by row-band.
+#'
+#' @return the input frames with a `.row` column, plus a split block table.
 assign_rows <- function(dfs) {
-  levs <- unique(unlist(lapply(dfs, function(d) as.character(d$split_label))))
-  order_by <- match(levs, unname(SPLIT_LABELS))
-  splits <- levs[order(is.na(order_by), order_by, levs)]
+  ordered_levels <- function(f, lookup) {
+    levs <- unique(unlist(lapply(dfs, function(d) as.character(d[[f]]))))
+    i <- match(levs, unname(lookup))
+    levs[order(is.na(i), i, levs)]
+  }
+  splits <- ordered_levels("split_label", SPLIT_LABELS)
+  embeddings <- ordered_levels("embedding_label", EMBEDDING_LABELS)
 
   offset <- 0
   blocks <- list()
+  emb_tops <- integer(0)
   for (d in names(dfs)) dfs[[d]]$.row <- NA_integer_
   for (s in splits) {
-    depth <- max(vapply(dfs, function(d) sum(d$split_label == s), integer(1)))
-    for (d in names(dfs)) {
-      i <- which(dfs[[d]]$split_label == s)
-      pad <- floor((depth - length(i)) / 2)
-      if (length(i)) dfs[[d]]$.row[i] <- offset + pad + seq_along(i)
+    top <- offset + 1
+    for (e in embeddings) {
+      rows_of <- function(d) which(d$split_label == s & d$embedding_label == e)
+      depth <- max(vapply(dfs, function(d) length(rows_of(d)), integer(1)))
+      if (!depth) next
+      if (offset + 1 > top) emb_tops <- c(emb_tops, offset + 1L)
+      for (d in names(dfs)) {
+        i <- rows_of(dfs[[d]])
+        pad <- floor((depth - length(i)) / 2)
+        if (length(i)) dfs[[d]]$.row[i] <- offset + pad + seq_along(i)
+      }
+      offset <- offset + depth
     }
-    blocks[[s]] <- c(top = offset + 1, bottom = offset + depth)
-    offset <- offset + depth
+    blocks[[s]] <- c(top = top, bottom = offset)
   }
-  list(dfs = dfs, blocks = blocks, n = offset)
+  list(dfs = dfs, blocks = blocks, emb_tops = emb_tops, n = offset)
 }
 
 # ── Columns ───────────────────────────────────────────────────────────────────
@@ -204,10 +229,11 @@ side_cells <- function(df, metrics, key, lay, ramps) {
 mirror_table_plot <- function(dfs, profiles, highlight = "dash") {
   highlight <- match.arg(highlight, HIGHLIGHT_STYLES)
 
-  laid   <- assign_rows(dfs)
-  dfs    <- laid$dfs
-  n      <- laid$n
-  blocks <- laid$blocks
+  laid     <- assign_rows(dfs)
+  dfs      <- laid$dfs
+  n        <- laid$n
+  blocks   <- laid$blocks
+  emb_tops <- laid$emb_tops
 
   specs <- setNames(lapply(names(SIDES), function(s)
     side_spec(dfs[[s]], profiles[[s]]$metrics, SIDES[[s]]$key)), names(SIDES))
@@ -267,24 +293,21 @@ mirror_table_plot <- function(dfs, profiles, highlight = "dash") {
   split_rows <- unname(vapply(blocks, function(b) b["top"], numeric(1)))
   split_rows <- split_rows[split_rows > 1]
 
+  # An embedding boundary is a position in the BLOCK grid, not a gap between
+  # two of a half's own rows: the blocks are aligned across the axis now, so
+  # both halves rule at the same place -- including a half whose rows are
+  # centred away from that edge, or absent from the block entirely.
   emb_rules <- do.call(rbind, lapply(names(SIDES), function(s) {
-    d <- dfs[[s]]; k <- SIDES[[s]]$key
-    # Within a split only. Comparing consecutive rows across the whole frame
-    # also fires where one split ends and the next begins -- and with the
-    # halves centred in their blocks that row is NOT the block top, so it
-    # survived the split-rule filter and drew a stray hairline above the first
-    # row of the shallower half.
-    same  <- d$split_label[-1] == d$split_label[-nrow(d)]
-    moved <- d$embedding_label[-1] != d$embedding_label[-nrow(d)]
-    rows <- d$.row[c(FALSE, same & moved)]
-    if (!length(rows)) return(NULL)
+    if (!length(emb_tops)) return(NULL)
+    k <- SIDES[[s]]$key
     cols <- lay[substr(lay$key, 1, 1) == k, ]
-    # Out to the page edge, in to the Embedding column's inner edge.
+    # Out to the page edge, in to the Embedding column's inner edge, so the
+    # rule never cuts across the Split label standing between the halves.
     inner <- if (k == "R") unname(xleft[paste0(k, ".embedding")]) else
       unname(xleft[paste0(k, ".embedding")] + wof[paste0(k, ".embedding")])
     data.frame(x = if (k == "R") inner else min(cols$left),
                xend = if (k == "R") max(cols$left + cols$width) else inner,
-               y = -(rows - 0.5), lw = 0.25, colour = SEP_COL,
+               y = -(emb_tops - 0.5), lw = 0.25, colour = SEP_COL,
                stringsAsFactors = FALSE)
   }))
 
@@ -382,7 +405,11 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
     i <- i + 1
   }
 
-  profiles <- lapply(SIDES, function(s) TASK_PROFILES[[s$task]])
+  profiles <- lapply(SIDES, function(s) {
+    pr <- TASK_PROFILES[[s$task]]
+    pr$metrics <- pr$metrics[!names(pr$metrics) %in% MIRROR_DROP]
+    pr
+  })
   dfs <- lapply(profiles, function(p) with_metrics(p$metrics, read_metrics(p$csv)))
 
   message("Mirrored table: ",
