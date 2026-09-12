@@ -956,6 +956,10 @@ Rscript R/split_maps.R          # -> plots/dataset/split_map_{global,orig_test,o
 Rscript R/metrics_table.R       # -> plots/models/model_metrics_table.{png,pdf,html}
 Rscript R/metrics_table.R --highlight dash|ring|halo|chip|bar|none   # best-value mark (default dash)
 Rscript R/metrics_table_mirror.R   # -> plots/models/metrics_table_mirror.{png,pdf}
+Rscript R/metrics_table_mirror.R --icons   # -> ..._icons.{png,pdf}: Split and
+#   Embedding as empty ICON_W slots, for icons pasted in afterwards. The columns
+#   stay (they hold the space and keep the centring honest), only their text and
+#   headers go: 12.2 in wide against 14.0.
 #   Both campaigns in one figure, mirrored about the Split column they share:
 #   segmentation left, classification right, and outward from the axis on each
 #   side embedding, model, # Params, the metrics (mIoU on the seg side only).

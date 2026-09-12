@@ -1,6 +1,7 @@
 # metrics_table_mirror.R ─ Both campaigns in one table, mirrored about the split.
 #
 #     Rscript R/metrics_table_mirror.R [--highlight dash|ring|halo|chip|bar|none]
+#                                      [--icons]
 #
 # Segmentation on the left, patch classification on the right, and between them
 # the one column the two share: the split. Everything else is reflected about
@@ -48,6 +49,15 @@ STAR_GLOSS <- "aggregated to the So2Sat patch"
 MIR_TEXT_PAD <- 0.06   # clear space around a string (TEXT_PAD is 0.12)
 MIR_CELL_PAD <- 0.05   # gutter each side of a tile  (CELL_PAD is 0.09)
 MIR_NUM_PAD  <- 0.05   # clear space inside a tile   (NUM_PAD  is 0.07)
+
+# --icons draws the Split and Embedding columns as empty slots: the text comes
+# out and an icon goes in by hand afterwards. The columns stay -- they are what
+# reserves the space and keeps the rules and the centring honest -- but they are
+# sized to a mark rather than to the word "Embedding", which is where most of
+# the remaining width was going.
+ICON_COLS <- c("split", "embedding")
+ICON_W    <- 0.40      # slot width, inches (ROW_H is 0.28, so this is a square-ish
+                       # cell); widen it here if the icons need more room
 
 #' Evaluate `expr` with METRIC_COLS temporarily bound to `cols`.
 #'
@@ -117,6 +127,9 @@ assign_rows <- function(dfs) {
 
 # ── Columns ───────────────────────────────────────────────────────────────────
 
+#' Is this column one of the icon slots?
+is_icon_col <- function(key) sub("^[LR]\\.", "", key) %in% ICON_COLS
+
 #' Mark the metrics that are an aggregation, not a native measurement.
 #'
 #' A segmentation run predicts pixels; its OA here is those predictions pooled
@@ -154,7 +167,7 @@ side_spec <- function(df, metrics, key) {
 #' rather than one half: the two innermost columns face each other across the
 #' Split column, and a header wide enough to reach across it has to widen
 #' something, not overprint.
-mirror_layout <- function(specs, split_values) {
+mirror_layout <- function(specs, split_values, icons = FALSE) {
   # One tile width for every metric column on both sides, and one for the two
   # # Params columns. They hold the same kind of number and the figure is
   # symmetric, so a ragged pair either side of the axis would read as meaning.
@@ -180,6 +193,15 @@ mirror_layout <- function(specs, split_values) {
 
   width <- ifelse(align == "num", tile + 2 * MIR_CELL_PAD,
                   pmax(vals_w, hdr_w) + 2 * MIR_TEXT_PAD + 2 * MIR_CELL_PAD)
+
+  # An empty slot is sized by the mark that will go in it, not by the words that
+  # are no longer there -- and its header is empty too, so it takes no part in
+  # the collision pass below.
+  if (icons) {
+    slot <- is_icon_col(keys)
+    width[slot] <- ICON_W
+    hdr_w[slot] <- 0
+  }
 
   # Which edge a text column's strings hang from: away from the axis on the
   # right, towards it on the left, so the two halves read outward together.
@@ -244,7 +266,8 @@ side_cells <- function(df, metrics, key, lay, ramps) {
 }
 
 #' The mirrored table as a ggplot, carrying its own figure size in inches.
-mirror_table_plot <- function(dfs, profiles, highlight = "dash") {
+mirror_table_plot <- function(dfs, profiles, highlight = "dash",
+                              icons = FALSE) {
   highlight <- match.arg(highlight, HIGHLIGHT_STYLES)
 
   laid     <- assign_rows(dfs)
@@ -256,7 +279,8 @@ mirror_table_plot <- function(dfs, profiles, highlight = "dash") {
   specs <- setNames(lapply(names(SIDES), function(s)
     side_spec(dfs[[s]], profiles[[s]]$metrics, SIDES[[s]]$key)), names(SIDES))
   split_values <- names(blocks)
-  lay <- mirror_layout(specs, split_values)
+  lay <- mirror_layout(specs, split_values, icons = icons)
+  if (icons) lay$header[is_icon_col(lay$key)] <- ""
   x_right <- attr(lay, "total")
   xleft   <- setNames(lay$left, lay$key)
   xanch   <- setNames(lay$anchor, lay$key)
@@ -301,6 +325,12 @@ mirror_table_plot <- function(dfs, profiles, highlight = "dash") {
       data.frame(row = d$.row, x = unname(xanch[paste0(k, ".model")]),
                  label = d$model_label, hjust = hj, stringsAsFactors = FALSE))
   })))
+
+  # The slots are left empty on purpose; drawing nothing is the whole point.
+  if (icons) texts <- texts[!texts$label %in% c(names(blocks),
+                                                unlist(lapply(dfs, function(d)
+                                                  as.character(d$embedding_label)))), ,
+                            drop = FALSE]
 
   headers <- data.frame(x = lay$anchor, label = lay$header, hjust = lay$hjust,
                         stringsAsFactors = FALSE)
@@ -414,11 +444,12 @@ mirror_table_plot <- function(dfs, profiles, highlight = "dash") {
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 main <- function(args = commandArgs(trailingOnly = TRUE)) {
-  highlight <- "dash"
+  highlight <- "dash"; icons <- FALSE
   i <- 1
   while (i <= length(args)) {
     switch(args[i],
       "--highlight" = { highlight <- args[i + 1]; i <- i + 1 },
+      "--icons"     = { icons <- TRUE },
       stop("Unknown argument '", args[i], "'", call. = FALSE))
     i <- i + 1
   }
@@ -431,8 +462,9 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
             sprintf("%s %d rows", s, nrow(dfs[[s]])), character(1)),
             collapse = ", "), ", highlight = ", highlight)
 
-  p <- mirror_table_plot(dfs, profiles, highlight = highlight)
-  save_plot(p, "metrics_table_mirror", width = attr(p, "fig_width"),
+  p <- mirror_table_plot(dfs, profiles, highlight = highlight, icons = icons)
+  save_plot(p, if (icons) "metrics_table_mirror_icons" else "metrics_table_mirror",
+            width = attr(p, "fig_width"),
             height = attr(p, "fig_height"), formats = c("png", "pdf"),
             subdir = PLOT_DIR_MODELS)
 }
