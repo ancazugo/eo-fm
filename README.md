@@ -931,6 +931,11 @@ python src/export_run_metrics.py
 # Saved test_confusion_matrix.npy run artefacts -> data/confusion_matrices.csv
 # (R has no .npy reader in this env)
 python src/export_confusion_matrix.py
+# --run-root is repeatable and searched in order: while $DATA_DIR is full the
+# campaign's run dirs are split across two filesystems, and which root holds a
+# given run is an accident of when it was launched, not something to look up.
+python src/export_confusion_matrix.py \
+    --run-root ${DATA_DIR}/output/lcz-classification/dl --run-root /scratch/acz25/eo_fm/output
 
 Rscript R/prepare_city_data.R   # -> data/so2sat_city_{summary,class_counts}.csv
 Rscript R/plotting.R            # -> plots/dataset/class_*, dataset_*, so2sat_*

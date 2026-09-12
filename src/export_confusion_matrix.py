@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 from pathlib import Path
 
 import numpy as np
@@ -49,9 +50,12 @@ def parse_args() -> argparse.Namespace:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--metrics-csv", type=Path, default=Path("data/model_metrics.csv"),
                    help="run set to export, one row per run (default: the results table)")
-    p.add_argument("--run-root", type=Path, default=None,
-                   help="directory holding the run dirs "
-                        "(default: $DATA_DIR/output/lcz-classification/dl)")
+    p.add_argument("--run-root", type=Path, action="append", default=[],
+                   help="directory holding the run dirs. Repeatable, and searched "
+                        "in the order given -- the campaign's runs are split "
+                        "across two filesystems while $DATA_DIR is full "
+                        "(default: $DATA_DIR/output/lcz-classification/dl, then "
+                        "$SCRATCH_OUTPUT_DIR if it is set)")
     p.add_argument("--matrix-name", default="test_confusion_matrix.npy",
                    help="matrix filename inside each run dir")
     p.add_argument("--matrix", action="append", default=[], metavar="NAME=PATH",
@@ -84,10 +88,25 @@ def named_matrices(specs: list[str]) -> list[tuple[str, Path]]:
 def main() -> None:
     args = parse_args()
 
-    run_root = args.run_root
-    if run_root is None:
+    run_roots = args.run_root
+    if not run_roots:
         from utils.paths import OUTPUT_DIR
-        run_root = OUTPUT_DIR / "lcz-classification" / "dl"
+        run_roots = [OUTPUT_DIR / "lcz-classification" / "dl"]
+        scratch = os.environ.get("SCRATCH_OUTPUT_DIR")
+        if scratch:
+            run_roots.append(Path(scratch))
+
+    def find_matrix(name: str) -> Path | None:
+        """First root that holds this run's matrix, or None.
+
+        A run lives under exactly one root, but which one is an accident of when
+        it was launched, so the caller must not have to know.
+        """
+        for root in run_roots:
+            path = root / name / args.matrix_name
+            if path.exists():
+                return path
+        return None
 
     # Two ways to name a run set. --matrix gives (name, path) outright and is
     # the escape hatch for a matrix with no results-table row; otherwise the run
@@ -99,16 +118,16 @@ def main() -> None:
     else:
         with args.metrics_csv.open() as fh:
             runs = list(csv.DictReader(fh))
-        logger.info(f"{len(runs)} runs in {args.metrics_csv}; "
-                    f"matrices under {run_root}")
+        logger.info(f"{len(runs)} runs in {args.metrics_csv}; matrices under "
+                    + ", ".join(str(r) for r in run_roots))
 
     rows: list[dict] = []
     missing: list[str] = []
 
     for run in runs:
         name = run["run_name"]
-        path = run.get("__path") or run_root / name / args.matrix_name
-        if not path.exists():
+        path = run.get("__path") or find_matrix(name)
+        if path is None or not path.exists():
             # Skip, never fail: a still-training cell must not block the export.
             missing.append(name)
             continue
