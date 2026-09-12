@@ -928,6 +928,16 @@ Each script declares its own subfolder via `save_plot(..., subdir = PLOT_DIR_*)`
 # embedding x split x family x preset cell; supersedes are logged)
 python src/export_run_metrics.py
 
+# The segmentation campaign, same export: its metrics are the `*_patch_exact`
+# ones -- the run scored on the So2Sat patches its prediction covers exactly,
+# which is the only footing on which a pixel model and a patch model compare.
+# `--include-unfinished` also emits the cells that are still training, with
+# blank metrics, so the table shows them pending rather than not at all.
+# (A segmentation run's split comes from its recorded `--split-mode`, not its
+# config, and is mapped into the same vocabulary the classification rows use.)
+python src/export_run_metrics.py --task segmentation --since 2026-09-10 \
+    --include-unfinished --output data/seg_metrics.csv
+
 # Saved test_confusion_matrix.npy run artefacts -> data/confusion_matrices.csv
 # (R has no .npy reader in this env)
 python src/export_confusion_matrix.py
@@ -945,6 +955,13 @@ Rscript R/split_maps.R          # -> plots/dataset/split_map_{global,orig_test,o
 #   reads as the cell lattice it is rather than as another patch outline
 Rscript R/metrics_table.R       # -> plots/models/model_metrics_table.{png,pdf,html}
 Rscript R/metrics_table.R --highlight dash|ring|halo|chip|bar|none   # best-value mark (default dash)
+Rscript R/metrics_table.R --task segmentation   # -> plots/models/seg_metrics_table.{png,pdf,html}
+#   The same table, same hues and same column heads, from data/seg_metrics.csv
+#   plus an mIoU column -- one script with two TASK_PROFILES rather than a fork,
+#   so the two figures cannot drift apart. Two kinds of blank, told apart by the
+#   Model column: "(running)" marks a cell whose run has not finished, while the
+#   mIoU column is empty for the whole gridded block because that split is
+#   evaluated on So2Sat patches and has no per-pixel test set at all.
 
 # -> plots/models/confusion_matrix_<run>_{proportions,counts}.png  (PNG only)
 # Defaults to the best-kappa culture-10 run; --all loops every run in the CSV.

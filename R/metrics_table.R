@@ -1,6 +1,7 @@
 # metrics_table.R ─ Test-metric results table for the paper and poster.
 #
-#     Rscript R/metrics_table.R [--highlight dash|ring|halo|chip|bar|none]
+#     Rscript R/metrics_table.R [--task classification|segmentation]
+#                               [--highlight dash|ring|halo|chip|bar|none]
 #
 # Reads data/model_metrics.csv (written by src/export_run_metrics.py — R has no
 # W&B client, so the numbers are cached first, exactly as R/prepare_city_data.R
@@ -9,6 +10,13 @@
 # Written to plots/:
 #   model_metrics_table.png / .pdf  - the poster/paper asset
 #   model_metrics_table.html        - a sortable reactable companion
+#
+# `--task segmentation` draws the SAME table for the segmentation campaign, from
+# data/seg_metrics.csv. It is one table with two inputs rather than two scripts:
+# the hues, ramps, geometry, highlight and caption machinery are what make the
+# two comparable at a glance, and a fork would let them drift apart. A task
+# supplies only what actually differs -- its CSV, its metric columns and the
+# name it is saved under -- through TASK_PROFILES.
 #
 # The static table is hand-drawn from geom_tile + geom_text. `gt`, `gtExtras`,
 # `formattable`, `flextable`, `webshot2` and `chromote` are all absent from this
@@ -31,7 +39,7 @@ suppressPackageStartupMessages({
   library(scales)
 })
 
-METRICS_CSV <- file.path("data", "model_metrics.csv")
+METRICS_CSV <- file.path("data", "model_metrics.csv")   # the default task's cache
 
 # ── What the table shows ──────────────────────────────────────────────────────
 
@@ -51,7 +59,41 @@ METRIC_GLOSS <- c("test_acc"   = "Overall accuracy",
                   "test_oaw"   = "Weighted OA",
                   "test_kappa_w"   = "Weighted kappa",
                   "test_acc_macro" = "Class-mean accuracy",
-                  "test_f1_micro"  = "Micro F1")
+                  "test_f1_micro"  = "Micro F1",
+                  "test_acc_patch_exact"   = "Overall accuracy",
+                  "test_oau_patch_exact"   = "Urban-class OA (LCZ 1-10)",
+                  "test_f1_patch_exact"    = "Class-mean F1",
+                  "test_kappa_patch_exact" = "Cohen's kappa",
+                  "test_miou"              = "Mean IoU")
+
+# A metric whose name says nothing the reader needs; the note below the caption
+# carries it instead. Set per task, so only the segmentation table pays for it.
+METRIC_NOTE <- NULL
+
+# What differs between the two campaigns, and nothing else.
+#
+# A segmentation model predicts pixels and a classifier predicts patches, so the
+# only honest comparison is the segmentation run's `_patch_exact` evaluation --
+# its predictions scored on the So2Sat patches it covers exactly. Those columns
+# therefore carry the SAME headers as the classification table: read across the
+# two figures and "OA" means one thing. mIoU is the exception and is labelled as
+# itself, because it has no classification counterpart at all.
+TASK_PROFILES <- list(
+  classification = list(
+    csv     = file.path("data", "model_metrics.csv"),
+    name    = "model_metrics_table",
+    note    = NULL,
+    metrics = c("test_acc" = "OA", "test_oau" = "OAu",
+                "test_f1" = "Macro F1", "test_kappa" = "κ")),
+  segmentation = list(
+    csv     = file.path("data", "seg_metrics.csv"),
+    name    = "seg_metrics_table",
+    note    = paste("Patch-exact evaluation: predictions scored on the So2Sat",
+                    "patches they cover exactly.  mIoU is per-pixel at 10 m."),
+    metrics = c("test_acc_patch_exact" = "OA", "test_oau_patch_exact" = "OAu",
+                "test_f1_patch_exact" = "Macro F1",
+                "test_kappa_patch_exact" = "κ", "test_miou" = "mIoU"))
+)
 
 # ── Presentation vocabulary ───────────────────────────────────────────────────
 #
@@ -83,7 +125,17 @@ ARCH_LABELS <- c(
   "efficientnet_b1" = "EfficientNet-B1", "efficientnet_b5" = "EfficientNet-B5",
   "efficientnet_b7" = "EfficientNet-B7",
   "convnext_tiny" = "ConvNeXt-T", "convnext_base" = "ConvNeXt-B",
-  "convnext_large" = "ConvNeXt-L", "gap" = "GAP")
+  "convnext_large" = "ConvNeXt-L", "gap" = "GAP",
+  # Segmentation has no timm name to quote: the family IS the architecture and
+  # the preset is its capacity, so the label names the capacity the way the
+  # ShallowCNN rows do -- depth/base-width, straight out of UNET_PRESETS and
+  # FCN8_PRESETS in src/models/.
+  "fcn8_nano"  = "FCN-8s-2/8",  "fcn8_small"  = "FCN-8s-3/16",
+  "fcn8_base"  = "FCN-8s-3/32", "fcn8_medium" = "FCN-8s-3/48",
+  "fcn8_large" = "FCN-8s-3/64",
+  "unet_nano"  = "U-Net-2/8",   "unet_small"  = "U-Net-3/32",
+  "unet_base"  = "U-Net-3/48",  "unet_medium" = "U-Net-4/32",
+  "unet_large" = "U-Net-4/48")
 
 # Acronyms are expanded where the reader first meets them, then used short. The
 # table is read top to bottom, so "first" is the first row of the sorted frame --
@@ -105,7 +157,10 @@ DROP_FAMILIES <- c("densenet")
 # block reads as "this is what the embedding alone gives you, and this is what
 # each architecture adds". After it, simplest family first. Families not listed
 # sort alphabetically after these.
-FAMILY_ORDER <- c("linear_probe", "shallow_cnn", "mobilenet", "resnet")
+FAMILY_ORDER <- c("linear_probe", "shallow_cnn", "mobilenet", "resnet",
+                  # Segmentation, same principle: the plain encoder-decoder with
+                  # score fusion before the one with skip connections.
+                  "fcn8", "unet")
 
 #' Apply a label lookup, keeping unmatched values as themselves.
 relabel <- function(x, lookup) {
@@ -242,7 +297,7 @@ read_metrics <- function(path = METRICS_CSV) {
 
   missing <- setdiff(names(METRIC_COLS), names(df))
   if (length(missing)) {
-    stop("data/model_metrics.csv has no column(s): ", paste(missing, collapse = ", "),
+    stop(path, " has no column(s): ", paste(missing, collapse = ", "),
          ". Re-run src/export_run_metrics.py, or drop them from METRIC_COLS.",
          call. = FALSE)
   }
@@ -262,13 +317,37 @@ read_metrics <- function(path = METRICS_CSV) {
       params_label    = fmt_params(n_params),
       embedding_label = ordered_by(embedding_label, EMBEDDING_LABELS),
       split_label     = ordered_by(split_label, SPLIT_LABELS),
-      family_rank     = match(family, FAMILY_ORDER)
+      family_rank     = match(family, FAMILY_ORDER),
+      # Carried as a column, not read from `df` after the arrange(): the frame
+      # is reordered below and a bare vector from the outer scope would then be
+      # off by however far each row moved -- silently tagging the wrong run.
+      run_state       = df_state(df)
     ) |>
     # Split leads: the splits are not comparable to each other, so they are
     # stacked tables that happen to share a header.
     arrange(split_label, embedding_label, is.na(family_rank), family_rank,
             family, n_params) |>
-    mutate(model_label = expand_first_use(model_label))
+    mutate(model_label = expand_first_use(model_label),
+           model_label = mark_pending(model_label, run_state))
+}
+
+#' The `state` column if the export wrote one, else "finished" for every row.
+#'
+#' Older caches predate the column; a missing state is not evidence that a run
+#' was unfinished, so it reads as finished rather than marking the whole table.
+df_state <- function(df) {
+  if ("state" %in% names(df)) as.character(df$state) else rep("finished", nrow(df))
+}
+
+#' Tag a row whose run has not finished.
+#'
+#' Without this the table says "—" in two different voices: a metric that does
+#' not exist for that split (segmentation mIoU is not computed on the gridded
+#' split) and a metric that does not exist YET. The cell is still worth drawing
+#' -- it is in the ladder and its size is already known -- but the reader has to
+#' be told which kind of blank it is.
+mark_pending <- function(labels, state) {
+  ifelse(state == "finished", labels, paste0(labels, "  (", state, ")"))
 }
 
 #' Expand an acronym the first time it is drawn, and only then.
@@ -309,9 +388,12 @@ RING_OUT  <- 0.10                    # highlight rule's height over the tile, ro
 DASH_PATTERN <- "41"   # 4 on, 1 off, in line widths
 CELL_H    <- 0.86                    # tile height, in row units
 CAP_PT    <- 11 * 0.75               # theme_eofm()'s plot.caption size
+CAP_PT_MIN <- 11 * 0.55              # floor when the caption is shrunk to fit
+NOTE_DROP  <- 1.75                   # the note's baseline, rows below the last row
 HEADER_Y  <- 1.15                    # header baseline, in row units above the top rule
 Y_ABOVE   <- 1.75                    # panel top, row units above the first row
 Y_BELOW   <- 1.95                    # panel bottom, row units below the last row
+NOTE_ROOM <- 0.55                    # extra bottom room when a note is drawn
 
 PAD_OUT   <- 0.06                    # breathing room outside the outermost column
 MARGIN_PT <- 4                       # plot.margin, all four sides
@@ -527,7 +609,8 @@ metrics_table_plot <- function(df, scale_by = c("split", "column"),
     hjust = ifelse(lay$align == "left", 0, 0.5),
     stringsAsFactors = FALSE)
 
-  cap <- metric_caption()
+  cap <- metric_caption(total_w = x_right + 2 * PAD_OUT)
+  y_below <- Y_BELOW + if (is.null(METRIC_NOTE)) 0 else NOTE_ROOM
 
   p <- ggplot() +
     geom_tile(data = cells, aes(x = x, y = -row, fill = fill, width = w),
@@ -580,9 +663,20 @@ metrics_table_plot <- function(df, scale_by = c("split", "column"),
     scale_x_continuous(expand = expansion(0)) +
     scale_y_continuous(expand = expansion(0)) +
     annotate("text", x = x_right, y = -n - 1.1, label = cap$expr, parse = TRUE,
-             hjust = 1, vjust = 1, size = cap$size_mm, colour = CAPTION_COL) +
+             hjust = 1, vjust = 1, size = cap$size_mm, colour = CAPTION_COL)
+
+  # The note says what the numbers ARE, not what they are called, so it gets its
+  # own line under the glossary rather than a slot inside it: joined on, it
+  # forced the whole caption down to an unreadable size to fit the width.
+  if (!is.null(METRIC_NOTE)) {
+    p <- p + annotate("text", x = x_right, y = -n - NOTE_DROP,
+                      label = METRIC_NOTE, hjust = 1, vjust = 1,
+                      fontface = "italic", size = cap$size_mm,
+                      colour = CAPTION_COL)
+  }
+  p <- p +
     coord_cartesian(xlim = c(-PAD_OUT, x_right + PAD_OUT),
-                    ylim = c(-n - Y_BELOW, Y_ABOVE), clip = "off") +
+                    ylim = c(-n - y_below, Y_ABOVE), clip = "off") +
     theme_eofm() +
     theme(
       axis.title = element_blank(), axis.text = element_blank(),
@@ -599,7 +693,7 @@ metrics_table_plot <- function(df, scale_by = c("split", "column"),
   margin_in <- 2 * MARGIN_PT / 72
   structure(p,
             fig_width  = x_right + 2 * PAD_OUT + margin_in,
-            fig_height = (n + Y_ABOVE + Y_BELOW) * ROW_H + margin_in)
+            fig_height = (n + Y_ABOVE + y_below) * ROW_H + margin_in)
 }
 
 #' The caption under the table, as a plotmath expression sized to fit.
@@ -624,10 +718,19 @@ metric_caption <- function(total_w = NULL) {
   }, character(1))
 
   parts <- sprintf('%s*" %s"', head_expr, unname(METRIC_GLOSS[keys]))
+  plain <- paste(sprintf("%s: %s", unname(METRIC_COLS[keys]),
+                         unname(METRIC_GLOSS[keys])), collapse = "      ")
+  # Shrink to fit rather than run off the page. The glossary grows with the
+  # metric set while the figure's width is set by its columns, so the two can
+  # disagree -- and a caption wider than the device is silently TRUNCATED,
+  # losing the end of the line with no warning at all.
+  pt <- CAP_PT
+  if (!is.null(total_w)) {
+    have <- str_w(plain, pt = pt)
+    if (have > total_w) pt <- max(CAP_PT_MIN, pt * total_w / have)
+  }
   list(expr = paste(parts, collapse = '*"      "*'),
-       size_mm = CAP_PT / .pt,
-       plain = paste(sprintf("%s: %s", unname(METRIC_COLS[keys]),
-                             unname(METRIC_GLOSS[keys])), collapse = "      "))
+       size_mm = pt / .pt, plain = plain)
 }
 
 # ── reactable companion ───────────────────────────────────────────────────────
@@ -698,24 +801,42 @@ save_metrics_table <- function(df, name = "model_metrics_table",
 }
 
 main <- function(args = commandArgs(trailingOnly = TRUE)) {
-  highlight <- "dash"
-  if (length(args) >= 2 && args[1] == "--highlight") highlight <- args[2]
+  highlight <- "dash"; task <- "classification"
+  i <- 1
+  while (i <= length(args)) {
+    switch(args[i],
+      "--highlight" = { highlight <- args[i + 1]; i <- i + 1 },
+      "--task"      = { task      <- args[i + 1]; i <- i + 1 },
+      stop("Unknown argument '", args[i], "'", call. = FALSE))
+    i <- i + 1
+  }
+  if (!task %in% names(TASK_PROFILES)) {
+    stop("--task must be one of: ", paste(names(TASK_PROFILES), collapse = ", "),
+         call. = FALSE)
+  }
+  profile <- TASK_PROFILES[[task]]
 
-  df <- read_metrics()
-  message("Metrics table: ", nrow(df), " rows, ",
+  # Rebound in the script's own environment, which every drawing function below
+  # resolves through: the alternative is threading one argument through a dozen
+  # signatures that exist only to pass it on.
+  METRIC_COLS <<- profile$metrics
+  METRIC_NOTE <<- profile$note
+
+  df <- read_metrics(profile$csv)
+  message("Metrics table (", task, "): ", nrow(df), " rows, ",
           length(METRIC_COLS), " metric columns, highlight = ", highlight)
 
-  save_metrics_table(df, highlight = highlight)
+  save_metrics_table(df, name = profile$name, highlight = highlight)
 
   if (requireNamespace("reactable", quietly = TRUE) &&
       requireNamespace("htmlwidgets", quietly = TRUE)) {
-    html <- plot_path(PLOT_DIR_MODELS, "model_metrics_table.html")
+    html <- plot_path(PLOT_DIR_MODELS, paste0(profile$name, ".html"))
     htmlwidgets::saveWidget(metrics_table_reactable(df), file.path(getwd(), html),
                             selfcontained = TRUE, title = "eo-fm model metrics")
     # saveWidget stages the JS dependencies next to the output and does not clean
     # up after inlining them. The HTML carries no reference to the directory, so
     # leaving it behind would only be misleading clutter.
-    libdir <- plot_path(PLOT_DIR_MODELS, "model_metrics_table_files")
+    libdir <- plot_path(PLOT_DIR_MODELS, paste0(profile$name, "_files"))
     if (dir.exists(libdir)) unlink(libdir, recursive = TRUE)
     message("  wrote ", html)
   } else {
