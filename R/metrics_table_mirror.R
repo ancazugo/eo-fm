@@ -40,12 +40,14 @@ SIDES <- list(
 STAR <- "*"
 STAR_GLOSS <- "aggregated to the So2Sat patch"
 
-# Metrics a half carries in its own table but not in this one. mIoU is the
-# segmentation table's fifth column and belongs there; here it would be a column
-# with nothing facing it across the axis, on a split where it is not even
-# computed. Dropping it also makes the two halves four columns each, so the
-# figure is a reflection rather than an approximation of one.
-MIRROR_DROP <- c("test_miou")
+# Tighter than the standalone tables, and deliberately. Those are one table each
+# and can afford air; this one is two, so every gutter is paid for twice and the
+# figure was 16 inches wide. The type size is untouched -- only the space around
+# it -- so the halves still read at the same size, which is the constraint that
+# matters.
+MIR_TEXT_PAD <- 0.06   # clear space around a string (TEXT_PAD is 0.12)
+MIR_CELL_PAD <- 0.05   # gutter each side of a tile  (CELL_PAD is 0.09)
+MIR_NUM_PAD  <- 0.05   # clear space inside a tile   (NUM_PAD  is 0.07)
 
 #' Evaluate `expr` with METRIC_COLS temporarily bound to `cols`.
 #'
@@ -158,7 +160,7 @@ mirror_layout <- function(specs, split_values) {
   # symmetric, so a ragged pair either side of the axis would read as meaning.
   is_metric <- function(s) grepl("^[LR]\\.(?!embedding|model|params)", s$key, perl = TRUE)
   all_cols <- unlist(specs, recursive = FALSE)
-  tile_of <- function(s) str_w(s$values) + 2 * NUM_PAD
+  tile_of <- function(s) str_w(s$values) + 2 * MIR_NUM_PAD
   metric_tile <- max(vapply(Filter(is_metric, all_cols), tile_of, numeric(1)))
   params_tile <- max(vapply(Filter(function(s) grepl("\\.params$", s$key), all_cols),
                             tile_of, numeric(1)))
@@ -176,8 +178,8 @@ mirror_layout <- function(specs, split_values) {
   align  <- vapply(page, `[[`, "", "align")
   keys   <- vapply(page, `[[`, "", "key")
 
-  width <- ifelse(align == "num", tile + 2 * CELL_PAD,
-                  pmax(vals_w, hdr_w) + 2 * TEXT_PAD + 2 * CELL_PAD)
+  width <- ifelse(align == "num", tile + 2 * MIR_CELL_PAD,
+                  pmax(vals_w, hdr_w) + 2 * MIR_TEXT_PAD + 2 * MIR_CELL_PAD)
 
   # Which edge a text column's strings hang from: away from the axis on the
   # right, towards it on the left, so the two halves read outward together.
@@ -196,11 +198,27 @@ mirror_layout <- function(specs, split_values) {
     width[i] <- width[i] + over[i]
   }
 
+  # The Split column is the figure's axis, so it has to be the figure's middle
+  # too -- otherwise "mirrored about the split" is a claim the geometry does not
+  # keep. The halves are not naturally equal (five metric columns on the left
+  # against four, a longer model name on the right), so the shorter one is given
+  # the difference as padding on its OUTER edge: invisible at the page margin,
+  # and it leaves the columns themselves as tight as they were.
+  ax <- which(align == "axis")
+  w_left  <- sum(width[seq_len(ax - 1)])
+  w_right <- sum(width[-seq_len(ax)])
+  pad_l <- max(0, w_right - w_left)
+  pad_r <- max(0, w_left - w_right)
+
+  # Outside the columns, not inside the outermost one: widening a column would
+  # push its tile off the rhythm the other eight keep, and the reader would see
+  # the last metric sitting a little too far out for no reason.
+  left <- pad_l + cumsum(c(0, head(width, -1)))
   data.frame(key = keys, header = vapply(page, `[[`, "", "header"),
              align = align, hjust = hjust, width = width, tile = tile,
              left = left, centre = left + width / 2,
              anchor = left + width * hjust, stringsAsFactors = FALSE) |>
-    structure(total = sum(width))
+    structure(total = pad_l + sum(width) + pad_r)
 }
 
 # ── The figure ────────────────────────────────────────────────────────────────
@@ -405,11 +423,7 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
     i <- i + 1
   }
 
-  profiles <- lapply(SIDES, function(s) {
-    pr <- TASK_PROFILES[[s$task]]
-    pr$metrics <- pr$metrics[!names(pr$metrics) %in% MIRROR_DROP]
-    pr
-  })
+  profiles <- lapply(SIDES, function(s) TASK_PROFILES[[s$task]])
   dfs <- lapply(profiles, function(p) with_metrics(p$metrics, read_metrics(p$csv)))
 
   message("Mirrored table: ",
