@@ -137,10 +137,13 @@ ARCH_LABELS <- c(
   "unet_base"  = "U-Net-3/48",  "unet_medium" = "U-Net-4/32",
   "unet_large" = "U-Net-4/48")
 
-# Acronyms are expanded where the reader first meets them, then used short. The
-# table is read top to bottom, so "first" is the first row of the sorted frame --
-# resolved in read_metrics() after arrange(), never here.
-ARCH_FIRST_USE <- c("GAP" = "Global Average Pooling (GAP)")
+# Acronyms are NOT expanded in the table. "Global Average Pooling (GAP)" was
+# spelled out on its first row until 2026-09-12, when it turned out to be the
+# widest string in the Model column by half an inch -- and in the mirrored
+# table, where the column is paid for twice, that set the width of the whole
+# figure. The expansion belongs in the prose that carries the figure, not in a
+# cell. Recover the first-use machinery from git history if a table ever wants
+# it back.
 
 # Families excluded from the figure, with the reason. This is a *display*
 # decision, so it lives here rather than in src/export_run_metrics.py: the CSV
@@ -327,8 +330,7 @@ read_metrics <- function(path = METRICS_CSV) {
     # stacked tables that happen to share a header.
     arrange(split_label, embedding_label, is.na(family_rank), family_rank,
             family, n_params) |>
-    mutate(model_label = expand_first_use(model_label),
-           model_label = mark_pending(model_label, run_state))
+    mutate(model_label = mark_pending(model_label, run_state))
 }
 
 #' The `state` column if the export wrote one, else "finished" for every row.
@@ -348,21 +350,6 @@ df_state <- function(df) {
 #' be told which kind of blank it is.
 mark_pending <- function(labels, state) {
   ifelse(state == "finished", labels, paste0(labels, "  (", state, ")"))
-}
-
-#' Expand an acronym the first time it is drawn, and only then.
-#'
-#' Operates on the frame in its final row order, so what it calls "first" is the
-#' topmost row of the table as printed. Every later occurrence keeps the short
-#' form, which is the point: the long one is a definition, not a name, and
-#' repeating it down a column would make the Model column the widest in the
-#' table for no information.
-expand_first_use <- function(labels) {
-  for (short in names(ARCH_FIRST_USE)) {
-    i <- match(short, labels)
-    if (!is.na(i)) labels[i] <- unname(ARCH_FIRST_USE[short])
-  }
-  labels
 }
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
