@@ -955,6 +955,15 @@ Rscript R/split_maps.R          # -> plots/dataset/split_map_{global,orig_test,o
 #   reads as the cell lattice it is rather than as another patch outline
 Rscript R/metrics_table.R       # -> plots/models/model_metrics_table.{png,pdf,html}
 Rscript R/metrics_table.R --highlight dash|ring|halo|chip|bar|none   # best-value mark (default dash)
+Rscript R/metrics_table_mirror.R   # -> plots/models/metrics_table_mirror.{png,pdf}
+#   Both campaigns in one figure, mirrored about the Split column they share:
+#   segmentation left, classification right, and outward from the axis on each
+#   side embedding, model, # Params, metrics. A split's block is as deep as its
+#   deeper half and the shallower half is centred in it, so the type size is the
+#   same on both sides (the halves have 7 and 4 models per cell) -- which is the
+#   whole point of one table. Each half is still normalised and best-marked
+#   within itself: the two tasks are not one ranking.
+
 Rscript R/metrics_table.R --task segmentation   # -> plots/models/seg_metrics_table.{png,pdf,html}
 #   The same table, same hues and same column heads, from data/seg_metrics.csv
 #   plus an mIoU column -- one script with two TASK_PROFILES rather than a fork,
