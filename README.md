@@ -972,6 +972,9 @@ Rscript R/metrics_table_mirror.R --icons   # -> ..._icons.{png,pdf}: Split and
 #   the whole point of one table, and the leftover space is spread over four
 #   bands instead of pooling into one gap. Each half is still normalised and
 #   best-marked within itself: the two tasks are not one ranking. A star on the
+#   Type is set larger here than in the standalone tables (MIR_TYPE) and the
+#   section rules darker: this figure carries twice the numbers and is read from
+#   further away. A star on the
 #   left half's headers marks the metrics aggregated to the So2Sat patch -- they
 #   share a header with the right half's, which is what makes them readable
 #   across, and the star is what says they are not natively the same thing.

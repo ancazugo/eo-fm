@@ -59,18 +59,38 @@ ICON_COLS <- c("split", "embedding")
 ICON_W    <- 0.40      # slot width, inches (ROW_H is 0.28, so this is a square-ish
                        # cell); widen it here if the icons need more room
 
-#' Evaluate `expr` with METRIC_COLS temporarily bound to `cols`.
+# Type is set larger here than in the standalone tables. This figure carries
+# twice the numbers at the same row pitch, so it is read further from the eye --
+# on a poster, or across a spread -- and the tighter gutters above bought the
+# room for it. The row grid is NOT scaled with it: the extra size goes into the
+# glyphs, not into the table's height.
+MIR_TYPE     <- 1.20                     # type scale, against the stack's body size
+MIR_BODY_PT  <- BODY_PT * MIR_TYPE       # what every width is measured at
+MIR_LABEL_MM <- LABEL_SIZE_MM * MIR_TYPE # what every string is drawn at
+
+# The section rules were grey85, which is a hairline you have to look for. They
+# are doing real work -- a split boundary and an embedding boundary are the two
+# things that tell the reader which block a row belongs to -- so they are darker
+# than the stack's default separator, and the split stays darker than the
+# embedding to keep the hierarchy the standalone tables have.
+MIR_SPLIT_COL <- "grey40"
+MIR_EMB_COL   <- "grey62"
+
+#' Evaluate `expr` with a global from R/metrics_table.R temporarily rebound.
 #'
-#' read_metrics(), column_fills() and column_bests() all resolve METRIC_COLS
-#' from this environment, which is exactly what lets one set of functions serve
-#' two metric sets -- but only one at a time, so the binding is swapped around
-#' each half rather than threaded through every signature.
-with_metrics <- function(cols, expr) {
-  old <- METRIC_COLS
-  METRIC_COLS <<- cols
-  on.exit(METRIC_COLS <<- old, add = TRUE)
+#' Those functions resolve their settings from this environment, which is what
+#' lets one set of them serve two metric sets and two type sizes -- but only one
+#' at a time, so the binding is swapped around the call rather than threaded
+#' through every signature.
+with_global <- function(name, value, expr) {
+  old <- get(name, envir = globalenv())
+  assign(name, value, envir = globalenv())
+  on.exit(assign(name, old, envir = globalenv()), add = TRUE)
   expr
 }
+
+#' `expr` with METRIC_COLS bound to `cols`; see with_global().
+with_metrics <- function(cols, expr) with_global("METRIC_COLS", cols, expr)
 
 # ── Rows ──────────────────────────────────────────────────────────────────────
 
@@ -173,7 +193,7 @@ mirror_layout <- function(specs, split_values, icons = FALSE) {
   # symmetric, so a ragged pair either side of the axis would read as meaning.
   is_metric <- function(s) grepl("^[LR]\\.(?!embedding|model|params)", s$key, perl = TRUE)
   all_cols <- unlist(specs, recursive = FALSE)
-  tile_of <- function(s) str_w(s$values) + 2 * MIR_NUM_PAD
+  tile_of <- function(s) str_w(s$values, pt = MIR_BODY_PT) + 2 * MIR_NUM_PAD
   metric_tile <- max(vapply(Filter(is_metric, all_cols), tile_of, numeric(1)))
   params_tile <- max(vapply(Filter(function(s) grepl("\\.params$", s$key), all_cols),
                             tile_of, numeric(1)))
@@ -182,12 +202,14 @@ mirror_layout <- function(specs, split_values, icons = FALSE) {
                align = "axis")
   page <- c(rev(specs$left), list(axis), specs$right)
 
-  hdr_w <- vapply(page, function(s) str_w(s$header, bold = TRUE), numeric(1))
+  hdr_w <- vapply(page, function(s) str_w(s$header, pt = MIR_BODY_PT,
+                                          bold = TRUE), numeric(1))
   tile  <- vapply(page, function(s) {
     if (s$align != "num") 0
     else if (grepl("\\.params$", s$key)) params_tile else metric_tile
   }, numeric(1))
-  vals_w <- vapply(page, function(s) str_w(s$values), numeric(1))
+  vals_w <- vapply(page, function(s) str_w(s$values, pt = MIR_BODY_PT),
+                   numeric(1))
   align  <- vapply(page, `[[`, "", "align")
   keys   <- vapply(page, `[[`, "", "key")
 
@@ -355,15 +377,15 @@ mirror_table_plot <- function(dfs, profiles, highlight = "dash",
       unname(xleft[paste0(k, ".embedding")] + wof[paste0(k, ".embedding")])
     data.frame(x = if (k == "R") inner else min(cols$left),
                xend = if (k == "R") max(cols$left + cols$width) else inner,
-               y = -(emb_tops - 0.5), lw = 0.25, colour = SEP_COL,
+               y = -(emb_tops - 0.5), lw = 0.3, colour = MIR_EMB_COL,
                stringsAsFactors = FALSE)
   }))
 
   rules <- rbind(
     data.frame(x = 0, xend = x_right, y = -c(-0.5, n + 0.5), lw = 0.6,
                colour = RULE_COL, stringsAsFactors = FALSE),
-    data.frame(x = 0, xend = x_right, y = -(split_rows - 0.5), lw = 0.35,
-               colour = SEP_COL, stringsAsFactors = FALSE),
+    data.frame(x = 0, xend = x_right, y = -(split_rows - 0.5), lw = 0.45,
+               colour = MIR_SPLIT_COL, stringsAsFactors = FALSE),
     emb_rules)
 
   # One glossary, not two. The halves deliberately share column HEADERS -- that
@@ -375,9 +397,11 @@ mirror_table_plot <- function(dfs, profiles, highlight = "dash",
   star_term <- sprintf('bold("%s")*" %s"', STAR, STAR_GLOSS)
   # The star's own term has to be inside the width the glossary is fitted to,
   # or shrink-to-fit would fit the line and then push it off the page.
-  star_w <- str_w(paste0(STAR, " ", STAR_GLOSS, "      "), pt = CAP_PT)
-  cap <- with_metrics(gloss_cols,
-                      metric_caption(total_w = x_right + 2 * PAD_OUT - star_w))
+  star_w <- str_w(paste0(STAR, " ", STAR_GLOSS, "      "),
+                  pt = CAP_PT * MIR_TYPE)
+  cap <- with_global("CAP_PT", CAP_PT * MIR_TYPE,
+           with_metrics(gloss_cols,
+                        metric_caption(total_w = x_right + 2 * PAD_OUT - star_w)))
   cap$expr <- paste(cap$expr, star_term, sep = '*"      "*')
 
   p <- ggplot() +
@@ -410,12 +434,12 @@ mirror_table_plot <- function(dfs, profiles, highlight = "dash",
     geom_text(data = cells,
               aes(x = x, y = -row, label = label, colour = colour,
                   fontface = face),
-              size = LABEL_SIZE_MM, hjust = 0.5) +
+              size = MIR_LABEL_MM, hjust = 0.5) +
     geom_text(data = texts, aes(x = x, y = -row, label = label, hjust = hjust),
-              size = LABEL_SIZE_MM, colour = TEXT_COL) +
+              size = MIR_LABEL_MM, colour = TEXT_COL) +
     geom_text(data = headers, aes(x = x, y = HEADER_Y, label = label,
                                   hjust = hjust),
-              size = LABEL_SIZE_MM, fontface = "bold", colour = TEXT_COL) +
+              size = MIR_LABEL_MM, fontface = "bold", colour = TEXT_COL) +
     geom_segment(data = rules,
                  aes(x = x, xend = xend, y = y, yend = y, linewidth = lw,
                      colour = colour)) +
