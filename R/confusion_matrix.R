@@ -81,7 +81,12 @@ BAR_GAP    <- 0.34                   # panel right edge -> colourbar
 BAR_W      <- 0.17                   # colourbar width
 BAR_LAB    <- 0.06                   # colourbar -> its tick labels
 BODY_PT    <- LEGEND_TEXT_PT
-CELL_SHRINK <- 0.86                  # in-cell type, relative to BODY_PT
+# In-cell type, relative to BODY_PT. Above 1 by design: the number in the cell
+# is what the figure is FOR, and it was set smaller than the body size of every
+# other figure in the stack while being the thing a reader leans in to read. The
+# cell sizes to its own widest label, so raising this grows the matrix with the
+# type rather than crowding it.
+CELL_TYPE  <- 1.10
 CHIP_PT    <- LEGEND_TEXT_PT * 0.92
 TITLE_PT   <- 11 * 0.95              # theme_eofm()'s axis.title size
 PAD_OUT    <- 0.08
@@ -188,7 +193,7 @@ confusion_matrix_plot <- function(cm, run, normalize = "true", title = NULL) {
   # always four characters and stay at the floor; counts are not ("3,150" is
   # half again as wide as "0.90"), and a fixed cell would let them overrun the
   # tile edges. Square cells, so this sets both axes.
-  cell   <- max(CELL_MIN, str_w(d$label, BODY_PT * CELL_SHRINK) + 2 * NUM_PAD)
+  cell   <- max(CELL_MIN, str_w(d$label, BODY_PT * CELL_TYPE) + 2 * NUM_PAD)
   chip_u <- CHIP_IN / cell               # chip size, in cell units
   gap_u  <- CHIP_GAP / cell
 
@@ -211,7 +216,7 @@ confusion_matrix_plot <- function(cm, run, normalize = "true", title = NULL) {
     geom_tile(data = d, aes(px, py, fill = fill),
               width = 1, height = 1, colour = GRID_COL, linewidth = 0.2) +
     geom_text(data = d, aes(px, py, label = label, colour = text),
-              size = BODY_PT * CELL_SHRINK / .pt) +
+              size = BODY_PT * CELL_TYPE / .pt) +
     # Predicted chips, along the top.
     geom_tile(data = chips, aes(pos, chip_x_y, fill = colour),
               width = chip_u, height = chip_u, colour = NA) +
