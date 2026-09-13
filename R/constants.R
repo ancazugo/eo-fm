@@ -314,8 +314,13 @@ plot_path <- function(subdir = NULL, ...) {
 #'
 #' Uses ragg for the PNG: better text rendering than the default device, and it
 #' is already installed in this environment.
+#' @param bg canvas behind the plot. Transparent by default, which is what the
+#'   paper and the poster want -- the page's own ground shows through, and a
+#'   figure dropped on a coloured slide does not arrive in a white box. Pass a
+#'   colour for a figure that has to stand on its own, where transparency would
+#'   leave dark-mode viewers reading dark type on a dark ground.
 save_plot <- function(plot, name, width = 7, height = 5, dpi = 400,
-                      formats = "png", subdir = NULL) {
+                      formats = "png", subdir = NULL, bg = "transparent") {
   dir  <- plot_path(subdir)
   dir.create(dir, showWarnings = FALSE, recursive = TRUE)
   paths <- character(0)
@@ -323,10 +328,10 @@ save_plot <- function(plot, name, width = 7, height = 5, dpi = 400,
     path <- file.path(dir, paste0(name, ".", fmt))
     if (fmt == "png") {
       ggsave(path, plot, width = width, height = height, dpi = dpi,
-             device = ragg::agg_png, bg = "transparent")
+             device = ragg::agg_png, bg = bg)
     } else {
       ggsave(path, plot, width = width, height = height, device = cairo_pdf,
-             bg = "transparent")
+             bg = bg)
     }
     paths <- c(paths, path)
   }

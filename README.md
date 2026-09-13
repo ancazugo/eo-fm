@@ -1004,6 +1004,11 @@ Rscript R/embedding_projection.R --list                        # runs available 
 Rscript R/embedding_projection.R --run GeoTessera_v2 --all-colours [--legend [bottom|right]]
 Rscript R/embedding_projection.R --run GeoTessera_v2 --method umap --full   # every patch
 Rscript R/embedding_projection.R --run GeoTessera_v2 --colour lon|lat|lonlat --full --legend
+# Figures save on a transparent canvas; --background paints one instead, for a
+# scatter that has to stand on its own rather than sit on the page's own ground.
+# --suffix keeps the variant beside the original rather than overwriting it.
+Rscript R/embedding_projection.R --run proj_GeoTessera_v2_global_gap --method pca \
+    --colour lcz_name --background white --suffix _white
 # -> plots/embeddings/projection_<run>_<method>_<colour>.png  (PNG only; no key unless --legend)
 
 # One row per patch: both embeddings' PCA/UMAP coords + location, LCZ, Koppen, M49

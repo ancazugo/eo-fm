@@ -969,6 +969,12 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
     if (is.na(v) || startsWith(v, "--")) "bottom" else v
   }
   caption <- "--caption" %in% args
+  # The stack saves on a transparent canvas; a scatter this dense sometimes has
+  # to stand on its own instead, where the points' own colours need a ground.
+  background <- .flag(args, "--background", "transparent")
+  # Appended to the output stem, so a variant of a figure that already exists
+  # (a white-ground copy of a transparent one) does not overwrite it.
+  suffix <- .flag(args, "--suffix", "")
   # --full: every patch, not the ~10% sample. Slow to draw, which is the whole
   # reason for the 60k default, so it has to be asked for explicitly. It lifts
   # the cap too unless --max-points says otherwise.
@@ -999,12 +1005,20 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
     # viewer opens quickly, and this is a raster-dense figure either way.
     # A right-hand key takes width from the panel; a bottom one takes height, and
     # how much depends on how many rows it wrapped to -- hence the attribute.
+    # theme_eofm() paints plot.background transparent, which wins over the
+    # device's canvas colour: without this the file saves transparent whatever
+    # --background says. `&` reaches inside a patchwork, `+` does not.
+    if (background != "transparent") {
+      bg_theme <- theme(plot.background = element_rect(fill = background,
+                                                       colour = NA))
+      p <- if (inherits(p, "patchwork")) p & bg_theme else p + bg_theme
+    }
     rows <- attr(p, "legend_rows") %||% 0L
     base <- if (legend == "right") 7.5 else 6.2
-    save_plot(p, paste0("projection_", run$run, "_", method, "_", colour),
+    save_plot(p, paste0("projection_", run$run, "_", method, "_", colour, suffix),
               width  = max(base, attr(p, "legend_width") %||% 0),
               height = 6.2 + rows * 0.26 + if (rows > 0) 0.18 else 0,
-              formats = "png",
+              formats = "png", bg = background,
             subdir = PLOT_DIR_EMBEDDINGS)
   }
   invisible(NULL)
