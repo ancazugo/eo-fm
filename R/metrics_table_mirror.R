@@ -1,7 +1,7 @@
 # metrics_table_mirror.R ─ Both campaigns in one table, mirrored about the split.
 #
 #     Rscript R/metrics_table_mirror.R [--highlight dash|ring|halo|chip|bar|none]
-#                                      [--icons]
+#                                      [--stage test|val] [--icons]
 #
 # Segmentation on the left, patch classification on the right, and between them
 # the one column the two share: the split. Everything else is reflected about
@@ -35,11 +35,31 @@ SIDES <- list(
   right = list(key = "R", task = "classification")
 )
 
-# What the asterisk on the segmentation half's headers means. It is a glossary
-# term, so it goes on the caption's one line with the rest of them rather than
-# into a note of its own.
+# Which pair of task profiles the figure is drawn from, and what its star means.
+#
+# `test` mirrors the patch-exact test tables; `val` mirrors the validation ones,
+# read at each run's best-monitor epoch. The star is NOT the same claim in the
+# two: on test it promises the segmentation numbers have been pooled onto the
+# So2Sat patch, which is what makes them comparable across the axis; on
+# validation no such pooling ever happens, so the star has to say the opposite --
+# that the shared header is covering two different units of measurement. Getting
+# that backwards would be the single most misleading thing this figure could do,
+# so the gloss lives with the stage rather than as one global string.
+STAGES <- list(
+  test = list(
+    tasks = list(left = "segmentation", right = "classification"),
+    name  = "metrics_table_mirror",
+    gloss = "aggregated to the So2Sat patch"),
+  val = list(
+    tasks = list(left = "segmentation_val", right = "classification_val"),
+    name  = "metrics_table_mirror_val",
+    gloss = "per-pixel at 10 m, NOT pooled to the So2Sat patch")
+)
+
 STAR <- "*"
-STAR_GLOSS <- "aggregated to the So2Sat patch"
+# Rebound by main() from the chosen stage; the default keeps a bare source() of
+# this file behaving as it did.
+STAR_GLOSS <- STAGES$test$gloss
 
 # Tighter than the standalone tables, and deliberately. Those are one table each
 # and can afford air; this one is two, so every gutter is paid for twice and the
@@ -152,13 +172,20 @@ is_icon_col <- function(key) sub("^[LR]\\.", "", key) %in% ICON_COLS
 
 #' Mark the metrics that are an aggregation, not a native measurement.
 #'
-#' A segmentation run predicts pixels; its OA here is those predictions pooled
-#' onto the So2Sat patches they cover exactly. Under the same header as the
-#' classification half's OA -- which is the point, they are meant to be read
-#' across -- that difference is invisible, so the header carries a star. mIoU
-#' has no star: it IS per-pixel, and is the one column with no counterpart.
-star_headers <- function(metrics) {
-  starred <- grepl("_patch_exact$", names(metrics))
+#' Star the left half's headers that the right half also uses.
+#'
+#' The star marks exactly one thing: a header that appears on BOTH sides of the
+#' axis, inviting the reader across, while the quantity underneath it is not
+#' arrived at the same way. On test that difference is the patch-exact pooling;
+#' on validation it is that no pooling happens at all. Either way it is the
+#' SHARING of the header that creates the need for the mark, so that is what the
+#' rule tests -- not the metric's name, which was only ever a proxy that happened
+#' to hold for the test keys.
+#'
+#' mIoU is unstarred in both stages, and for the same reason: it appears on the
+#' left only, so it is never read across and claims nothing about the other half.
+star_headers <- function(metrics, shared = character()) {
+  starred <- unname(metrics) %in% shared
   metrics[starred] <- paste0(metrics[starred], STAR)
   metrics
 }
@@ -167,7 +194,7 @@ star_headers <- function(metrics) {
 #'
 #' Keys are side-prefixed: the two halves both have an "embedding" and a
 #' "params" column, and they are different columns in different places.
-side_spec <- function(df, metrics, key) {
+side_spec <- function(df, metrics, key, shared = character()) {
   text <- list(
     list(key = "embedding", header = "Embedding",
          values = levels(droplevels(df$embedding_label)), align = "text"),
@@ -176,7 +203,7 @@ side_spec <- function(df, metrics, key) {
     list(list(key = "params", header = "# Params",
               values = df$params_label, align = "num")),
     lapply(names(metrics), function(m)
-      list(key = m, header = unname(star_headers(metrics)[m]),
+      list(key = m, header = unname(star_headers(metrics, shared)[m]),
            values = fmt_metric(df[[m]]), align = "num")))
   lapply(c(text, num), function(c) { c$key <- paste0(key, ".", c$key); c })
 }
@@ -298,8 +325,12 @@ mirror_table_plot <- function(dfs, profiles, highlight = "dash",
   blocks   <- laid$blocks
   emb_tops <- laid$emb_tops
 
+  # Only the left half is starred: the right half is the reference the star
+  # points away from, so starring both would say nothing.
+  shared <- intersect(unname(profiles$left$metrics), unname(profiles$right$metrics))
   specs <- setNames(lapply(names(SIDES), function(s)
-    side_spec(dfs[[s]], profiles[[s]]$metrics, SIDES[[s]]$key)), names(SIDES))
+    side_spec(dfs[[s]], profiles[[s]]$metrics, SIDES[[s]]$key,
+              shared = if (s == "left") shared else character())), names(SIDES))
   split_values <- names(blocks)
   lay <- mirror_layout(specs, split_values, icons = icons)
   if (icons) lay$header[is_icon_col(lay$key)] <- ""
@@ -468,26 +499,35 @@ mirror_table_plot <- function(dfs, profiles, highlight = "dash",
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 main <- function(args = commandArgs(trailingOnly = TRUE)) {
-  highlight <- "dash"; icons <- FALSE
+  highlight <- "dash"; icons <- FALSE; stage <- "test"
   i <- 1
   while (i <= length(args)) {
     switch(args[i],
       "--highlight" = { highlight <- args[i + 1]; i <- i + 1 },
+      "--stage"     = { stage     <- args[i + 1]; i <- i + 1 },
       "--icons"     = { icons <- TRUE },
       stop("Unknown argument '", args[i], "'", call. = FALSE))
     i <- i + 1
   }
+  if (!stage %in% names(STAGES)) {
+    stop("--stage must be one of: ", paste(names(STAGES), collapse = ", "),
+         call. = FALSE)
+  }
 
-  profiles <- lapply(SIDES, function(s) TASK_PROFILES[[s$task]])
+  spec <- STAGES[[stage]]
+  STAR_GLOSS <<- spec$gloss
+  profiles <- lapply(SIDES, function(s) TASK_PROFILES[[spec$tasks[[
+    if (identical(s$key, "L")) "left" else "right"]]]])
   dfs <- lapply(profiles, function(p) with_metrics(p$metrics, read_metrics(p$csv)))
 
-  message("Mirrored table: ",
+  message("Mirrored table (", stage, "): ",
           paste(vapply(names(dfs), function(s)
             sprintf("%s %d rows", s, nrow(dfs[[s]])), character(1)),
             collapse = ", "), ", highlight = ", highlight)
 
+  name <- paste0(spec$name, if (icons) "_icons" else "")
   p <- mirror_table_plot(dfs, profiles, highlight = highlight, icons = icons)
-  save_plot(p, if (icons) "metrics_table_mirror_icons" else "metrics_table_mirror",
+  save_plot(p, name,
             width = attr(p, "fig_width"),
             height = attr(p, "fig_height"), formats = c("png", "pdf"),
             subdir = PLOT_DIR_MODELS)

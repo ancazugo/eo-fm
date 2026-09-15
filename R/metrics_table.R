@@ -1,6 +1,7 @@
-# metrics_table.R ─ Test-metric results table for the paper and poster.
+# metrics_table.R ─ Results table for the paper and poster.
 #
-#     Rscript R/metrics_table.R [--task classification|segmentation]
+#     Rscript R/metrics_table.R [--task classification|segmentation|
+#                                       classification_val|segmentation_val]
 #                               [--highlight dash|ring|halo|chip|bar|none]
 #
 # Reads data/model_metrics.csv (written by src/export_run_metrics.py — R has no
@@ -17,6 +18,12 @@
 # two comparable at a glance, and a fork would let them drift apart. A task
 # supplies only what actually differs -- its CSV, its metric columns and the
 # name it is saved under -- through TASK_PROFILES.
+#
+# The `*_val` tasks are the validation counterparts, from the `--stage val`
+# exports. They are the same figure with two fewer certainties: neither campaign
+# logs OAu during validation, and the segmentation one never aggregates to So2Sat
+# patches while validating, so its numbers are per-pixel rather than patch-exact.
+# Each says so in its note rather than quietly looking like the test table.
 #
 # The static table is hand-drawn from geom_tile + geom_text. `gt`, `gtExtras`,
 # `formattable`, `flextable`, `webshot2` and `chromote` are all absent from this
@@ -64,7 +71,13 @@ METRIC_GLOSS <- c("test_acc"   = "Overall accuracy",
                   "test_oau_patch_exact"   = "Urban-class OA (LCZ 1-10)",
                   "test_f1_patch_exact"    = "Class-mean F1",
                   "test_kappa_patch_exact" = "Cohen's kappa",
-                  "test_miou"              = "Mean IoU")
+                  "test_miou"              = "Mean IoU",
+                  "val_acc"        = "Overall accuracy",
+                  "val_f1"         = "Class-mean F1",
+                  "val_kappa"      = "Cohen's kappa",
+                  "val_miou"       = "Mean IoU",
+                  "val_acc_macro"  = "Class-mean accuracy",
+                  "val_f1_micro"   = "Micro F1")
 
 # A metric whose name says nothing the reader needs; the note below the caption
 # carries it instead. Set per task, so only the segmentation table pays for it.
@@ -92,7 +105,37 @@ TASK_PROFILES <- list(
                     "patches they cover exactly.  mIoU is per-pixel at 10 m."),
     metrics = c("test_acc_patch_exact" = "OA", "test_oau_patch_exact" = "OAu",
                 "test_f1_patch_exact" = "Macro F1",
-                "test_kappa_patch_exact" = "κ", "test_miou" = "mIoU"))
+                "test_kappa_patch_exact" = "κ", "test_miou" = "mIoU")),
+
+  # The validation counterparts. Same rows, same hues, same headers -- but two
+  # columns of the test tables cannot be drawn, and saying why is the note's job:
+  #
+  #   * OAu is missing from BOTH, because the urban-class split of OA is computed
+  #     only in the test evaluator. The column is dropped rather than blanked: a
+  #     column of dashes would suggest the number exists and was not measured.
+  #   * the segmentation numbers are per-pixel at the native 10 m grid. Validation
+  #     runs every epoch on the training machine and never aggregates to So2Sat
+  #     patches, so there is no `_patch_exact` validation at all -- which is
+  #     exactly the footing the test tables' star claims, and cannot be claimed
+  #     here.
+  #
+  # Both read the epoch that maximised the run's monitor, so the row describes
+  # the checkpoint the test row describes and the two tables can be read together.
+  classification_val = list(
+    csv     = file.path("data", "model_metrics_val.csv"),
+    name    = "model_metrics_table_val",
+    note    = paste("Validation at the best-monitor epoch -- the checkpoint the",
+                    "test table reports.  No OAu: the urban-class split of OA is",
+                    "computed only in the test evaluator."),
+    metrics = c("val_acc" = "OA", "val_f1" = "Macro F1", "val_kappa" = "κ")),
+  segmentation_val = list(
+    csv     = file.path("data", "seg_metrics_val.csv"),
+    name    = "seg_metrics_table_val",
+    note    = paste("Validation at the best-monitor epoch, per-pixel at 10 m:",
+                    "validation never aggregates to So2Sat patches, so these are",
+                    "not the patch-exact quantities the test table reports."),
+    metrics = c("val_acc" = "OA", "val_f1" = "Macro F1",
+                "val_kappa" = "κ", "val_miou" = "mIoU"))
 )
 
 # ── Presentation vocabulary ───────────────────────────────────────────────────
@@ -403,15 +446,19 @@ TEXT_COL    <- "grey15"
 #' Measured through systemfonts, which is what ragg shapes with, so the numbers
 #' match what actually lands on the page. Falls back to a character-count
 #' estimate only if systemfonts is unavailable.
-str_w <- function(s, pt = BODY_PT, bold = FALSE) {
+str_w <- function(s, pt = BODY_PT, bold = FALSE, italic = FALSE) {
   s <- s[!is.na(s)]
   if (!length(s)) return(0)
   if (requireNamespace("systemfonts", quietly = TRUE)) {
-    w <- systemfonts::string_width(s, size = pt, res = 72,
+    # `italic` matters: the note is drawn in the italic face, and measuring it
+    # upright underestimates the width enough to let a shrunk line still run off
+    # the page -- which is a silent truncation, not a visible overflow.
+    w <- systemfonts::string_width(s, size = pt, res = 72, italic = italic,
                                    weight = if (bold) "bold" else "normal")
     return(max(w) / 72 * W_SLACK)
   }
-  max(nchar(s)) * pt * CHAR_EM * (if (bold) 1.08 else 1) / 72
+  max(nchar(s)) * pt * CHAR_EM *
+    (if (bold) 1.08 else 1) * (if (italic) 1.03 else 1) / 72
 }
 
 #' Column geometry for one data frame: one row per column, in draw order.
@@ -655,10 +702,20 @@ metrics_table_plot <- function(df, scale_by = c("split", "column"),
   # The note says what the numbers ARE, not what they are called, so it gets its
   # own line under the glossary rather than a slot inside it: joined on, it
   # forced the whole caption down to an unreadable size to fit the width.
+  # ... and it is shrunk to the table's width on its own account. It used to
+  # inherit the caption's size, which was safe only while every note happened to
+  # be shorter than every glossary: the validation tables have one fewer metric
+  # column, so the figure narrowed, and a note wider than the device is silently
+  # TRUNCATED at both ends with no warning -- the same trap metric_caption()
+  # already guards against.
   if (!is.null(METRIC_NOTE)) {
+    note_pt <- CAP_PT
+    have <- str_w(METRIC_NOTE, pt = note_pt, italic = TRUE)
+    total_w <- x_right + 2 * PAD_OUT
+    if (have > total_w) note_pt <- max(CAP_PT_MIN, note_pt * total_w / have)
     p <- p + annotate("text", x = x_right, y = -n - NOTE_DROP,
                       label = METRIC_NOTE, hjust = 1, vjust = 1,
-                      fontface = "italic", size = cap$size_mm,
+                      fontface = "italic", size = min(cap$size_mm, note_pt / .pt),
                       colour = CAPTION_COL)
   }
   p <- p +

@@ -16,6 +16,16 @@ Where two runs fill the same cell the **newest finished run wins** — that is w
 supersedes the pre-stem-fix timm numbers, which the stem-fix ledger records as
 void. Every superseded run is logged, so a supersede is never silent.
 
+The **validation** counterpart is `--stage val`. It is not simply a different
+set of summary keys: a run's summary holds the metrics of its LAST epoch, while
+the test numbers describe the BEST checkpoint, so reading `val_*` from the
+summary would report a different set of weights than the test row beside it.
+`--stage val` therefore reads the history and takes every validation metric at
+the epoch maximising the run's own monitor -- the epoch whose checkpoint was
+saved and later tested -- and records that epoch so the choice is auditable.
+Metrics are read at one epoch, never each at its own best, which would be a
+per-column cherry-pick of epochs that no single checkpoint ever achieved.
+
 Read-only against W&B. Credentials come from ~/.netrc (or WANDB_API_KEY).
 
 The **segmentation** campaign is the same table with different numbers, so it is
@@ -30,6 +40,7 @@ Example:
     python src/export_run_metrics.py --since 2026-06-01 --embeddings GeoTessera_v1.1_global
     python src/export_run_metrics.py --task segmentation --output data/seg_metrics.csv \
         --metrics test_acc_patch_exact test_oau_patch_exact ... --include-unfinished
+    python src/export_run_metrics.py --stage val --output data/model_metrics_val.csv
 """
 
 from __future__ import annotations
@@ -38,6 +49,7 @@ import argparse
 import csv
 from pathlib import Path
 
+import pandas as pd
 from loguru import logger
 
 import wandb
@@ -79,6 +91,42 @@ SEG_METRIC_KEYS = [
     "test_loss",
 ]
 
+# The validation metrics, for --stage val. Far fewer than the test ones, and the
+# difference is not an oversight to work around: the validation loop runs every
+# epoch on the training machine, so it computes what is cheap and what early
+# stopping needs. Two consequences the tables have to state rather than hide:
+#
+#   * there is **no `val_oau`** on either side -- the urban-class split of OA is
+#     computed only in the test evaluator -- so a validation table has no OAu
+#     column at all;
+#   * the segmentation numbers are **per-pixel at the native 10 m grid**, not
+#     `_patch_exact`. Validation never aggregates to So2Sat patches, so a
+#     validation seg metric and a validation cls metric are not measured over the
+#     same units the way their patch-exact test counterparts are.
+VAL_METRIC_KEYS = [
+    "val_acc",
+    "val_acc_macro",
+    "val_f1",
+    "val_f1_micro",
+    "val_kappa",
+    "val_loss",
+]
+
+SEG_VAL_METRIC_KEYS = [
+    "val_acc",
+    "val_f1",
+    "val_kappa",
+    "val_miou",
+    "val_loss",
+]
+
+# Which epoch's validation to report, per task, when the run records no monitor.
+# Every run in this campaign was launched with `--monitor val_kappa`, but the
+# classification pipeline writes it into the config and the segmentation one
+# does not, so it is recovered from argv exactly as `--split-mode` is.
+MONITOR_ARG = "--monitor"
+DEFAULT_MONITOR = {"segmentation": "val_miou", "patch_classification": "val_f1"}
+
 CONFIG_KEYS = [
     "embedding",
     "embedding_name",
@@ -113,6 +161,12 @@ def parse_args() -> argparse.Namespace:
                    help="config['task'] to keep; 'any' disables the filter. "
                         "'segmentation' also switches the default metric set to "
                         "SEG_METRIC_KEYS, unless --metrics says otherwise.")
+    p.add_argument("--stage", default="test", choices=["test", "val"],
+                   help="which evaluation to export. 'test' reads the run "
+                        "summary; 'val' reads the history at the epoch that "
+                        "maximised the run's monitor -- the checkpoint the test "
+                        "numbers describe -- because the summary holds the LAST "
+                        "epoch, not the best one.")
     p.add_argument("--metrics", nargs="+", default=None,
                    help="summary keys to export, in column order "
                         "(default: the metric set for --task)")
@@ -123,6 +177,11 @@ def parse_args() -> argparse.Namespace:
                         "should show it pending rather than not at all. A "
                         "finished run always wins the cell over an unfinished "
                         "one, whichever is newer.")
+    p.add_argument("--exclude-run", action="append", default=[], metavar="NAME",
+                   help="drop this run by name, whatever its state. Repeatable. "
+                        "For a run that is deliberately out of a figure -- one "
+                        "still settling, or superseded by a re-launch -- where "
+                        "letting it in would silently change a table's shape.")
     p.add_argument("--embeddings", nargs="+",
                    default=["GeoTessera_v2", "AlphaEarthCoop"],
                    help="config['embedding'] values to keep.")
@@ -161,12 +220,52 @@ def arch_of(cfg: dict) -> str | None:
     return None
 
 
+def monitor_of(run, cfg: dict, task: str) -> str:
+    """The metric this run checkpointed on, from the config, argv, or the default."""
+    if cfg.get("monitor"):
+        return cfg["monitor"]
+    argv = (run.metadata or {}).get("args") or []
+    if MONITOR_ARG in argv:
+        return argv[argv.index(MONITOR_ARG) + 1]
+    return DEFAULT_MONITOR.get(task, "val_kappa")
+
+
+def val_at_best_epoch(run, monitor: str, metric_keys: list[str]) -> dict:
+    """Every validation metric at the epoch where `monitor` peaked.
+
+    One epoch for all of them: a per-metric maximum would mix epochs and report
+    a model that never existed. Returns blanks if the run logged no validation
+    history at all, which is what a crashed-before-first-epoch run looks like.
+    """
+    blank = {k: None for k in metric_keys} | {"monitor": monitor, "best_epoch": None}
+    hist = run.history(samples=10_000, pandas=True)
+    if hist.empty or monitor not in hist.columns:
+        return blank
+    rows = hist.dropna(subset=[monitor])
+    if rows.empty:
+        return blank
+    best = rows.loc[rows[monitor].idxmax()]
+    out = {k: (None if k not in rows.columns or pd.isna(best.get(k)) else best[k])
+           for k in metric_keys}
+    out["monitor"] = monitor
+    out["best_epoch"] = None if pd.isna(best.get("epoch")) else int(best["epoch"])
+    return out
+
+
 def main() -> None:
     args = parse_args()
 
-    metric_keys = args.metrics or (
-        SEG_METRIC_KEYS if args.task == "segmentation" else METRIC_KEYS)
-    fieldnames = LEAD_KEYS + CONFIG_KEYS + metric_keys
+    seg = args.task == "segmentation"
+    if args.metrics:
+        metric_keys = args.metrics
+    elif args.stage == "val":
+        metric_keys = SEG_VAL_METRIC_KEYS if seg else VAL_METRIC_KEYS
+    else:
+        metric_keys = SEG_METRIC_KEYS if seg else METRIC_KEYS
+    # The validation rows say which epoch they came from and why that epoch:
+    # without it the number cannot be traced back to a checkpoint.
+    stage_keys = ["monitor", "best_epoch"] if args.stage == "val" else []
+    fieldnames = LEAD_KEYS + CONFIG_KEYS + stage_keys + metric_keys
 
     api = wandb.Api()
     path = f"{args.entity}/{args.project}"
@@ -180,6 +279,9 @@ def main() -> None:
     for run in api.runs(path, per_page=500):
         n_seen += 1
         cfg = dict(run.config)
+        if run.name in args.exclude_run:
+            logger.debug(f"skip {run.name}: excluded by name")
+            continue
         if args.task != "any" and cfg.get("task") != args.task:
             continue
         if cfg.get("embedding") not in args.embeddings:
@@ -221,7 +323,15 @@ def main() -> None:
         row = {"run_name": run.name, "run_id": run.id,
                "created_at": run.created_at, "state": run.state}
         row.update({k: cfg.get(k) for k in CONFIG_KEYS})
-        row.update({k: run.summary.get(k) for k in metric_keys})
+        if args.stage == "val" and run.state == "finished":
+            row.update(val_at_best_epoch(
+                run, monitor_of(run, cfg, args.task), metric_keys))
+        elif args.stage == "val":
+            row.update({k: None for k in metric_keys}
+                       | {"monitor": monitor_of(run, cfg, args.task),
+                          "best_epoch": None})
+        else:
+            row.update({k: run.summary.get(k) for k in metric_keys})
         rows.append(row)
         missing = [k for k in metric_keys if row[k] is None]
         if missing and run.state == "finished":

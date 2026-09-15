@@ -938,6 +938,22 @@ python src/export_run_metrics.py
 python src/export_run_metrics.py --task segmentation --since 2026-09-10 \
     --include-unfinished --output data/seg_metrics.csv
 
+# The VALIDATION counterpart of either export. Not a different set of summary
+# keys: a run's summary holds its LAST epoch, while the test numbers describe the
+# BEST checkpoint, so `--stage val` reads the history and takes every validation
+# metric at the epoch that maximised the run's own monitor -- and records that
+# epoch, and the monitor, as columns. All 46 runs of this campaign were launched
+# with `--monitor val_kappa`; classification writes it into the config and
+# segmentation does not, so it is recovered from argv exactly as `--split-mode`
+# is. `--exclude-run` keeps a named run out whatever its state, which is how the
+# validation tables are held to the same rows as the test ones while later runs
+# land.
+python src/export_run_metrics.py --stage val \
+    --exclude-run v2-cultural-mobilenet-base --output data/model_metrics_val.csv
+python src/export_run_metrics.py --task segmentation --stage val --since 2026-09-10 \
+    --include-unfinished --exclude-run seg-v2-global-unet-base \
+    --output data/seg_metrics_val.csv
+
 # Saved test_confusion_matrix.npy run artefacts -> data/confusion_matrices.csv
 # (R has no .npy reader in this env)
 python src/export_confusion_matrix.py
@@ -956,6 +972,7 @@ Rscript R/split_maps.R          # -> plots/dataset/split_map_{global,orig_test,o
 Rscript R/metrics_table.R       # -> plots/models/model_metrics_table.{png,pdf,html}
 Rscript R/metrics_table.R --highlight dash|ring|halo|chip|bar|none   # best-value mark (default dash)
 Rscript R/metrics_table_mirror.R   # -> plots/models/metrics_table_mirror.{png,pdf}
+Rscript R/metrics_table_mirror.R --stage val   # -> ..._val.{png,pdf} (+ --icons)
 Rscript R/metrics_table_mirror.R --icons   # -> ..._icons.{png,pdf}: Split and
 #   Embedding as empty ICON_W slots, for icons pasted in afterwards. The columns
 #   stay (they hold the space and keep the centring honest), only their text and
@@ -978,6 +995,29 @@ Rscript R/metrics_table_mirror.R --icons   # -> ..._icons.{png,pdf}: Split and
 #   left half's headers marks the metrics aggregated to the So2Sat patch -- they
 #   share a header with the right half's, which is what makes them readable
 #   across, and the star is what says they are not natively the same thing.
+#   The rule is that SHARING, not the metric's name: a left-half header the right
+#   half also uses gets the star, which is why mIoU never does. `--stage val`
+#   redraws the whole figure from the validation exports, and there the star has
+#   to say the opposite thing -- validation never pools to the patch, so the
+#   shared header is covering two different units -- so the gloss belongs to the
+#   stage rather than to the figure.
+
+Rscript R/metrics_table.R --task classification_val   # -> model_metrics_table_val.*
+Rscript R/metrics_table.R --task segmentation_val    # -> seg_metrics_table_val.*
+#   The validation counterparts, from the `--stage val` exports: same rows, same
+#   hues, same headers, read at each run's best-monitor epoch so the row
+#   describes the checkpoint the test row describes. Two columns of the test
+#   tables cannot be drawn and each table's note says which and why:
+#     * no OAu on EITHER campaign -- the urban-class split of OA is computed only
+#       in the test evaluator. The column is dropped rather than filled with
+#       dashes, which would imply the number exists and merely went unmeasured.
+#     * the segmentation numbers are per-pixel at the native 10 m grid. The
+#       validation loop runs every epoch on the training machine and never
+#       aggregates to So2Sat patches, so there is no `_patch_exact` validation at
+#       all -- the exact footing the test tables' star claims.
+#   Read the gridded validation block with that in mind: validation there is
+#   spatially adjacent to training, and its 0.95-odd kappas are the
+#   autocorrelation, not the model.
 
 Rscript R/metrics_table.R --task segmentation   # -> plots/models/seg_metrics_table.{png,pdf,html}
 #   The same table, same hues and same column heads, from data/seg_metrics.csv
