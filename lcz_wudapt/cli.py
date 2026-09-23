@@ -1,6 +1,9 @@
 """Typer CLI for the WUDAPT label source.
 
     python -m lcz_wudapt ingest                 # H1: clean + spatial AOI assignment
+    python -m lcz_wudapt qc                     # LCZ-Generator QC rules -> flags + weights
+    python -m lcz_wudapt shape                  # write So2Sat-shaped city directories
+    python -m lcz_wudapt splits                 # city-disjoint train/val/test
     python -m lcz_wudapt audit                  # G0: the label-only gate
     python -m lcz_wudapt inventory              # So2Sat sparsity / leakage report
     python -m lcz_wudapt build --aoi <key>      # H3/H5/H6: WRITE the harmonized labels
@@ -20,10 +23,7 @@ from loguru import logger
 
 import geopandas as gpd
 
-from .audit import AUDIT_CITIES, run_audit, so2sat_aoi_map, so2sat_raster
 from .config import WudaptConfig
-from .consensus import consensus_for_aoi
-from .export import consensus_regions, merge_so2sat, write_stage8
 from .ingest import ingest as run_ingest
 from .leakage import (
     SO2SAT_TEST_CITIES,
@@ -31,8 +31,13 @@ from .leakage import (
     city_label_inventory,
     sparse_cities,
 )
-from .patch_bridge import region_centred_patches
-from .quality import apply_gates, polygon_weights
+
+# `audit`, `consensus`, `export`, `patch_bridge` and `quality` are the SUPERSEDED
+# consensus route (see the module docstring). They are imported lazily, inside
+# the commands that use them, for two reasons: they are off the default path
+# now, and `export` pulls lcz_labels.blocks -> momepy -> libpysal -> numba,
+# which currently refuses to import against the installed NumPy 2.5. A dead
+# dependency in a retired code path must not take the whole CLI down with it.
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
@@ -122,6 +127,12 @@ def build(
     targets = list(aoi) if aoi else index.loc[index.n_polys >= min_polys, "aoi"].tolist()
     if limit:
         targets = targets[:limit]
+
+    from .audit import so2sat_aoi_map, so2sat_raster
+    from .consensus import consensus_for_aoi
+    from .export import consensus_regions, merge_so2sat, write_stage8
+    from .patch_bridge import region_centred_patches
+    from .quality import apply_gates, polygon_weights
 
     # So2Sat is authoritative wherever it exists (merge_so2sat burns it last), so
     # the only question is which So2Sat cities WUDAPT may ADD to.
@@ -235,3 +246,144 @@ def patches(
 
 if __name__ == "__main__":  # pragma: no cover
     app()
+
+
+# ── The QC route ─────────────────────────────────────────────────────────────
+# The commands below supersede `build`/`patches`. Rather than reducing multiple
+# annotators to a consensus posterior, they apply the quality control the LCZ
+# Generator and WUDAPT actually publish, then reshape the survivors into
+# So2Sat-shaped city directories that the existing training stack consumes with
+# no changes to its dataset, split or loss layers.
+
+
+@app.command()
+def qc(
+    config_path: Path = typer.Option(None, "--config", help="WudaptConfig YAML"),
+    aoi: list[str] = typer.Option(None, "--aoi", help="Restrict to these AOI keys"),
+    force: bool = typer.Option(False, "--force", help="Rebuild even if cached"),
+) -> None:
+    """Apply the LCZ-Generator / WUDAPT quality-control rules to every polygon."""
+    from .qc import run_qc
+
+    cfg = load_config(config_path)
+    path = run_qc(cfg, aois=list(aoi) if aoi else None, force=force)
+    # pd, not gpd: geopandas.read_parquet raises when the column subset excludes
+    # the geometry, and reading 460k geometries back just to print six means is
+    # pure waste.
+    df = pd.read_parquet(path, columns=["aoi", "class", "qc1", "qc1_shipped",
+                                        "fits_patch", "qc_pass", "weight", "nbr_conflict"])
+    typer.echo(f"qc: {path}  ({len(df):,} polygons)")
+    typer.echo(
+        f"  step 1 (recomputed) {df.qc1.mean():.3f} vs shipped {df.qc1_shipped.mean():.3f} "
+        f"— the gap is the Web-Mercator area bias, which grows with latitude"
+    )
+    typer.echo(f"  contains a 320 m square: {df.fits_patch.mean():.3f}")
+    typer.echo(f"  within 100 m of another class: {df.nbr_conflict.mean():.3f}")
+    typer.echo(f"  qc_pass {df.qc_pass.mean():.3f} | mean weight {df.weight.mean():.3f}")
+
+
+@app.command()
+def shape(
+    config_path: Path = typer.Option(None, "--config", help="WudaptConfig YAML"),
+    aoi: list[str] = typer.Option(None, "--aoi", help="Restrict to these AOI keys"),
+    out_root: Path = typer.Option(None, "--out-root",
+                                  help="Default: $DATA_DIR/input/WUDAPT/cities"),
+    min_patches: int = typer.Option(1, "--min-patches"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    """Write So2Sat-shaped city directories (patches gpkg + label tif) per AOI."""
+    from .so2sat_shape import run_shape
+
+    cfg = load_config(config_path)
+    review = run_shape(cfg, aois=list(aoi) if aoi else None, out_root=out_root,
+                       min_patches=min_patches, force=force)
+    if not len(review):
+        typer.echo("no AOIs produced patches")
+        raise typer.Exit(code=1)
+    typer.echo(f"{len(review):,} AOIs | {int(review.patches.sum()):,} patches")
+    typer.echo(f"  >=50 patches: {int((review.patches >= 50).sum()):,} | "
+               f">=8 classes: {int((review.classes >= 8).sum()):,}")
+    typer.echo(review.head(12).to_string(index=False))
+
+
+@app.command()
+def splits(
+    config_path: Path = typer.Option(None, "--config", help="WudaptConfig YAML"),
+    val_frac: float = typer.Option(0.15, "--val-frac"),
+    test_frac: float = typer.Option(0.15, "--test-frac"),
+) -> None:
+    """Assign city-disjoint WUDAPT train/val/test, culture-10 forced to test."""
+    from .splits import assert_split_integrity, assign_splits, write_splits
+
+    cfg = load_config(config_path)
+    index_path = Path(cfg.cache_dir) / f"aoi_index_{cfg.ingest_hash}.parquet"
+    if not index_path.exists():
+        raise typer.BadParameter(f"run `lcz_wudapt ingest` first ({index_path} missing)")
+    index = pd.read_parquet(index_path)
+
+    # so2sat_aoi_map lives in the superseded audit module but is pure name
+    # bookkeeping and pulls nothing heavy; fall back to name matching if it fails.
+    try:
+        from .audit import so2sat_aoi_map
+        amap = so2sat_aoi_map(cfg)
+    except Exception as exc:  # pragma: no cover - environment-dependent
+        logger.warning(f"so2sat_aoi_map unavailable ({exc}); matching culture cities by name")
+        amap = None
+
+    table = assign_splits(index, so2sat_aoi_map=amap, val_frac=val_frac, test_frac=test_frac)
+    assert_split_integrity(table)
+    path = write_splits(cfg, table)
+    typer.echo(f"splits: {path}")
+    typer.echo(table.groupby(["region", "wudapt_split"]).size().unstack(fill_value=0).to_string())
+
+
+@app.command()
+def combine(
+    config_path: Path = typer.Option(None, "--config", help="WudaptConfig YAML"),
+    out: Path = typer.Option(None, "--out", help="Default: $DATA_DIR/input/WUDAPT/patches_wudapt_rxr.gpkg"),
+    out_root: Path = typer.Option(None, "--out-root", help="City dirs root"),
+) -> None:
+    """Concatenate per-AOI patches into one gpkg for the global arm."""
+    from .so2sat_shape import combine_patches
+
+    cfg = load_config(config_path)
+    path, review = combine_patches(cfg, out, out_root=out_root)
+    typer.echo(f"combined: {path}")
+    typer.echo(f"  {int(review.patches.sum()):,} patches | {len(review):,} AOIs")
+    typer.echo(review.groupby("split").patches.agg(["count", "sum"]).to_string())
+
+
+@app.command()
+def suitability(
+    config_path: Path = typer.Option(None, "--config", help="WudaptConfig YAML"),
+    out: Path = typer.Option(None, "--out", help="Optional parquet prefix for the tables"),
+) -> None:
+    """Assess label suitability per city and per region, for both pathways.
+
+    Reproduces the tables in docs/wudapt_label_suitability.md. Read-only over the
+    artefacts written by `qc`, `shape` and `combine`.
+    """
+    from .suitability import (
+        TIER1_CULTURE, TIER2_SPARSE, city_suitability, class_mix,
+        region_suitability, resolve_city_aois,
+    )
+
+    cfg = load_config(config_path)
+    pd.set_option("display.width", 250)
+
+    for tier, names in (("TIER 1 — So2Sat held-out culture cities", TIER1_CULTURE),
+                        ("TIER 2 — So2Sat-sparse cities", TIER2_SPARSE)):
+        mapping = resolve_city_aois(cfg, names)
+        df = city_suitability(cfg, mapping).sort_values("w_patches", ascending=False)
+        typer.echo("\n" + "=" * 150); typer.echo(tier); typer.echo("=" * 150)
+        typer.echo(df.to_string(index=False))
+        if out:
+            df.to_parquet(f"{out}_tier{'1' if names is TIER1_CULTURE else '2'}.parquet", index=False)
+
+    typer.echo("\n" + "=" * 150); typer.echo("TIER 3 — regions with no So2Sat coverage"); typer.echo("=" * 150)
+    reg = region_suitability(cfg)
+    typer.echo(reg.to_string(index=False))
+    typer.echo("\nClass mix, % of each region's patches:")
+    typer.echo(class_mix(cfg).to_string())
+    if out:
+        reg.to_parquet(f"{out}_tier3.parquet", index=False)

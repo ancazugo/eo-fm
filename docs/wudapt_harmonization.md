@@ -1,3 +1,11 @@
+> **SUPERSEDED (2026-09-08).** The multi-annotator consensus route described
+> below is no longer the default path. It is replaced by the published
+> LCZ-Generator / WUDAPT quality-control regime documented in
+> [`wudapt_qc_labels.md`](wudapt_qc_labels.md), which follows the rules the
+> sources actually specify (geometric QC step 1, the ESSD duplicate-priority
+> rule, the >100 m inter-LCZ buffer) instead of inferring a posterior. The
+> code here remains importable and tested.
+
 # Harmonizing WUDAPT/LCZ-Generator with So2Sat-LCZ42
 
 Status: **Stage 0 + Stage 8 export complete, gate G0 passed** (2026-08-19). Package: `lcz_wudapt/`.

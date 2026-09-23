@@ -114,6 +114,131 @@ class ConsensusParams(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class QcRules(BaseModel):
+    """LCZ-Generator / WUDAPT training-area quality control, as published.
+
+    Every default is the value stated in the sources, not a guess:
+
+    * ``min_area_km2`` / ``max_shape`` — Generator QC step 1. Verified against
+      the 2024-10-01 release: ``qc_step1 == True`` is *exactly*
+      ``area >= 0.04 AND shape < 3`` with **zero exceptions in 630,311 rows**,
+      so the rule is reconstructible and can be re-derived at our thresholds
+      instead of trusting a flag computed on Web-Mercator area.
+      ``shape = perimeter**2 / (4*pi*area)`` — 1.0 for a circle, 1.273 for a
+      square. Note ``qc_step1 == True`` means PASSED, not "flagged".
+    * ``min_oa`` — the 0.50 floor of Bechtel et al. (2019a), applied by both the
+      Generator and the ESSD global map.
+    * ``neighbour_buffer_m``, ``min/max_polys_per_class`` — the WUDAPT
+      digitizing guide ("leave a buffer of > 100 m between LCZs", "several
+      examples (5-15) of each LCZ").
+    * ``oversize_km2`` / ``oversize_core_radius_m`` — the Generator reduces
+      polygons > 1.5 km2 to a ~350 m radius before classifying.
+    """
+
+    # ── Generator QC step 1 ──────────────────────────────────────────────────
+    min_area_km2: float = 0.04
+    max_shape: float = 3.0
+
+    # ── Submission-level accuracy gates ──────────────────────────────────────
+    # oau is used for built classes 1-10 and oa for natural 11-17, mirroring how
+    # the Generator reports them. Only min_oa is on by default; the other two are
+    # off so the operating point is chosen by measurement, not by prior.
+    min_oa: float = 0.50
+    min_oau: float = 0.0
+    min_class_f1: float = 0.0
+
+    # ── So2Sat geometry target ───────────────────────────────────────────────
+    # A So2Sat label is a 320 m square of one pure class. Requiring a polygon to
+    # *contain* one is the >200 m narrowest-width rule retargeted to 320 m, and
+    # it is far stricter than an area test: 39.8% of QC-passing polygons pass it
+    # against 61.4% passing step 1, and containment is class-biased (LCZ 1 22.4%,
+    # water 55.6%) which is what drove water to 42% of an earlier patch pool.
+    patch_size_m: float = 320.0
+
+    # ── Relationship to other labels ─────────────────────────────────────────
+    # Measured per city, the fraction of candidate patches NOT within 100 m of a
+    # differently-labelled polygon tracks So2Sat agreement better than any
+    # shipped accuracy column (Tehran 0.19, Delhi 0.23 vs Berlin 0.80,
+    # Bogota 0.97). It is therefore emitted as a swept column; the default keeps
+    # every patch and lets the sweep choose. Hard-thresholding here at 100 m
+    # would delete most of Tehran and Delhi outright.
+    neighbour_buffer_m: float = 100.0
+    drop_neighbour_conflicts: bool = False
+
+    # Raster-side erosion before burning the segmentation labels. NOT
+    # neighbour_buffer_m: the median polygon is 0.048 km2, about 219 m across, so
+    # eroding 100 m from every side would leave 19 m and delete most of the
+    # dataset. The >100 m inter-LCZ rule is honoured instead by writing nodata
+    # wherever two classes claim the same pixel, plus the soft nbr_dist_m weight.
+    # 20 m matches the segmentation CLI's existing --erode-px 2 at 10 m.
+    # The ESSD duplicate-priority rule ("keep the submission with the highest
+    # overall accuracy") resolves every different-class overlap by a TOTAL rank
+    # order, so exactly one member of each contested pair survives. That is
+    # faithful to the global-map paper, but it is aggressive -- it removes 59% of
+    # Tehran -- so it is switchable for the sweep. With it off, contested pixels
+    # fall through to the raster's nodata rule instead.
+    use_conflict_priority: bool = True
+
+    raster_erode_m: float = 20.0
+    raster_res_m: float = 10.0
+    raster_max_pixels: int = 120_000_000
+
+    # ── Per-class / per-polygon caps (WUDAPT 5-15 guidance) ──────────────────
+    # The WUDAPT "5-15 examples per class" guidance is advice to *annotators*
+    # about how many training areas to draw, not a cap on how much supervision a
+    # model may see. Capping patches at 15 per class per AOI would discard most
+    # of Beijing and Sao Paulo for no methodological reason, so the cap is OFF by
+    # default and class balance is left to the trainers' existing
+    # --class-weights / --sampler. min_polys_per_class is used to *flag*
+    # under-represented AOI-class cells, not to drop them.
+    min_polys_per_class: int = 5
+    max_patches_per_class: int | None = None
+
+    # This one IS load-bearing. A handful of huge lakes and forests supplied 42%
+    # of an earlier patch pool; capping patches per source polygon is what breaks
+    # that, and it is the same intent as the Generator's own >1.5 km2 reduction.
+    max_patches_per_polygon: int = 4
+
+    # ── Oversize reduction ───────────────────────────────────────────────────
+    oversize_km2: float = 1.5
+    oversize_core_radius_m: float = 350.0
+
+    # ── Generator QC steps 2/3, adapted to embedding space ───────────────────
+    # The Generator runs DBSCAN over 33 Landsat/Sentinel features; we have better
+    # features, so the same test runs over mean embeddings. Optional: it needs
+    # embeddings on disk, so it is off until the roster is resolved.
+    dbscan_eps: float = 0.3
+    dbscan_minpts_divisor: int = 10
+    use_embedding_outliers: bool = False
+
+    # ── Soft temporal weight ─────────────────────────────────────────────────
+    # w_time = exp(-|label_year - embedding_year| / time_decay_years).
+    #
+    # tau = 8.0, NOT the 3.0 used by the superseded consensus path. Measured over
+    # all 630,311 polygons against a fixed 2017: median lag is 4 years and only
+    # 2.0% are from 2017 itself, so tau=3 puts 80.1% of the corpus below weight
+    # 0.5 — a hard filter wearing a soft filter's clothes. tau=8 leaves 70.4%
+    # above 0.5. LCZs change slowly; age should tilt the weighting, not gut it.
+    #
+    # Set to None to disable temporal weighting entirely (the tau = inf arm).
+    time_decay_years: float | None = 8.0
+
+    # Embedding years available to match against. The residual lag after
+    # year-matching is what w_time actually penalises: with coop's {2017, 2025}
+    # it never exceeds 4 years, against a median of 4 and a max of 27 versus a
+    # fixed 2017. Year-matching is the primary correction; the weight is the
+    # remainder.
+    embedding_years: tuple[int, ...] = (2017, 2025)
+
+    # CAUTION when tuning: `oa` declines with recency (2019: 0.768, 2022: 0.638,
+    # 2023: 0.615), so w_time and w_acc partly cancel. Fit and report jointly.
+    acc_floor: float = 0.05
+    acc_oa_min: float = 0.40
+    acc_oa_span: float = 0.50
+
+    model_config = {"extra": "forbid"}
+
+
 class RegionParams(BaseModel):
     """Consensus-region formation (H6) — what plays the role of a `block`."""
 
@@ -152,6 +277,7 @@ class WudaptConfig(BaseModel):
     # The Overture-path config, held as a field so raster_grid() is shared.
     labels: LczLabelConfig = Field(default_factory=LczLabelConfig)
 
+    qc: QcRules = Field(default_factory=QcRules)
     quality: QualityGates = Field(default_factory=QualityGates)
     consensus: ConsensusParams = Field(default_factory=ConsensusParams)
     regions: RegionParams = Field(default_factory=RegionParams)
