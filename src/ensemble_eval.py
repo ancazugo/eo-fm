@@ -41,7 +41,7 @@ _src = Path(__file__).parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from datasets.so2sat import PatchDataset, build_patch_index
+from datasets.so2sat import PatchDataset, PatchItem, build_patch_index
 from models import build_model
 from training.evaluate import predict_probs, save_confusion_matrix
 from utils.cli import add_eval_args, parse_model_spec
@@ -110,18 +110,18 @@ def main() -> None:
         if fused:
             # tuple item paths (one npy per source) → PatchDataset fusion path
             sub = [indexes[on][orig_split] for on in m["output_names"]]
-            items = [(tuple(ix[pid] for ix in sub), lab, args.split)
+            items = [PatchItem(tuple(ix[pid] for ix in sub), lab, args.split)
                      for pid, lab in aligned]
             dequantize_fn = [fn for fn, _ in deq]
             in_channels = sum(
                 detect_in_channels(p, override)
-                for p, (_, override) in zip(items[0][0], deq)
+                for p, (_, override) in zip(items[0].path, deq)
             )
         else:
             idx = indexes[m["output_names"][0]][orig_split]
-            items = [(idx[pid], lab, args.split) for pid, lab in aligned]
+            items = [PatchItem(idx[pid], lab, args.split) for pid, lab in aligned]
             dequantize_fn, override = deq[0]
-            in_channels = detect_in_channels(items[0][0], override)
+            in_channels = detect_in_channels(items[0].path, override)
         model = build_model(
             m["family"], m["preset"], None,
             in_channels=in_channels, num_classes=args.num_classes,

@@ -47,7 +47,7 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, str(Path(__file__).parent))
 
 from datasets.registry import EMBEDDING_REGISTRY
-from datasets.so2sat import PatchDataset, build_patch_index
+from datasets.so2sat import PatchDataset, PatchItem, build_patch_index
 from models import build_model
 from training.evaluate import predict_probs
 from utils.cli import add_eval_args
@@ -98,9 +98,9 @@ def main() -> None:
         gdf = gdf[has_npy].reset_index(drop=True)
 
     # Teacher inference (labels unused during prediction; keep loader order = gdf order)
-    items = [(unlab[str(pid)], 0, "unlabeled") for pid in gdf["patch_id"]]
+    items = [PatchItem(unlab[str(pid)], 0, "unlabeled") for pid in gdf["patch_id"]]
     dequantize_fn, override = resolve_dequantize(args.embedding_name)
-    in_channels = detect_in_channels(items[0][0], override)
+    in_channels = detect_in_channels(items[0].path, override)
     model = build_model(args.family, args.preset, args.arch,
                         in_channels=in_channels, num_classes=args.num_classes)
     ckpt = torch.load(args.checkpoint, map_location=device)

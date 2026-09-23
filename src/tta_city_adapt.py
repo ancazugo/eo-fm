@@ -45,7 +45,7 @@ _src = Path(__file__).parent
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from datasets.so2sat import PatchDataset, build_patch_index
+from datasets.so2sat import PatchItem, PatchDataset, build_patch_index
 from utils.cli import add_eval_args, parse_model_spec
 from utils.geo_lookup import assign_cities
 from models import build_model
@@ -167,11 +167,11 @@ def main() -> None:
         names.append(name)
         dequantize_fn, override = resolve_dequantize(m["embedding_names"][0])
         items = {
-            split: [(indexes[m["output_names"][0]][datasets[split]][pid], lab, split)
+            split: [PatchItem(indexes[m["output_names"][0]][datasets[split]][pid], lab, split)
                     for pid, lab in aligned[split]]
             for split in ("val", "test")
         }
-        in_channels = detect_in_channels(items["val"][0][0], override)
+        in_channels = detect_in_channels(items["val"][0].path, override)
         ckpt = torch.load(m["checkpoint"], map_location=device)
         state = ckpt.get("model_state_dict", ckpt)
 
