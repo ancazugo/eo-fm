@@ -92,6 +92,12 @@ from utils.runtime import (
     resolve_device,
     run_city_inference,
 )
+from utils.adapt import (
+    add_adaptation_args,
+    apply_freeze,
+    limit_train_items,
+    load_init_weights,
+)
 
 
 def _fuse_items(items: list, output_names: list[str], year: str) -> tuple[list, int]:
@@ -346,6 +352,7 @@ def main() -> None:
 
     # ── Logging ───────────────────────────────────────────────────────────────
     add_logging_args(parser)
+    add_adaptation_args(parser)
 
     # ── Inference ─────────────────────────────────────────────────────────────
     g = add_inference_args(parser)
@@ -483,6 +490,12 @@ def main() -> None:
                     f"{len(all_items)} tiles ({n_drop} dropped, missing a source)")
         if eval_items is not None:
             eval_items, _ = _fuse_items(eval_items, args.output_name, args.year)
+    # Shot budget for the per-city arm, applied last: the budget must be N tiles
+    # the run can actually train on, not N candidates of which some are then
+    # dropped by --require-embeddings or fusion. Val/test tiles pass through
+    # untouched, otherwise the budget would shrink the yardstick too.
+    all_items = limit_train_items(all_items, split_map, args.shots_per_class, seed=args.seed)
+
     logger.info(f"Total tiles: {len(all_items)}")
 
     dequantize_fn, in_channels_override = resolve_dequantize(
@@ -545,6 +558,12 @@ def main() -> None:
     class_weights = _pixel_class_weights(
         all_items, split_map, args.class_weights, args.num_classes,
     ) if args.class_weights != "none" else None
+    # Adaptation: warm-start from a So2Sat segmentation checkpoint, then freeze.
+    init_report = None
+    if args.init_checkpoint is not None:
+        init_report = load_init_weights(model, args.init_checkpoint, device)
+    freeze_report = apply_freeze(model, args.freeze, args.num_classes)
+
     task = LCZUNetModule(
         model, args.num_classes,
         lr=args.lr, weight_decay=args.weight_decay,

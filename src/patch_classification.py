@@ -93,6 +93,12 @@ from utils.runtime import (
     resolve_device,
     run_city_inference,
 )
+from utils.adapt import (
+    add_adaptation_args,
+    apply_freeze,
+    limit_shots_per_class,
+    load_init_weights,
+)
 
 
 def main() -> None:
@@ -247,6 +253,7 @@ def main() -> None:
 
     # ── Logging ───────────────────────────────────────────────────────────────
     add_logging_args(parser)
+    add_adaptation_args(parser)
 
     # ── Inference ─────────────────────────────────────────────────────────────
     g = add_inference_args(parser)
@@ -308,6 +315,12 @@ def main() -> None:
         )
         n_pseudo = len(pseudo_items)
         all_items = all_items + pseudo_items
+
+    # Shot budget for the per-city / few-shot arm. Applied after every other
+    # item source (including --pseudo-gpkg) so "N per class" means N of whatever
+    # the run would otherwise have trained on, and before split_counts so the
+    # logged and W&B-recorded totals are the ones actually used.
+    all_items = limit_shots_per_class(all_items, args.shots_per_class, seed=args.seed)
 
     split_counts = {s: sum(1 for it in all_items if it.split == s)
                     for s in ("train", "val", "test")}
@@ -420,6 +433,14 @@ def main() -> None:
         logger.info(f"Logit adjustment tau={args.logit_adjustment}, "
                     f"priors: {np.round(priors, 4)}")
 
+    # Adaptation: warm-start from a So2Sat checkpoint, then optionally freeze.
+    # Order matters — loading after freezing would not undo requires_grad, but
+    # freezing before the weights exist makes the log meaningless.
+    init_report = None
+    if args.init_checkpoint is not None:
+        init_report = load_init_weights(model, args.init_checkpoint, device)
+    freeze_report = apply_freeze(model, args.freeze, args.num_classes)
+
     task = LCZResNetModule(
         model=model,
         num_classes=args.num_classes,
@@ -509,6 +530,11 @@ def main() -> None:
         early_stopping_patience=args.early_stopping_patience,
         seed=args.seed,
         n_params=n_params,
+        init_checkpoint=str(args.init_checkpoint) if args.init_checkpoint else None,
+        init_loaded_tensors=(init_report or {}).get("loaded"),
+        freeze=args.freeze,
+        trainable_params=freeze_report["trainable"],
+        shots_per_class=args.shots_per_class,
         data_source="so2sat_patches",
         split_source=_split_source,
         **{f"{s}_patches": split_counts[s] for s in ("train", "val", "test")},

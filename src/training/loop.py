@@ -56,8 +56,20 @@ def run_training_loop(
     import wandb
 
     task_module = task_module.to(device)
+    # Only parameters that actually require grad. `requires_grad = False` alone
+    # does not freeze a weight that is still in an Adam param group: weight decay
+    # and momentum keep moving it, so a "frozen backbone" run would quietly not
+    # be one. See utils/adapt.py::trainable_parameters.
+    params = [p for p in task_module.parameters() if p.requires_grad]
+    if not params:
+        raise ValueError(
+            "No trainable parameters — every weight is frozen. Check --freeze."
+        )
+    n_frozen = sum(1 for p in task_module.parameters() if not p.requires_grad)
+    if n_frozen:
+        logger.info(f"optimiser sees {len(params)} tensors, {n_frozen} frozen")
     opt = torch.optim.Adam(
-        task_module.parameters(), lr=task_module.lr, weight_decay=task_module.weight_decay
+        params, lr=task_module.lr, weight_decay=task_module.weight_decay
     )
     if warmup_epochs > 0:
         warmup = torch.optim.lr_scheduler.LinearLR(
