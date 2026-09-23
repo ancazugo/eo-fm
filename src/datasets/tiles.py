@@ -7,6 +7,7 @@ extract_grid_embeddings.py) and the ROI inference module (infer_roi.py).
 from __future__ import annotations
 
 import functools
+import gc
 import re
 from pathlib import Path
 
@@ -453,6 +454,15 @@ def _open_tile_tessera_npy_dir(npy_dir: Path) -> xr.DataArray:
     """
     import rasterio
     import rioxarray  # noqa: F401
+
+    # This body runs only on a cache miss, i.e. just as lru_cache is about to
+    # evict a tile -- but eviction does not free it. A DataArray sits in
+    # reference cycles, so its ~630 MB array waits for a generation-2 collection,
+    # which Python schedules by object count, not bytes. Where patches are sparse
+    # (the WUDAPT pool: a handful per tile) tiles churn fast enough that a worker
+    # held ~0.7 GB per tile loaded, 25 GB within 3 min; 6 workers hit 154 GB.
+    # Collecting here frees the evicted tiles before the next one is allocated.
+    gc.collect()
 
     tile_name = npy_dir.name  # e.g. grid_-0.05_51.45
 
