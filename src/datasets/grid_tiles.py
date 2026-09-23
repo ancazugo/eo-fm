@@ -612,9 +612,20 @@ class GridSegDataModule:
         return {"image": images, "mask": masks}
 
     def train_dataloader(self) -> DataLoader:
+        # See PatchDataModule.train_dataloader: with a small per-city tile budget
+        # drop_last=True can drop every batch, so the epoch trains on nothing and
+        # reports loss 0.0000. Keep the partial batch when the set is that small.
+        n_train = len(self._train_ds)
+        drop_last = n_train >= 2 * self.batch_size
+        if not drop_last:
+            logger.warning(
+                f"Only {n_train} training tiles for batch_size={self.batch_size}: "
+                "keeping the partial batch (drop_last=False), otherwise the epoch "
+                "would contain no batches at all."
+            )
         return DataLoader(
             self._train_ds, batch_size=self.batch_size, shuffle=True,
-            num_workers=self.num_workers, collate_fn=self._train_collate, drop_last=True,
+            num_workers=self.num_workers, collate_fn=self._train_collate, drop_last=drop_last,
         )
 
     def val_dataloader(self) -> DataLoader:

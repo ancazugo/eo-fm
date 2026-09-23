@@ -1125,10 +1125,24 @@ class PatchDataModule:
                 num_samples=len(labels), replacement=True,
             )
             logger.info(f"Train sampler: {self.sampler} over {len(counts)} classes")
+        # drop_last exists so a tiny trailing batch cannot destabilise BatchNorm,
+        # but when the whole training set is smaller than one batch it drops
+        # EVERY batch: the loader yields nothing, the loss prints 0.0000 and the
+        # run silently trains on no data. That is exactly the small-N end of a
+        # few-shot curve (--shots-per-class 1 or 5), so keep the partial batch
+        # there and say so.
+        n_train = len(self._train_ds)
+        drop_last = n_train >= 2 * self.batch_size
+        if not drop_last:
+            logger.warning(
+                f"Only {n_train} training samples for batch_size={self.batch_size}: "
+                "keeping the partial batch (drop_last=False), otherwise the epoch "
+                "would contain no batches at all."
+            )
         return DataLoader(
             self._train_ds, batch_size=self.batch_size,
             shuffle=sampler is None, sampler=sampler,
-            num_workers=self.num_workers, collate_fn=self._collate, drop_last=True,
+            num_workers=self.num_workers, collate_fn=self._collate, drop_last=drop_last,
         )
 
     def val_dataloader(self) -> DataLoader:
