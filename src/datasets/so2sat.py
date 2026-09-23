@@ -201,8 +201,23 @@ def build_global_items(
         )
 
     cities = None
+    # A gpkg may name its own cities. So2Sat's patches_reference_rxr.gpkg does
+    # not, hence the spatial join below — but a WUDAPT pool spans 1,251 GUPPD
+    # areas that so2sat_guppd_bounds.gpkg has never heard of, so joining against
+    # it would return None for every patch and silently discard per-city
+    # reporting. An explicit column always wins over the join.
+    for col in ("city", "aoi"):
+        if col in gdf.columns:
+            cities = gdf[col].astype("string")
+            logger.info(
+                f"Global split: city taken from the gpkg's {col!r} column "
+                f"({cities.notna().sum()}/{len(gdf)} patches, "
+                f"{cities.nunique()} distinct)"
+            )
+            break
+
     bounds_path = city_bounds or (patches_gpkg.parent / "so2sat_guppd_bounds.gpkg")
-    if bounds_path.exists():
+    if cities is None and bounds_path.exists():
         try:
             cities = assign_cities(gdf, bounds_path)
             logger.info(
@@ -211,7 +226,7 @@ def build_global_items(
             )
         except Exception as e:                                   # noqa: BLE001
             logger.warning(f"City assignment failed ({e}) — items will carry city=None")
-    else:
+    elif cities is None:
         logger.warning(
             f"No city bounds at {bounds_path} — global items carry city=None, "
             "so per-city normalization (Phase 4) is unavailable for this split."
