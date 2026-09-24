@@ -8,6 +8,8 @@ the ``--pseudo-gpkg`` schema (``patch_id, dataset, LCZ_class, weight``) that
   at its own QC weight (time x accuracy x area x neighbour-conflict). No teacher.
 * ``wudapt_e2.gpkg`` -- the same, minus the patches the teacher vetoes
   (``--teacher-checkpoint``).
+* ``wudapt_e3.gpkg`` -- E2 plus relaxed-containment patches (``--relaxed-gpkg``,
+  from ``python -m lcz_wudapt relaxed``) whose label is the teacher's top-1.
 
 Leakage filters, applied to both:
 
@@ -161,7 +163,13 @@ def main() -> None:
     p.add_argument("--veto-quantile", type=float, default=0.10,
                    help="tau = this quantile of the teacher's p(true label) on So2Sat val")
     p.add_argument("--num-workers", type=int, default=8)
+    p.add_argument("--relaxed-gpkg", type=Path, default=None,
+                   help="lcz_wudapt `relaxed` pool; with a teacher, writes wudapt_e3.gpkg = "
+                        "E2 + the relaxed patches whose label is the teacher's top-1")
     args = p.parse_args()
+    if args.relaxed_gpkg is not None and args.teacher_checkpoint is None:
+        p.error("--relaxed-gpkg needs --teacher-checkpoint: relaxed labels are a "
+                "majority, not a certainty, and only enter training through the gate")
     args.out_dir.mkdir(parents=True, exist_ok=True)
     report: list[str] = []
 
@@ -246,6 +254,45 @@ def main() -> None:
         tscore["p_label"], tscore["teacher_top1"], tscore["vetoed"] = p_label, probs.argmax(1) + 1, veto
         scores = scores.merge(tscore, on="patch_id", how="left")
         scores.attrs["tau"] = tau
+
+        if args.relaxed_gpkg is not None:
+            # E3: E2 plus the relaxed-containment patches. Same leakage filters;
+            # a stricter gate than the veto, because up to 40% of each square is
+            # not the labelled class -- the teacher's top-1 has to BE the label.
+            rel = gpd.read_file(args.relaxed_gpkg, **GPKG_OPEN)
+            rel = rel[rel["wudapt_split"].isin(args.splits)].reset_index(drop=True)
+            r_npy = rel["patch_id"].astype(str).isin(unlab).to_numpy()
+            r_cult = culture_exclusion(rel, so2sat, args.so2sat_dir / "so2sat_guppd_bounds.gpkg",
+                                       args.buffer_km)
+            r_s2s = so2sat_overlap(rel, so2sat)
+            rkeep = r_npy & ~r_cult & ~r_s2s
+            say(f"Relaxed pool (split {args.splits}): {len(rel):,} | no npy {(~r_npy).sum():,} | "
+                f"culture-10 +{args.buffer_km} km {r_cult.sum():,} | overlaps So2Sat {r_s2s.sum():,} "
+                f"| candidates {rkeep.sum():,}")
+            rel = rel[rkeep].reset_index(drop=True)
+            rel["dataset"] = "unlabeled"
+            ritems = [PatchItem(unlab[str(pid)], int(c) - 1, "train")
+                      for pid, c in zip(rel.patch_id, rel.LCZ_class)]
+            rprobs = teacher_probs(ritems, args)
+            rlab = rel.LCZ_class.to_numpy().astype(int)
+            ragree = rprobs.argmax(1) + 1 == rlab
+            say(f"Teacher agrees with {ragree.mean():.1%} of relaxed labels; by class: " + ", ".join(
+                f"{c}:{r:.0%}(n={n})" for c, (r, n) in
+                pd.DataFrame({"c": rlab, "a": ragree}).groupby("c").a.agg(["mean", "size"]).iterrows()))
+            radd = rel[ragree]
+            e3 = gpd.GeoDataFrame(
+                pd.concat([e2[KEEP_COLS + ["geometry"]], radd[KEEP_COLS + ["geometry"]]],
+                          ignore_index=True), crs=e2.crs)
+            if not e3["patch_id"].is_unique:
+                raise SystemExit("E3 patch_id collision between strict and relaxed pools")
+            e3.to_file(args.out_dir / "wudapt_e3.gpkg", driver="GPKG")
+            say(f"  E3 = E2 {len(e2):,} + relaxed {len(radd):,} = {len(e3):,}; relaxed added per class: "
+                f"{radd.LCZ_class.value_counts().sort_index().to_dict()}")
+            rs = pd.DataFrame(rprobs, columns=[f"p{c}" for c in range(1, 18)])
+            rs.insert(0, "patch_id", rel.patch_id.to_numpy())
+            rs["LCZ_class"], rs["dominant_frac"], rs["teacher_top1"], rs["agree"] = (
+                rlab, rel.dominant_frac.to_numpy(), rprobs.argmax(1) + 1, ragree)
+            rs.to_parquet(args.out_dir / "wudapt_relaxed_scores.parquet")
 
     scores.to_parquet(args.out_dir / "wudapt_teacher_scores.parquet")
     (args.out_dir / "wudapt_build_report.txt").write_text("\n".join(report) + "\n")
