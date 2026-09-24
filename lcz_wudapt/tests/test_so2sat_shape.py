@@ -260,3 +260,81 @@ def test_write_city_dir_produces_the_pair_create_city_grids_needs(tmp_path):
     assert (d / "patches_reference_testcity.gpkg").exists()
     assert (d / "patches_reference_testcity.tif").exists()
     assert set(written) == {"gpkg", "tif"}
+
+
+# ── Relaxed-containment arm ──────────────────────────────────────────────────
+# Built near the zone's central meridian on a lattice-aligned origin, so the
+# EPSG:4326 round trip lands back in the same UTM zone and on the same lattice.
+
+_X0, _Y0 = 320.0 * 1563, 320.0 * 15625      # 500,160 / 5,000,000
+
+
+def _qc_polys(geoms_classes) -> gpd.GeoDataFrame:
+    n = len(geoms_classes)
+    cols = {f"f1_{c}": [0.8] * n for c in range(1, 18)}
+    gdf = gpd.GeoDataFrame(
+        {
+            "class": [c for _, c in geoms_classes],
+            "oa": [0.85] * n, "oau": [0.8] * n, "qc_step1": [True] * n,
+            "label_year": pd.array([2020] * n, dtype="Int16"),
+            "submission_id": [f"s{i}" for i in range(n)],
+            "submission_date": pd.to_datetime(["2022-01-01"] * n, utc=True),
+            "aoi": ["testcity"] * n, **cols,
+        },
+        geometry=[g for g, _ in geoms_classes], crs=_UTM,
+    ).to_crs("EPSG:4326")
+    return apply_qc(gdf, WudaptConfig())
+
+
+def _strip(x0, y0, w, h):
+    return box(_X0 + x0, _Y0 + y0, _X0 + x0 + w, _Y0 + y0 + h)
+
+
+def test_relaxed_rescues_a_strip_too_narrow_for_a_strict_square():
+    from lcz_wudapt.so2sat_shape import build_relaxed_patches
+    q = _qc_polys([(_strip(0, 0, 300, 960), 2)])
+    assert not q["fits_patch"].any()
+    assert len(build_patches(q, WudaptConfig())) == 0
+    r = build_relaxed_patches(q, WudaptConfig())
+    assert len(r) == 3                                   # 960 m tall = 3 lattice squares
+    assert (r["LCZ_class"] == 2).all()
+    assert r["dominant_frac"].min() == pytest.approx(300 / 320, abs=0.01)
+
+
+def test_relaxed_rejects_squares_mostly_outside_the_polygon():
+    from lcz_wudapt.so2sat_shape import build_relaxed_patches
+    # Straddles two lattice columns: 150/320 = 0.47 of each, below min_frac 0.6.
+    q = _qc_polys([(_strip(170, 0, 300, 960), 2)])
+    assert len(build_relaxed_patches(q, WudaptConfig())) == 0
+
+
+def test_relaxed_rejects_squares_contested_by_another_class():
+    from lcz_wudapt.so2sat_shape import build_relaxed_patches
+    # The neighbour is 320 x 320 m so it passes QC step 1 (>= 0.04 km2) and
+    # really does claim ground; a smaller one would be dropped before it counts.
+    # 20 m of it inside the top square (6%) is tolerated ...
+    ok = _qc_polys([(_strip(0, 0, 300, 960), 2), (_strip(300, 640, 320, 320), 6)])
+    # ... 60 m (19%) is not, above max_other_frac 0.1.
+    bad = _qc_polys([(_strip(0, 0, 260, 960), 2), (_strip(260, 640, 320, 320), 6)])
+    r_ok = build_relaxed_patches(ok, WudaptConfig())
+    r_bad = build_relaxed_patches(bad, WudaptConfig())
+    assert (r_ok["LCZ_class"] == 2).sum() == 3
+    assert (r_bad["LCZ_class"] == 2).sum() == 2           # the contested top square is gone
+    assert (r_bad["other_frac"] <= 0.1 + 1e-6).all()
+
+
+def test_relaxed_ignores_polygons_strict_placement_already_uses():
+    from lcz_wudapt.so2sat_shape import build_relaxed_patches
+    q = _qc_polys([(_strip(0, 0, 960, 960), 14)])
+    assert q["fits_patch"].all()
+    assert len(build_relaxed_patches(q, WudaptConfig())) == 0
+
+
+def test_relaxed_ids_are_disjoint_from_strict_ids_and_so2sat_shaped():
+    from lcz_wudapt.so2sat_shape import build_relaxed_patches
+    r = build_relaxed_patches(_qc_polys([(_strip(0, 0, 300, 960), 2)]), WudaptConfig())
+    assert list(r.columns[:3]) == list(_SO2SAT_COLS)
+    assert r.crs.to_epsg() == 4326
+    assert (r["dataset"] == "unlabeled").all()
+    assert r["patch_id"].str.match(r"^testcity_r\d{6}$").all()
+    assert (r["weight"] <= 1.0).all() and (r["weight"] > 0).all()

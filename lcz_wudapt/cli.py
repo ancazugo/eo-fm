@@ -354,6 +354,22 @@ def combine(
 
 
 @app.command()
+def relaxed(
+    config_path: Path = typer.Option(None, "--config", help="WudaptConfig YAML"),
+    out: Path = typer.Option(None, "--out", help="Default: $DATA_DIR/input/WUDAPT/patches_wudapt_relaxed.gpkg"),
+    min_frac: float = typer.Option(0.6, "--min-frac", help="Min share of the square in its class"),
+    max_other_frac: float = typer.Option(0.1, "--max-other-frac", help="Max share in any other class"),
+) -> None:
+    """Relaxed-containment patches from polygons too irregular for a strict square."""
+    from .so2sat_shape import run_relaxed
+
+    cfg = load_config(config_path)
+    path, review = run_relaxed(cfg, out, min_frac=min_frac, max_other_frac=max_other_frac)
+    typer.echo(f"relaxed: {path}")
+    typer.echo(review.to_string())
+
+
+@app.command()
 def suitability(
     config_path: Path = typer.Option(None, "--config", help="WudaptConfig YAML"),
     out: Path = typer.Option(None, "--out", help="Optional parquet prefix for the tables"),

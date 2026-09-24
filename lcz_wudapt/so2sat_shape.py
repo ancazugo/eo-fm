@@ -57,7 +57,9 @@ __all__ = [
     "build_label_raster",
     "combine_patches",
     "build_patches",
+    "build_relaxed_patches",
     "place_patches",
+    "run_relaxed",
     "run_shape",
     "write_city_dir",
 ]
@@ -214,6 +216,203 @@ def build_patches(gdf: gpd.GeoDataFrame, config: WudaptConfig) -> gpd.GeoDataFra
     aoi_key = str(meta["aoi"].iloc[0])
     out.insert(0, "patch_id", [f"{aoi_key}_{i:06d}" for i in range(len(out))])
     return out
+
+
+def build_relaxed_patches(
+    gdf: gpd.GeoDataFrame,
+    config: WudaptConfig,
+    *,
+    min_frac: float = 0.6,
+    max_other_frac: float = 0.1,
+) -> gpd.GeoDataFrame:
+    """Lattice squares that irregular polygons cover mostly, not entirely.
+
+    Strict placement (:func:`build_patches`) needs a whole 320 m square inside
+    one polygon, which only 39.8% of QC-passing polygons admit -- and it is
+    class-biased against exactly the compact built classes (LCZ 1 22.4%, water
+    55.6%). This is the relaxed arm, reported separately rather than mixed in.
+
+    Candidates come only from QC-passing polygons that could NOT hold a strict
+    square (``fits_patch`` False), so the arm adds new ground instead of
+    re-cutting what strict placement already used. A candidate is a square of
+    the same origin-aligned lattice :func:`place_patches` uses, so a relaxed
+    square is either identical to a strict one or disjoint from it. It is kept
+    when
+
+    * at least ``min_frac`` of it lies in QC-passing polygons of its class
+      (``dominant_frac`` -- the union, so adjacent same-class polygons count
+      together), and
+    * at most ``max_other_frac`` lies in polygons of any other class
+      (``other_frac``; overlapping class unions are summed, which errs strict).
+      "Other" counts EVERY polygon in the AOI, not only QC-passing ones: a
+      polygon that lost the duplicate-priority rule or failed a gate is still
+      an annotator saying this ground is something else.
+
+    The label is therefore a majority, not a certainty: the remaining
+    ``1 - dominant_frac - other_frac`` of the square is unlabelled ground. That
+    is why these patches are meant to pass a teacher-agreement gate before
+    training, and why ``weight`` is the source polygon's weight scaled by
+    ``dominant_frac``. At most ``max_patches_per_polygon`` per source polygon,
+    as in strict placement.
+    """
+    rules = config.qc
+    empty = gpd.GeoDataFrame(columns=[*_SO2SAT_COLS, "geometry"],
+                             geometry="geometry", crs="EPSG:4326")
+    src = gdf[gdf["qc_pass"]].copy()
+    if src.empty or "fits_patch" not in src or bool(src["fits_patch"].all()):
+        return empty
+
+    proj = project_valid(src)
+    proj["geometry"] = reduce_oversize(proj.geometry, rules)
+    proj = proj[~proj.geometry.is_empty].reset_index(drop=True)
+    side = float(rules.patch_size_m)
+    h = side / 2.0
+    area = side * side
+
+    unions = {int(c): shapely.union_all(g.geometry.values)
+              for c, g in proj.groupby("class")}
+    everyone = project_valid(gdf, crs=proj.crs)
+    claims = {int(c): shapely.union_all(g.geometry.values)
+              for c, g in everyone.groupby("class")}
+
+    rows = []
+    for i, rec in enumerate(proj.itertuples(index=False)):
+        if bool(rec.fits_patch):
+            continue
+        minx, miny, maxx, maxy = rec.geometry.bounds
+        kx = np.arange(int(np.floor(minx / side)), int(np.ceil(maxx / side)) + 1)
+        ky = np.arange(int(np.floor(miny / side)), int(np.ceil(maxy / side)) + 1)
+        gx, gy = np.meshgrid((kx + 0.5) * side, (ky + 0.5) * side)
+        cx, cy = gx.ravel(), gy.ravel()
+        squares = shapely.box(cx - h, cy - h, cx + h, cy + h)
+        touches = shapely.intersects(squares, rec.geometry)
+        squares, cx, cy = squares[touches], cx[touches], cy[touches]
+        if squares.size == 0:
+            continue
+        cls = int(rec[proj.columns.get_loc("class")])
+        own = shapely.area(shapely.intersection(squares, unions[cls])) / area
+        other = np.zeros(squares.size)
+        for c, u in claims.items():
+            if c != cls:
+                other += shapely.area(shapely.intersection(squares, u)) / area
+        ok = (own >= min_frac) & (other <= max_other_frac)
+        if not ok.any():
+            continue
+        # Most of THIS polygon first, so the cap keeps the squares it anchors.
+        mine = shapely.area(shapely.intersection(squares[ok], rec.geometry)) / area
+        order = np.argsort(-mine)[: rules.max_patches_per_polygon]
+        for j in order:
+            k = np.flatnonzero(ok)[j]
+            rows.append((i, cx[k], cy[k], squares[k], own[k], other[k]))
+    if not rows:
+        return empty
+
+    # One square can qualify through several same-class polygons; keep it once,
+    # attributed to the first polygon that claimed it.
+    seen, uniq = set(), []
+    for r in rows:
+        key = (round(r[1], 3), round(r[2], 3))
+        if key not in seen:
+            seen.add(key)
+            uniq.append(r)
+
+    meta = proj.iloc[[r[0] for r in uniq]].reset_index(drop=True)
+    dom = np.array([r[4] for r in uniq], dtype="float32")
+    out = gpd.GeoDataFrame(
+        {
+            "LCZ_class": meta["class"].astype("int16").to_numpy(),
+            "weight": (meta["weight"].astype("float32").to_numpy() * dom),
+            "aoi": meta["aoi"].to_numpy(),
+            "dominant_frac": dom,
+            "other_frac": np.array([r[5] for r in uniq], dtype="float32"),
+            "src_area_km2": meta["area_km2_utm"].astype("float32").to_numpy(),
+            "src_shape": meta["shape_utm"].astype("float32").to_numpy(),
+            "nbr_dist_m": meta["nbr_dist_m"].astype("float32").to_numpy(),
+            "nbr_conflict": meta["nbr_conflict"].to_numpy(),
+            "oa": pd.to_numeric(meta["acc"], errors="coerce").astype("float32").to_numpy(),
+            "label_year": meta["label_year"].to_numpy(),
+            "w_time": meta["w_time"].astype("float32").to_numpy(),
+            "submission_id": meta["submission_id"].astype(str).to_numpy(),
+        },
+        geometry=[r[3] for r in uniq],
+        crs=proj.crs,
+    ).to_crs("EPSG:4326")
+    out.insert(0, "dataset", "unlabeled")
+    # "_r" keeps these ids disjoint from strict ones ({aoi}_{n:06d}): both are
+    # extracted into the same unlabeled/ directory.
+    out.insert(0, "patch_id", [f"{meta['aoi'].iloc[0]}_r{i:06d}" for i in range(len(out))])
+    return out
+
+
+def run_relaxed(
+    config: WudaptConfig,
+    out_path: Path | None = None,
+    *,
+    strict_gpkg: Path | None = None,
+    min_frac: float = 0.6,
+    max_other_frac: float = 0.1,
+) -> tuple[Path, pd.DataFrame]:
+    """Relaxed-containment patches for every AOI, as one gpkg beside the strict one.
+
+    Carries the same ``wudapt_split``/``region``/``forced_test`` join as
+    :func:`combine_patches`, and drops any square that shares ground with a
+    strict patch, so the two pools can be combined without double counting.
+    """
+    from shapely.strtree import STRtree
+
+    from .qc import run_qc
+    from .splits import assert_split_integrity
+
+    root = Path(config.gpkg_path).parent
+    out_path = Path(out_path) if out_path else root / "patches_wudapt_relaxed.gpkg"
+    strict_gpkg = Path(strict_gpkg) if strict_gpkg else root / "patches_wudapt_rxr.gpkg"
+
+    split_path = Path(config.cache_dir) / f"wudapt_splits_{config.config_hash}.parquet"
+    if not split_path.exists():
+        raise FileNotFoundError(f"run `lcz_wudapt splits` first ({split_path} missing)")
+    splits = pd.read_parquet(split_path)
+    assert_split_integrity(splits)
+
+    gdf = gpd.read_parquet(run_qc(config))
+    frames = []
+    groups = list(gdf.groupby("aoi", sort=False))
+    for n, (aoi, sub) in enumerate(groups, 1):
+        try:
+            p = build_relaxed_patches(sub, config, min_frac=min_frac,
+                                      max_other_frac=max_other_frac)
+        except Exception as exc:
+            logger.warning(f"relaxed failed for {aoi}: {exc}")
+            continue
+        if len(p):
+            frames.append(p)
+        if n % 100 == 0:
+            logger.info(f"  relaxed {n:,}/{len(groups):,} AOIs, "
+                        f"{sum(len(f) for f in frames):,} patches so far")
+    if not frames:
+        raise ValueError("no relaxed patches produced")
+    allp = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), crs="EPSG:4326")
+    if not allp["patch_id"].is_unique:
+        raise ValueError("relaxed patch_id is not unique across AOIs")
+
+    strict = gpd.read_file(strict_gpkg, columns=["patch_id"])
+    tree = STRtree(strict.geometry.values)
+    ia, ib = tree.query(allp.geometry.values, predicate="intersects")
+    inter = shapely.area(shapely.intersection(allp.geometry.values[ia], strict.geometry.values[ib]))
+    clash = np.zeros(len(allp), dtype=bool)
+    clash[np.unique(ia[inter > 0])] = True
+    if clash.any():
+        logger.info(f"dropping {int(clash.sum()):,} relaxed squares that share ground with strict ones")
+    allp = allp[~clash]
+
+    allp = allp.merge(splits[["aoi", "wudapt_split", "region", "forced_test"]],
+                      on="aoi", how="left", validate="many_to_one")
+    allp = allp[allp["wudapt_split"].notna()]
+    allp.to_file(out_path, driver="GPKG")
+    review = (allp.groupby(["wudapt_split", "LCZ_class"]).size()
+              .unstack(fill_value=0))
+    logger.info(f"wrote {out_path} -- {len(allp):,} relaxed patches, "
+                f"{allp.aoi.nunique():,} AOIs, splits {allp.wudapt_split.value_counts().to_dict()}")
+    return out_path, review
 
 
 def build_label_raster(
