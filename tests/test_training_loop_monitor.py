@@ -109,3 +109,41 @@ def test_one_good_epoch_survives_a_later_nan(tmp_path):
     assert ckpt is not None and ckpt.exists()
     saved = torch.load(ckpt, map_location="cpu", weights_only=False)
     assert saved["val_metric"] == 0.3 and saved["epoch"] == 1
+
+
+# ── --min-epochs: an early peak must not end the run by itself ──────────────
+# In the 2026-09 mobilenet/Tessera v2 campaign best epoch and test kappa
+# correlated (Spearman 0.43 over 21 runs); the worst E2/E3 seeds peaked at epoch
+# 8-10 and early-stopped at 18-20.
+
+def _run_es(tmp_path, values, *, patience, min_epochs, epochs=12):
+    task = _Tiny(values)
+    run_training_loop(
+        task_module=task, datamodule=_DM(), device=torch.device("cpu"),
+        max_epochs=epochs, early_stopping_patience=patience,
+        run_dir=tmp_path, model_name="tiny", min_epochs=min_epochs,
+    )
+    ckpt = torch.load(tmp_path / "tiny-best.pt", weights_only=False)
+    return task._epoch, ckpt["epoch"]
+
+
+def test_without_min_epochs_an_early_peak_stops_the_run(tmp_path):
+    # peak at epoch 2, then flat; patience 2 -> stops at epoch 4
+    ran, best = _run_es(tmp_path, [0.1, 0.5] + [0.4] * 10, patience=2, min_epochs=0)
+    assert (ran, best) == (4, 2)
+
+
+def test_min_epochs_lets_a_later_epoch_beat_the_early_peak(tmp_path):
+    # same early peak, but epoch 7 is better; patience alone would never see it
+    vals = [0.1, 0.5, 0.4, 0.4, 0.4, 0.4, 0.6] + [0.55] * 5
+    ran, best = _run_es(tmp_path, vals, patience=2, min_epochs=8)
+    assert best == 7
+    assert ran == 9            # patience counts again from epoch 7's improvement
+
+
+def test_min_epochs_still_selects_on_the_monitor_alone(tmp_path):
+    # nothing beats the early peak: the run goes on to min_epochs, then stops,
+    # and the early peak is still the checkpoint -- min_epochs never forces a
+    # worse model in
+    ran, best = _run_es(tmp_path, [0.1, 0.5] + [0.4] * 10, patience=2, min_epochs=6)
+    assert (ran, best) == (6, 2)

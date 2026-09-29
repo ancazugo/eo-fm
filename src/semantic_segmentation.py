@@ -618,6 +618,7 @@ def main() -> None:
         dice_weight=args.dice_weight,
         max_epochs=args.max_epochs,
         early_stopping_patience=args.early_stopping_patience,
+        min_epochs=args.min_epochs,
         seed=args.seed,
         n_params=n_params,
         data_source="grid_tiles",
@@ -643,6 +644,7 @@ def main() -> None:
             device=device,
             max_epochs=args.max_epochs,
             early_stopping_patience=args.early_stopping_patience,
+            min_epochs=args.min_epochs,
             run_dir=run_dir,
             model_name=model_name,
             # The stats travel inside the checkpoint: infer_roi has to

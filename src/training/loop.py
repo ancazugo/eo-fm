@@ -33,6 +33,7 @@ def run_training_loop(
     model_name: str,
     warmup_epochs: int = 0,
     norm_meta: dict | None = None,
+    min_epochs: int = 0,
 ):
     """Train ``task_module`` and return ``(task_with_best_weights, best_ckpt_path)``.
 
@@ -46,6 +47,15 @@ def run_training_loop(
         run_dir: Directory to save checkpoints.
         model_name: Stem for the checkpoint filename.
         warmup_epochs: Linear LR warmup epochs before cosine decay (0 = off).
+        min_epochs: Early stopping may not fire before this epoch (0 = off).
+            The best checkpoint is still chosen purely on the monitor, so this
+            only gives later epochs the chance to beat an early peak. Why it
+            exists (2026-09-29, mobilenet/small, Tessera v2 cultural split,
+            21 runs): best epoch and test kappa correlate (Spearman 0.43,
+            p = 0.05), and the worst E2 and E3 seeds peaked at epochs 8 and 10
+            and stopped at 18-20, while the cosine schedule had barely decayed.
+            It is not the whole story -- a baseline seed peaked at epoch 4 and
+            still scored mid-pack -- so whether it helps is an experiment.
         norm_meta: Input-normalization metadata to embed in the checkpoint —
             ``{"normalize": ..., "channel_mean": ..., "channel_std": ...}``.
             Inference MUST reproduce the training normalization exactly, so it
@@ -160,8 +170,13 @@ def run_training_loop(
         else:
             patience_counter += 1
             if patience_counter >= early_stopping_patience:
-                logger.info(f"Early stopping at epoch {epoch+1}")
-                break
+                if epoch + 1 < min_epochs:
+                    if patience_counter == early_stopping_patience:
+                        logger.info(f"  patience exhausted at epoch {epoch+1}, "
+                                    f"continuing to --min-epochs {min_epochs}")
+                else:
+                    logger.info(f"Early stopping at epoch {epoch+1}")
+                    break
 
     if best_ckpt_path is None:
         logger.warning(

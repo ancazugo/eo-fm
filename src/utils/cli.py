@@ -47,6 +47,9 @@ def add_training_args(
     g.add_argument("--weight-decay", type=float, default=1e-4)
     g.add_argument("--max-epochs", type=int, default=50)
     g.add_argument("--early-stopping-patience", type=int, default=10)
+    g.add_argument("--min-epochs", type=int, default=0,
+                   help="Early stopping may not fire before this epoch; the best "
+                        "checkpoint is still picked on the monitor (0 = off).")
     g.add_argument("--seed", type=int, default=seed)
     g.add_argument("--accelerator", choices=["auto", "cpu", "cuda", "mps"], default="auto")
     return g
