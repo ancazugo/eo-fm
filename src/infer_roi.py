@@ -335,6 +335,7 @@ class TileProbSource:
         patch_physical_res_m: float = 320.0,
         patch_physical_stride_m: float | None = None,
         target_res_m: float | None = None,
+        roi_geom_4326=None,
     ):
         from shapely.geometry import box
 
@@ -360,6 +361,10 @@ class TileProbSource:
         # ── Tile spatial index ───────────────────────────────────────────────
         tile_paths, tree = build_tile_index(embedding_dir, embedding_name, year=year)
         idxs = tree.query(box(*bbox))
+        if roi_geom_4326 is not None:
+            # Keep only tiles touching the ROI geometry itself: a bbox around
+            # scattered cells can cover several times their area.
+            idxs = [i for i in idxs if tree.geometries[i].intersects(roi_geom_4326)]
         if len(idxs) == 0:
             raise RuntimeError(f"No embedding tiles found for bbox {bbox}")
         self.matched_paths = [tile_paths[i] for i in idxs]
@@ -531,6 +536,7 @@ def infer_roi(
     coarsen_to_m: float | None = None,
     coarsen_method: str = "gaussian",
     gaussian_sigma: float | None = None,
+    roi_geom_4326=None,
 ) -> Path:
     """Run model inference over a bbox directly from raw source embedding tiles.
 
@@ -611,6 +617,8 @@ def infer_roi(
             ``coarsen_to_m`` is given.
         gaussian_sigma: Optional single sigma (metres) overriding the
             per-class default table for the ``"gaussian"`` method.
+        roi_geom_4326: Optional shapely geometry (EPSG:4326). Only tiles that
+            intersect it are run; the bbox still sets the output grid.
 
     Returns:
         Path to the saved GeoTIFF.
@@ -625,7 +633,7 @@ def infer_roi(
         normalize=normalize, margin_m=margin_m,
         patch_physical_res_m=patch_physical_res_m,
         patch_physical_stride_m=patch_physical_stride_m,
-        target_res_m=target_res_m,
+        target_res_m=target_res_m, roi_geom_4326=roi_geom_4326,
     )
     first_crs = source.first_crs
     resolved_crs = out_crs or first_crs

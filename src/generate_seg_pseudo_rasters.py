@@ -40,9 +40,8 @@ from loguru import logger
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from datasets.registry import EMBEDDING_REGISTRY, get_in_channels
-from infer_roi import infer_roi
-from models import build_model
+from datasets.registry import EMBEDDING_REGISTRY
+from infer_roi import infer_roi, load_model_and_normalize
 from utils.runtime import resolve_dequantize, resolve_device
 
 
@@ -50,8 +49,10 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Teacher soft-voted inference → dense pseudo-label rasters per city."
     )
-    parser.add_argument("--checkpoint", required=True, type=Path,
-                        help="Teacher checkpoint (.pt with model_state_dict).")
+    parser.add_argument("--checkpoint", required=True, type=Path, nargs="+",
+                        help="Teacher checkpoint(s). Several = one ensemble teacher: "
+                             "their softmax is averaged per patch, each model on its "
+                             "own checkpoint-stored normalisation.")
     parser.add_argument("--family", default="resnet")
     parser.add_argument("--preset", default="small")
     parser.add_argument("--arch", default=None)
@@ -98,6 +99,32 @@ def _parse_args() -> argparse.Namespace:
                              "redo the post-processing (e.g. to sweep --min-conf).")
     parser.add_argument("--output-dir", required=True, type=Path)
     return parser.parse_args()
+
+
+class NormalizedEnsemble(torch.nn.Module):
+    """Mean softmax of several classifiers, each fed its own normalisation.
+
+    ``infer_roi`` applies ONE normalisation before the model and a softmax
+    after it, but seeds of one recipe store slightly different channel stats
+    (each computed on its own run). So the raw tile goes in, every member
+    normalises it itself, and the forward returns ``log(mean softmax)`` --
+    which ``infer_roi``'s softmax turns back into exactly the mean.
+    """
+
+    def __init__(self, members: list[tuple[torch.nn.Module, tuple | None]]):
+        super().__init__()
+        self.models = torch.nn.ModuleList(m for m, _ in members)
+        for i, (_, norm) in enumerate(members):
+            mean, std = norm if norm is not None else (np.zeros(1), np.ones(1))
+            self.register_buffer(f"mean{i}", torch.as_tensor(mean, dtype=torch.float32).view(1, -1, 1, 1))
+            self.register_buffer(f"std{i}", torch.as_tensor(std, dtype=torch.float32).view(1, -1, 1, 1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        p = 0
+        for i, m in enumerate(self.models):
+            z = (x - getattr(self, f"mean{i}")) / getattr(self, f"std{i}")
+            p = p + torch.softmax(m(z), dim=1)
+        return torch.log(p / len(self.models) + 1e-8)
 
 
 def build_pseudo_raster(
@@ -178,14 +205,21 @@ def main() -> None:
     device = resolve_device(args.accelerator)
     logger.info(f"Device: {device}")
 
-    dequantize_fn, override = resolve_dequantize(args.embedding_name, force=args.dequantize)
-    in_channels = override or get_in_channels(args.embedding_name)
-    model = build_model(args.family, args.preset, args.arch,
-                        in_channels=in_channels, num_classes=args.num_classes)
-    ckpt = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(ckpt.get("model_state_dict", ckpt))
-    model = model.to(device).eval()
-    logger.info(f"Teacher: {args.family}/{args.preset} from {args.checkpoint}")
+    dequantize_fn, _ = resolve_dequantize(args.embedding_name, force=args.dequantize)
+    # load_model_and_normalize, not a bare state-dict load: it rebuilds the
+    # family with the trained img_size and returns the checkpoint's own input
+    # stats. The old path fed normalised-trained teachers raw embeddings.
+    members = [
+        load_model_and_normalize(
+            ck, args.family, args.embedding_name, device,
+            preset=args.preset, arch=args.arch, num_classes=args.num_classes,
+            patch_size=args.patch_size,
+        )
+        for ck in args.checkpoint
+    ]
+    model = NormalizedEnsemble(members).to(device).eval()
+    logger.info(f"Teacher: {args.family}/{args.preset} x{len(members)} "
+                f"from {', '.join(str(c) for c in args.checkpoint)}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -218,7 +252,12 @@ def _process_city(args, city: str, model, device, dequantize_fn) -> int:
         logger.info(f"{city}: reusing existing {teacher_tif.name}")
     else:
         grid_gdf = gpd.read_file(grid_gpkg)
-        west, south, east, north = grid_gdf.to_crs("EPSG:4326").total_bounds
+        # Only the valid cells have extracted embeddings, so only they are ever
+        # trained on -- and the full grid can be ~60x their area (Zurich: 161
+        # of 9,657 cells), all of it inference nobody reads.
+        valid = grid_gdf[grid_gdf["is_valid"]] if "is_valid" in grid_gdf.columns else grid_gdf
+        valid_4326 = valid.to_crs("EPSG:4326")
+        west, south, east, north = valid_4326.total_bounds
         logger.info(f"{city}: teacher inference over bbox "
                     f"({west:.3f}, {south:.3f}, {east:.3f}, {north:.3f})")
         infer_roi(
@@ -228,6 +267,11 @@ def _process_city(args, city: str, model, device, dequantize_fn) -> int:
             embedding_dir=args.embedding_dir,
             bbox=(west, south, east, north),
             output_path=teacher_tif,
+            # The grid's own CRS: the seg loader crops the label raster by the
+            # tile polygon, and a polygon from another UTM zone crops a
+            # rotated, resampled window rather than the tile's own pixels.
+            out_crs=str(grid_gdf.crs),
+            roi_geom_4326=valid_4326.union_all(),
             num_classes=args.num_classes,
             patch_size=args.patch_size,
             batch_size=args.batch_size,

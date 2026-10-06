@@ -186,6 +186,11 @@ def build_city_tile_items(
                       run used, instead of the subset that survives
                       "global"'s purity filtering. Requires
                       ``label_source="gpkg"``.
+        "all_train" — every ``is_valid`` tile -> "train". For a pseudo-label
+                      raster in a city ``--split-mode global`` gives the
+                      ``train`` role: no patch there is ever evaluated, so the
+                      whole city is supervision, not just the few tiles whose
+                      So2Sat polygons pass the global purity floor.
 
     uid_registry: shared ``{(city, dataset, patch_id): uid}`` map. Pass the same
         dict for every city so patch UIDs are unique across the run — bare
@@ -306,6 +311,8 @@ def build_city_tile_items(
                 continue
             if split_mode == "eval_only":
                 resolved = "eval"
+            elif split_mode == "all_train":
+                resolved = "train"
             elif gid2split is not None:
                 resolved = gid2split.get(grid_id)
                 if resolved is None:

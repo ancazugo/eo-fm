@@ -173,13 +173,27 @@ def _pixel_class_weights(all_items, split_map, scheme: str, num_classes: int):
         return it[0][0] if isinstance(it[0], tuple) else it[0]
 
     area = np.zeros(num_classes, dtype=np.float64)
+    rasters: set = set()
     for it in all_items:
         if split_map.get(_key(it)) != "train":
             continue
+        if it[4] is not None and not it[3]:
+            rasters.add(it[4])
         for entry in it[3] or []:
             cls = int(entry[1]) - 1          # 1-17 -> 0-16
             if 0 <= cls < num_classes:
                 area[cls] += entry[0].area
+    # Pseudo-label rasters carry no polygons: count their pixels instead, in
+    # the same units (m^2), over each whole city raster -- its extent is the
+    # city grid's, so this is the train tiles' distribution to within the
+    # invalid-tile margin.
+    if rasters:
+        import rasterio
+
+        for tif in sorted(rasters):
+            with rasterio.open(tif) as src:
+                counts = np.bincount(src.read(1).ravel(), minlength=num_classes + 1)
+                area += counts[1:num_classes + 1] * abs(src.transform.a * src.transform.e)
     if area.sum() == 0:
         logger.warning("No labelled train polygons found — class weights disabled.")
         return None
@@ -398,7 +412,7 @@ def main() -> None:
     # ── City roles (global split only) ────────────────────────────────────────
     city_roles: dict = {}
     if args.split_mode == "global":
-        if args.label_source != "gpkg":
+        if args.label_source != "gpkg" and args.label_tif_dir is None:
             parser.error(
                 "--split-mode global requires --label-source gpkg: the "
                 "culture-10 assignment lives in the split GeoPackage's "
@@ -437,11 +451,41 @@ def main() -> None:
     )
     eval_items: list | None = [] if args.label_tif_dir is not None else None
     for city_dir in city_dirs:
+        role = city_roles.get(city_dir.name)
+        if args.split_mode == "global" and args.label_tif_dir is not None:
+            # Distillation under the honest split. The split comes from the
+            # polygons, as always; only a `train`-role city -- one with no
+            # evaluated patch anywhere in it -- swaps its GT for the dense
+            # pseudo raster, over EVERY valid tile. val-inner and culture
+            # cities never see a pseudo label, so selection and the test are
+            # exactly the baseline's.
+            gt_items, gt_sm = build_city_tile_items(
+                city_dir, args.output_name[0], args.year, "gpkg", args.label_col,
+                city_role=role, **split_kw,
+            )
+            eval_items.extend(gt_items)
+            tif_items: list = []
+            if role == "train":
+                tif_items, tif_sm = build_city_tile_items(
+                    city_dir, args.output_name[0], args.year, "tif", args.label_col,
+                    label_tif_dir=args.label_tif_dir, split_mode="all_train",
+                )
+                if not tif_items:
+                    # The train loader reads ONE label source, so a city cannot
+                    # quietly fall back to its polygons here.
+                    parser.error(f"{city_dir.name} has the train role but no "
+                                 f"pseudo_seg_{city_dir.name}.tif in {args.label_tif_dir}")
+                all_items.extend(tif_items)
+                split_map.update(tif_sm)
+            else:
+                all_items.extend(gt_items)
+                split_map.update(gt_sm)
+            continue
         items, sm = build_city_tile_items(
             city_dir, args.output_name[0], args.year,
             args.label_source, args.label_col,
             label_tif_dir=args.label_tif_dir,
-            city_role=city_roles.get(city_dir.name), **split_kw,
+            city_role=role, **split_kw,
         )
         all_items.extend(items)
         split_map.update(sm)
