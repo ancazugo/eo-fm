@@ -717,3 +717,41 @@ comparison was run.
 - Row 7 (ensemble) — not started.
 - No replication (n=1 everywhere in §9) and no seg-specific LR/warmup sweep —
   the schedule is inherited from the patch task's Task 2.1c, not verified here.
+
+## 10. Re-scored with corrected TTA (audit, 2026-10-06)
+
+Every number in §9 was evaluated with a misaligned dihedral TTA:
+`training/evaluate.py` summed the rotated/flipped *output maps* without rotating
+them back, so each pixel averaged predictions for eight different ground
+locations (fixed in `dihedral_tta`). Validation and early stopping never used
+TTA, so the checkpoints are unaffected and were re-scored as they are
+(`--checkpoint`, the runs' own flags, `--nodata-mode zero`, their cached channel
+statistics). Re-running the *old* code reproduces the logged §9.1 values to four
+decimals for rows 4-small, 5-small and 5-medium, so the difference below is the
+bug and nothing else.
+
+| | row 4 small (coop) | row 5 small (Tessera) | row 4 medium (coop) | row 5 medium (Tessera) |
+|---|---|---|---|---|
+| pixel kappa (§9.1 → fixed) | 0.4533 → **0.4906** | 0.5425 → **0.5959** | 0.4083 → **0.4596** | 0.5531 → **0.6063** |
+| **patch kappa** | 0.4294 → **0.4783** | 0.5314 → **0.6022** | 0.3820 → **0.4466** | 0.5316 → **0.6067** |
+| patch OA | 0.5244 | 0.6396 | 0.4902 | 0.6440 |
+| patch F1 (macro) | 0.3526 | 0.4743 | 0.3700 | 0.4788 |
+| patch OAw | 0.8757 | 0.9173 | 0.8571 | 0.9147 |
+| patch kappa_w | 0.6793 | 0.7833 | 0.6224 | 0.7818 |
+| per-city kappa (mean ± std) | 0.461 ± 0.228 | 0.579 ± 0.207 | 0.435 ± 0.234 | 0.588 ± 0.210 |
+
+Without TTA, row 5 small scores 0.6025 patch kappa: correct TTA is worth ~0
+here, the broken one cost ~7 points.
+
+What changes in §9:
+
+- **§9.4's headline no longer holds.** On the same ~9,800 patches the Tessera
+  U-Net (0.602 / 0.607) now beats the coop (0.5455) and Seamless (0.4986) patch
+  classifiers; it still trails the Tessera patch classifier (0.6675) by ~0.06.
+  The AlphaEarth U-Net (0.478) still trails the AlphaEarth patch model (0.5455).
+- §9.3 survives: medium still hurts coop (0.4783 → 0.4466, −0.032) and is noise
+  on Tessera (+0.005).
+- Per-city §9.2 values are all low by a similar margin; regenerate from
+  `per_city_metrics_patch.json` of a re-scored run before quoting any city.
+- `data/seg_metrics.csv` and the newarch fcn8/U-Net runs were scored the same
+  way and are equally low; re-score them before reusing them.
