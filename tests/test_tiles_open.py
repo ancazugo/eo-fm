@@ -218,3 +218,28 @@ def test_the_tile_index_does_not_collapse_stem_colliding_tiles(tmp_path):
     footprints = [tree.geometries[i] for i in range(len(paths))]
     lats = sorted(round(f.centroid.y, 1) for f in footprints)
     assert lats[1] - lats[0] > 0.5
+
+
+@pytest.mark.parametrize("x0", [0.3, 2.2, -46.15, 121.35])
+def test_numpy_mosaic_places_every_pixel_with_inexact_degree_coordinates(x0):
+    """Pixel centres in degrees are not exactly representable, so the mosaic
+    index (ideally k + 0.5 before the shift) lands a hair either side of the
+    half-integer. The old ``floor(v + 0.5) - 1`` turned that into index -1 (an
+    edge row/column silently dropped) or a duplicate; rounding is exact."""
+    import numpy as np
+    import xarray as xr
+
+    from datasets.tiles import numpy_mosaic
+
+    res, n = 0.1 / 3, 50
+
+    def tile(left, value):
+        xs = left + (np.arange(n) + 0.5) * res
+        ys = 52.3 - (np.arange(n) + 0.5) * res
+        return xr.DataArray(np.full((1, n, n), value, np.float32),
+                            dims=("band", "y", "x"),
+                            coords={"band": [0], "y": ys, "x": xs})
+
+    out = numpy_mosaic([tile(x0, 1.0), tile(x0 + n * res, 2.0)])
+    assert out.shape == (1, n, 2 * n)
+    assert (out[0, :, :n] == 1.0).all() and (out[0, :, n:] == 2.0).all()

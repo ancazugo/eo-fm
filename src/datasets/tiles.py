@@ -595,8 +595,11 @@ def numpy_mosaic(arrays: list[xr.DataArray]) -> np.ndarray:
         vals    = a.values.astype(np.float32)
         ay, ax  = a.y.values, a.x.values
 
-        row_idx = (np.floor((y_top  - ay) / yres + 0.5) - 1).astype(int)
-        col_idx = (np.floor((ax - x_left) / xres + 0.5) - 1).astype(int)
+        # (y_top - ay) / yres is ideally k + 0.5 for pixel row k. Round the
+        # shifted value rather than flooring the unshifted one: floor(k + 1 - ε)
+        # under float error would drop the edge row/column entirely.
+        row_idx = np.rint((y_top  - ay) / yres - 0.5).astype(int)
+        col_idx = np.rint((ax - x_left) / xres - 0.5).astype(int)
 
         r_mask = (row_idx >= 0) & (row_idx < target_h)
         c_mask = (col_idx >= 0) & (col_idx < target_w)

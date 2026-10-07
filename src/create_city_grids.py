@@ -21,6 +21,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -47,19 +48,39 @@ _CITY_NAME_OVERRIDES: dict[str, str] = {
 }
 
 
+# WUDAPT AOI directories are named "{City}__{SMOD_ID}" (e.g. Nairobi__30_9135).
+_SMOD_SUFFIX_RE = re.compile(r"__(\d+_\d+)$")
+
+
 def _load_city_bboxes(csv_path: Path) -> dict[str, tuple[float, float, float, float]]:
-    """Load city reference bboxes from CSV, keyed by JRC_NAME_MAIN."""
+    """Load city reference bboxes from CSV, keyed by JRC_NAME_MAIN and, when the
+    CSV carries it, also by SMOD_ID (prefixed ``smod:``)."""
     df = pd.read_csv(csv_path)
-    return {
-        row["JRC_NAME_MAIN"]: (row["minx"], row["miny"], row["maxx"], row["maxy"])
-        for _, row in df.iterrows()
-    }
+    out: dict[str, tuple[float, float, float, float]] = {}
+    for _, row in df.iterrows():
+        bbox = (row["minx"], row["miny"], row["maxx"], row["maxy"])
+        out[row["JRC_NAME_MAIN"]] = bbox
+        if "SMOD_ID" in df.columns:
+            out[f"smod:{row['SMOD_ID']}"] = bbox
+    return out
 
 
 def _lookup_city_bbox(
     city: str, bbox_dict: dict[str, tuple[float, float, float, float]]
 ) -> tuple[float, float, float, float] | None:
-    """Return (minx, miny, maxx, maxy) for a city dir name, or None if not found."""
+    """Return (minx, miny, maxx, maxy) for a city dir name, or None if not found.
+
+    A WUDAPT AOI ("Nairobi__30_9135") is matched by its SMOD_ID, never by name:
+    the name lookup used to miss it, the grid fell back to the label extent and
+    came out as a DIFFERENT 3x3 checkerboard from So2Sat's -- WUDAPT train tiles
+    then covered 1,327 So2Sat testing and 1,124 validation patches in Nairobi.
+    Sharing the bbox (and hence the grid) makes WUDAPT-train cells So2Sat-train
+    cells by construction. SMOD_ID, not the name, because AOI names repeat
+    across countries (San Jose, CA vs. San José, Costa Rica).
+    """
+    m = _SMOD_SUFFIX_RE.search(city)
+    if m is not None:
+        return bbox_dict.get(f"smod:{m.group(1)}")
     normalized = city.replace("_", " ")
     key = _CITY_NAME_OVERRIDES.get(normalized, normalized)
     return bbox_dict.get(key)

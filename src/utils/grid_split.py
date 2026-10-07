@@ -180,6 +180,11 @@ def calculate_tile_coverage(
 
     # Open all source files; wrap in WarpedVRT when reprojection is needed
     src_files = [rasterio.open(p) for p in raster_paths]
+    # Bound before the try so the cleanup below cannot raise UnboundLocalError
+    # and hide whatever went wrong while opening or merging the rasters.
+    datasets: list = []
+    memfile = None
+    dataset_to_mask = None
     try:
         datasets = [
             WarpedVRT(src, crs=target_rio_crs) if src.crs != target_rio_crs else src
@@ -206,7 +211,6 @@ def calculate_tile_coverage(
             dataset_to_mask = memfile.open()
         else:
             dataset_to_mask = datasets[0]
-            memfile = None
 
         coverages = []
         for geom in grid_proj.geometry:
@@ -225,7 +229,8 @@ def calculate_tile_coverage(
 
     finally:
         if memfile is not None:
-            dataset_to_mask.close()
+            if dataset_to_mask is not None:
+                dataset_to_mask.close()
             memfile.close()
         for ds in datasets:
             ds.close()
