@@ -618,6 +618,72 @@ guppd_layer <- function(rc, highlight = NULL, colour = "grey20",
   )
 }
 
+#' LCZ polygons over the ROI (e.g. the So2Sat patch GeoPackages), for drawing
+#' in place of the raster.
+#'
+#' A rasterised label file puts the patches on a grid of its own, which is not
+#' the patches' grid: the So2Sat reference tifs have 0.0037 deg cells for
+#' 0.0029 deg patches, so every drawn patch is resampled. The polygons are the
+#' labels as published. They are read with a bbox filter, moved into the
+#' raster's CRS and split into rings exactly as guppd_layer does (geom_polygon,
+#' not geom_sf, because the figure is on coord_fixed).
+#'
+#' @return list(df = ring coordinates with an `lcz` code per ring,
+#'   shares = the class mix in lcz_counts' format, weighted by polygon area).
+read_lcz_vector <- function(path, rc, field = "LCZ_class") {
+  if (!file.exists(path)) stop("No such vector file: ", path, call. = FALSE)
+  e <- as.vector(terra::ext(rc))
+  roi <- sf::st_bbox(c(xmin = e[["xmin"]], ymin = e[["ymin"]],
+                       xmax = e[["xmax"]], ymax = e[["ymax"]]),
+                     crs = sf::st_crs(terra::crs(rc))) |>
+    sf::st_as_sfc()
+  roi_ll <- sf::st_transform(roi, 4326)
+  v <- sf::st_read(path, wkt_filter = sf::st_as_text(roi_ll), quiet = TRUE)
+  if (!nrow(v)) stop("No polygons in ", basename(path), " over the bbox.",
+                     call. = FALSE)
+  if (!field %in% names(v)) {
+    stop("Field '", field, "' not in ", basename(path), "; columns are ",
+         paste(setdiff(names(v), attr(v, "sf_column")), collapse = ", "),
+         call. = FALSE)
+  }
+  v <- sf::st_transform(v, sf::st_crs(terra::crs(rc)))
+  code <- as.integer(v[[field]])
+  bad <- setdiff(code, LCZ_TABLE$code)
+  if (length(bad)) {
+    stop("Vector holds values outside LCZ 1-17: ", paste(bad, collapse = ", "),
+         call. = FALSE)
+  }
+
+  xy <- as.data.frame(sf::st_coordinates(sf::st_geometry(v)))
+  # The last L column indexes the feature; the ones before it the ring/part.
+  lcols <- grep("^L[0-9]$", names(xy), value = TRUE)
+  feat <- xy[[lcols[length(lcols)]]]
+  df <- data.frame(x = xy$X, y = xy$Y, lcz = code[feat],
+                   grp = interaction(xy[lcols], drop = TRUE))
+
+  # Area-weighted, clipped to the ROI, so the class-mix bar describes what the
+  # panel shows (a patch half outside the bbox counts half).
+  area <- as.numeric(sf::st_area(sf::st_intersection(
+    sf::st_geometry(v), sf::st_geometry(roi))))
+  if (length(area) != nrow(v)) {
+    # st_intersection drops polygons that only touch the ROI edge.
+    area <- vapply(seq_len(nrow(v)), function(i) {
+      a <- sf::st_area(sf::st_intersection(sf::st_geometry(v)[i], roi))
+      if (length(a)) as.numeric(a) else 0
+    }, numeric(1))
+  }
+  agg <- tapply(area, code, sum)
+  shares <- tibble::tibble(code = as.integer(names(agg)), n = as.numeric(agg)) |>
+    dplyr::filter(n > 0) |>
+    dplyr::arrange(match(code, LCZ_TABLE$code)) |>
+    dplyr::mutate(key = factor(LCZ_TABLE$alt_code[match(code, LCZ_TABLE$code)],
+                               levels = LCZ_TABLE$alt_code),
+                  share = n / sum(n)) |>
+    dplyr::select(key, share, n)
+  message("  vector: ", nrow(v), " polygons from ", basename(path))
+  list(df = df, shares = shares)
+}
+
 #' Format a projected coordinate as a lon/lat degree label, Python-style.
 #'
 #' The breaks are in the raster's own units, so each one is turned back into a
@@ -644,7 +710,16 @@ degree_labeller <- function(rc, axis = c("x", "y"), digits = 1) {
       sf::st_as_sf(as.data.frame(xy), coords = 1:2, crs = terra::crs(rc)), 4326))
     d <- ll[, if (axis == "x") 1 else 2]
     suffix <- if (axis == "x") ifelse(d >= 0, "E", "W") else ifelse(d >= 0, "N", "S")
-    out[keep] <- sprintf("%.*f°%s", digits, abs(d), suffix)
+    # Breaks closer together than 10^-digits degrees would print the same
+    # label twice (a 0.15 deg ROI gave 36.8E, 36.8E, 36.9E), so add decimals
+    # until the labels are as distinct as the breaks are.
+    dg <- digits
+    repeat {
+      labs <- sprintf("%.*f°%s", dg, abs(d), suffix)
+      if (!anyDuplicated(labs) || dg >= 4) break
+      dg <- dg + 1
+    }
+    out[keep] <- labs
     out
   }
 }
@@ -658,8 +733,8 @@ degree_labeller <- function(rc, axis = c("x", "y"), digits = 1) {
 #' its levels are the map's long "3: Compact Low-Rise" keys, not the short alt
 #' codes the standalone figures use. The two always agree: both are counted from
 #' the same cropped raster, so the class sets are identical by construction.
-map_class_shares <- function(rc, levels_) {
-  df <- lcz_counts(rc)
+map_class_shares <- function(rc, levels_, counts = NULL) {
+  df <- if (is.null(counts)) lcz_counts(rc) else counts
   key <- LCZ_LABELS_CODE[match(LCZ_TABLE$code[match(as.character(df$key),
                                                     LCZ_TABLE$alt_code)],
                                LCZ_TABLE$code)]
@@ -818,7 +893,8 @@ lcz_raster_plot <- function(path, bbox, legend = FALSE, scalebar = TRUE,
                             distribution = c("none", "pie", "bar"),
                             dist_side = "bottom", pie_corner = "bl",
                             pie_size = PIE_SIZE, x_axis = c("bottom", "top"),
-                            panel_in = 6.5, max_cells = 4e6) {
+                            panel_in = 6.5, max_cells = 4e6,
+                            vector = NULL, vector_field = "LCZ_class") {
   distribution <- match.arg(distribution)
   x_axis <- match.arg(x_axis)
   rc <- read_lcz_roi(path, bbox, max_cells = max_cells)
@@ -834,8 +910,12 @@ lcz_raster_plot <- function(path, bbox, legend = FALSE, scalebar = TRUE,
   d <- terra::as.data.frame(rc, xy = TRUE, na.rm = FALSE)
   names(d)[3] <- "lcz"
   if (all(is.na(d$lcz))) stop("Every cell in the ROI is nodata.", call. = FALSE)
+  # With a vector file the raster only sets the extent, CRS and scale; the
+  # classes, the drawn layer and the class mix all come from the polygons.
+  vec <- if (is.null(vector)) NULL else read_lcz_vector(vector, rc, vector_field)
 
-  present <- sort(unique(as.integer(d$lcz)))
+  present <- if (is.null(vec)) sort(unique(as.integer(d$lcz)))
+             else sort(unique(vec$df$lcz))
   bad <- setdiff(present, LCZ_TABLE$code)
   if (length(bad)) {
     stop("Raster holds values outside LCZ 1-17: ", paste(bad, collapse = ", "),
@@ -852,6 +932,10 @@ lcz_raster_plot <- function(path, bbox, legend = FALSE, scalebar = TRUE,
   d$lcz <- LCZ_LABELS_CODE[match(as.integer(d$lcz), LCZ_TABLE$code)]
   d$lcz[is.na(d$lcz)] <- NODATA_KEY
   d$lcz <- factor(d$lcz, levels = c(keys, NODATA_KEY))
+  if (!is.null(vec)) {
+    vec$df$lcz <- factor(LCZ_LABELS_CODE[match(vec$df$lcz, LCZ_TABLE$code)],
+                         levels = levels(d$lcz))
+  }
 
   e   <- as.vector(terra::ext(rc))
   inf <- lcz_scale_info(rc)
@@ -872,7 +956,9 @@ lcz_raster_plot <- function(path, bbox, legend = FALSE, scalebar = TRUE,
                            apikey = basemap_apikey)
   }
   p <- p +
-    geom_raster() +
+    (if (is.null(vec)) geom_raster()
+     else geom_polygon(data = vec$df, aes(x = x, y = y, group = grp, fill = lcz),
+                       inherit.aes = FALSE, colour = NA)) +
     scale_fill_manual(values = c(LCZ_COLOURS_PY[idx],
                                  setNames(nodata_fill, NODATA_KEY)),
                       breaks = keys, name = NULL, drop = TRUE,
@@ -883,6 +969,12 @@ lcz_raster_plot <- function(path, bbox, legend = FALSE, scalebar = TRUE,
   # A degree of longitude is m_per_x metres and a degree of latitude is
   # m_per_x * ratio, which is why the two sides need different factors.
   cell_m <- terra::res(rc) * inf$m_per_x * c(1, inf$ratio)
+  if (resolution && !is.null(vec)) {
+    # Polygons are drawn, not cells, so a key giving the raster's cell size
+    # would describe nothing on the map.
+    message("  resolution key omitted: --vector draws polygons, not raster cells")
+    resolution <- FALSE
+  }
   if (resolution) {
     native <- terra::res(terra::rast(path[[1]])) * inf$m_per_x * c(1, inf$ratio)
     if (!isTRUE(all.equal(native, cell_m))) {
@@ -893,7 +985,7 @@ lcz_raster_plot <- function(path, bbox, legend = FALSE, scalebar = TRUE,
   }
 
   shares <- if (distribution == "none") NULL else
-    map_class_shares(rc, levels(d$lcz))
+    map_class_shares(rc, levels(d$lcz), counts = vec$shares)
 
   # Under the scale bar, so the bar's backing panel still masks it.
   if (guppd)    p <- p + guppd_layer(rc, highlight = guppd_highlight)
@@ -990,6 +1082,12 @@ if (sys.nframe() == 0L && !interactive()) {
   parser$add_argument("--input", required = TRUE, nargs = "+",
                       help = paste("LCZ GeoTIFF(s) with classes 1-17 and nodata 0.",
                                    "Several are merged onto the first one's grid."))
+  parser$add_argument("--vector", default = NULL,
+                      help = paste("draw this LCZ polygon file (e.g. a So2Sat",
+                                   "patches_reference_<city>.gpkg) instead of",
+                                   "the raster, which then only sets the extent"))
+  parser$add_argument("--vector-field", default = "LCZ_class", dest = "vector_field",
+                      help = "class column (1-17) in --vector")
   parser$add_argument("--bbox", required = TRUE,
                       help = "ROI as west,south,east,north in degrees")
   parser$add_argument("--name", required = TRUE, help = "output stem under plots/")
@@ -1098,5 +1196,6 @@ if (sys.nframe() == 0L && !interactive()) {
                   pie_corner = args$pie_corner, pie_size = args$pie_size,
                   scalebar = !args$no_scalebar,
                   scalebar_corner = args$scalebar_corner,
-                  title = args$title, max_cells = args$max_cells)
+                  title = args$title, max_cells = args$max_cells,
+                  vector = args$vector, vector_field = args$vector_field)
 }
