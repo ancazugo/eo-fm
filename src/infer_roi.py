@@ -75,6 +75,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from loguru import logger
 
+from datasets.registry import EMBEDDING_REGISTRY, get_nodata_predicate
 from datasets.tiles import build_coop_valid_bbox_map, build_tile_index, open_tile
 from utils.lcz_smoothing import (
     DEFAULT_SIGMA_BY_CLASS,
@@ -378,6 +379,17 @@ class TileProbSource:
                 embedding_dir, year, self.matched_paths
             )
 
+        # The valid bbox above is a lon/lat rectangle, but the zone edge it
+        # stands for is a meridian, which runs diagonally across a UTM tile: the
+        # clip still keeps a wedge of the neighbouring zone, filled with the
+        # -128 sentinel. Dequantized and normalised, that fill looks like real
+        # data and wins the vote over the other zone's clean predictions (a
+        # visible sliver along 0 deg over London). So sentinel pixels are masked
+        # out of every tile's probability volume, whatever the embedding.
+        self.nodata_predicate = (get_nodata_predicate(embedding_name)
+                                 if EMBEDDING_REGISTRY.get(embedding_name, {})
+                                 .get("nodata_all_channels_eq") is not None else None)
+
         # ── Probe the first valid tile for CRS + pixel size ──────────────────
         first_result = None
         for path in self.matched_paths:
@@ -446,6 +458,27 @@ class TileProbSource:
                 self.n_skip += 1
                 continue
 
+            invalid = None
+            if self.nodata_predicate is not None:
+                raw = _open_and_clip(
+                    tile_path, self.bbox, margin_m=self.margin_m,
+                    valid_bbox_4326=self.path_to_valid_bbox.get(tile_path),
+                )
+                invalid = self.nodata_predicate(raw[0])
+                if invalid.shape != arr.shape[1:] or not invalid.any():
+                    invalid = None
+                else:
+                    # Windows reaching into the fill would still see it, and the
+                    # pixels beside the edge would inherit their vote. Extend the
+                    # real data into the fill instead (nearest valid pixel, the
+                    # same idea as the reflect padding at a tile edge); the fill
+                    # pixels' own predictions are zeroed below.
+                    from scipy.ndimage import distance_transform_edt
+                    iy, ix = distance_transform_edt(invalid, return_distances=False,
+                                                    return_indices=True)
+                    arr = arr[:, iy, ix]
+                    del iy, ix
+
             if self.is_seg:
                 probs = _sliding_window_seg(
                     self.model, arr, self.patch_size, self.stride, self.device,
@@ -457,6 +490,9 @@ class TileProbSource:
                     self.num_classes, self.batch_size,
                     extract_size=self.extract_px, model_input_size=self.patch_size,
                 )
+            if invalid is not None:
+                probs[:, invalid] = 0.0     # all-zero = "no prediction here"
+                logger.info(f"  masked {invalid.mean():.1%} nodata px")
             self.n_done += 1
             yield probs, tile_crs, tile_transform
 
@@ -932,8 +968,12 @@ def _parse_args() -> argparse.Namespace:
                         "Default: data/guppd_bounds.csv")
     p.add_argument("--output", required=True, type=Path,
                    help="Output GeoTIFF path.")
-    p.add_argument("--patch-size", type=int, default=64,
-                   help="Sliding window patch size in pixels (default: 64).")
+    p.add_argument("--patch-size", type=int, default=None,
+                   help="Model input size in pixels. Classification: the size the "
+                        "model was TRAINED at -- taken from the checkpoint when it "
+                        "records one, else 32 (the training default); a rebuild at "
+                        "another size loads cleanly but is a different network. "
+                        "Segmentation: the sliding-window size (default: 64).")
     p.add_argument("--patch-physical-res", type=float, default=320.0,
                    help="Physical side length of one patch in metres, resnet only "
                         "(default: 320 = 32 px × 10 m/px, So2Sat standard). "
@@ -1003,6 +1043,26 @@ def _parse_args() -> argparse.Namespace:
                    help="Single sigma in metres overriding the per-class default "
                         "table, for --aggregate gaussian and --coarsen-method gaussian.")
     return p.parse_args()
+
+
+# Training-time defaults: patch_classification.py --patch-size and the
+# segmentation sliding window. Only consulted when neither the caller nor the
+# checkpoint says otherwise.
+DEFAULT_CLS_PATCH_SIZE = 32
+DEFAULT_SEG_PATCH_SIZE = 64
+
+
+def default_patch_size(checkpoint: Path, model_type: str) -> int:
+    """The model input size to use when the caller did not choose one.
+
+    Classification checkpoints written since 2026-10-06 record the size they
+    were trained at; older ones were all trained at the 32 px default.
+    """
+    if _is_segmentation(model_type):
+        return DEFAULT_SEG_PATCH_SIZE
+    ckpt = torch.load(checkpoint, map_location="cpu")
+    stored = ckpt.get("patch_size") if isinstance(ckpt, dict) else None
+    return int(stored) if stored is not None else DEFAULT_CLS_PATCH_SIZE
 
 
 def load_model_and_normalize(
@@ -1090,7 +1150,17 @@ def load_model_and_normalize(
         else:
             # Classification families: img_size drives both the ViT token grid
             # and the conv stem adaptation, so the rebuilt structure matches
-            # what training produced.
+            # what training produced -- but only at the size training used.
+            # A different size changes strides/pooling, not parameter shapes,
+            # so load_state_dict cannot catch it.
+            trained = ckpt.get("patch_size") if isinstance(ckpt, dict) else None
+            if trained is not None and int(trained) != int(patch_size):
+                raise SystemExit(
+                    f"{checkpoint} was trained at patch size {int(trained)}, but "
+                    f"{patch_size} was requested. Rebuilding at another size "
+                    "yields a different network that still loads cleanly; "
+                    f"pass --patch-size {int(trained)}."
+                )
             build_kwargs["img_size"] = patch_size
 
         # This calls family.build directly rather than build_model, so the
@@ -1159,7 +1229,8 @@ def load_model_and_normalize(
 def main() -> None:
     args = _parse_args()
     from utils.cli import resolve_overlap
-    resolve_overlap(args)
+    if args.patch_size is not None:
+        resolve_overlap(args)
 
     # ── Resolve bbox (from --bbox, --city, or --smod-id) ─────────────────────
     n_sources = sum(x is not None for x in [args.bbox, args.city, args.smod_id])
@@ -1198,6 +1269,12 @@ def main() -> None:
 
     device = resolve_device(args.accelerator)
     logger.info(f"Device: {device}")
+
+    if args.patch_size is None:
+        args.patch_size = default_patch_size(args.checkpoint, args.model_type)
+        logger.info(f"--patch-size not given: using {args.patch_size}")
+    if args.overlap is None:
+        resolve_overlap(args)
 
     model, normalize = load_model_and_normalize(
         args.checkpoint, args.model_type, args.embedding_name, device,
