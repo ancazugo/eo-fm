@@ -60,15 +60,20 @@ def cm_metrics(cm: np.ndarray) -> dict:
     p = tp / np.maximum(cm.sum(0), 1)
     r = tp / np.maximum(cm.sum(1), 1)
     f1 = 2 * p * r / np.maximum(p + r, 1e-12)
+    # Macro over classes that occur in the labels or the predictions -- the
+    # torchmetrics convention the trainer logs, so a single model reproduces
+    # its run's test_f1 (an absent class would otherwise count as F1 = 0).
+    present = (cm.sum(0) + cm.sum(1)) > 0
     return {"kappa": float((po - pe) / (1 - pe)), "oa": float(po),
-            "f1_macro": float(f1.mean()), "f1": [round(float(x), 4) for x in f1]}
+            "f1_macro": float(f1[present].mean()), "f1": [round(float(x), 4) for x in f1]}
 
 
 def score_checkpoint(ckpt: Path, items, args, cache_dir: Path) -> np.ndarray:
     """(N, C) TTA softmax for one checkpoint, cached on (checkpoint, items)."""
     key = hashlib.sha1(
         (str(ckpt.resolve()) + str(ckpt.stat().st_mtime) + args.split
-         + str(len(items)) + str(items[0].path) + str(items[-1].path)).encode()
+         + str(len(items)) + str(items[0].path) + str(items[-1].path)
+         + ("|notta" if args.no_tta else "")).encode()
     ).hexdigest()[:16]
     cache = cache_dir / f"probs_{ckpt.parent.name}_{key}.npy"
     if cache.exists():
@@ -99,7 +104,7 @@ def score_checkpoint(ckpt: Path, items, args, cache_dir: Path) -> np.ndarray:
     )
     loader = DataLoader(ds, batch_size=512, shuffle=False, num_workers=args.num_workers)
     with torch.no_grad():
-        probs = predict_probs(model, loader, device, tta=True).astype(np.float32)
+        probs = predict_probs(model, loader, device, tta=not args.no_tta).astype(np.float32)
     np.save(cache, probs)
     return probs
 
@@ -117,6 +122,9 @@ def main() -> None:
     p.add_argument("--preset", default="small")
     p.add_argument("--patch-size", type=int, default=32)
     p.add_argument("--nodata-mode", default="mask", choices=["zero", "mask"])
+    p.add_argument("--no-tta", action="store_true",
+                   help="score without dihedral TTA -- for arms whose runs were "
+                        "evaluated without --tta, so the reproduction check can pass")
     p.add_argument("--split", default="test", choices=["test", "val"])
     p.add_argument("--k", type=int, nargs="*", default=[3],
                    help="also report the mean over all k-seed sub-ensembles")

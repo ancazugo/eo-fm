@@ -51,7 +51,8 @@ from datasets.so2sat import PatchDataset, PatchItem, build_patch_index
 from models import build_model
 from training.evaluate import predict_probs
 from utils.cli import add_eval_args
-from utils.runtime import detect_in_channels, resolve_dequantize, resolve_device
+from utils.runtime import (detect_in_channels, eval_dataset_kwargs,
+                           resolve_dequantize, resolve_device)
 
 
 def main() -> None:
@@ -102,13 +103,17 @@ def main() -> None:
     dequantize_fn, override = resolve_dequantize(args.embedding_name)
     in_channels = detect_in_channels(items[0].path, override)
     model = build_model(args.family, args.preset, args.arch,
-                        in_channels=in_channels, num_classes=args.num_classes)
+                        in_channels=in_channels, num_classes=args.num_classes,
+                        img_size=args.patch_size)
     ckpt = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(ckpt.get("model_state_dict", ckpt))
     model = model.to(device)
     logger.info(f"Teacher: {args.family}/{args.preset} from {args.checkpoint}")
 
-    ds = PatchDataset(items, args.patch_size, dequantize_fn=dequantize_fn)
+    # The teacher sees its own training-time inputs (normalisation, nodata
+    # handling); a normalised teacher fed raw embeddings labels garbage.
+    ds = PatchDataset(items, args.patch_size, dequantize_fn=dequantize_fn,
+                      **eval_dataset_kwargs(ckpt, args.embedding_name))
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                         num_workers=args.num_workers)
     probs = predict_probs(model, loader, device, tta=args.tta)   # (N, C)

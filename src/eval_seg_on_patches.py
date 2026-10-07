@@ -39,7 +39,8 @@ from models import build_model, families_for
 from training.evaluate import evaluate_classification
 from training.tasks import LCZResNetModule
 from utils.cli import add_eval_args
-from utils.runtime import detect_in_channels, resolve_dequantize, resolve_device
+from utils.runtime import (detect_in_channels, eval_dataset_kwargs,
+                           resolve_dequantize, resolve_device)
 
 
 class PatchPoolHead(nn.Module):
@@ -112,7 +113,7 @@ def main() -> None:
     logger.info(f"Test patches: {len(test_items)}")
 
     dequantize_fn, override = resolve_dequantize(args.embedding_name)
-    first = test_items[0][0]
+    first = test_items[0].path
     if isinstance(first, tuple):
         in_channels = detect_in_channels(first[0], override) + sum(
             detect_in_channels(p) for p in first[1:])
@@ -127,13 +128,21 @@ def main() -> None:
         bottleneck_dropout=args.bottleneck_dropout,
     )
     ckpt = torch.load(args.checkpoint, map_location=device)
+    # The model must see the inputs it was trained on: normalisation and
+    # nodata handling come from the checkpoint (seg runs since 2026-08 are
+    # channel-normalised by default), and its provenance is checked.
+    norm_kw = eval_dataset_kwargs(ckpt, args.embedding_name, pipeline="segmentation")
+    if isinstance(first, tuple) and "nodata_predicate" in norm_kw:
+        norm_kw["nodata_predicate"] = ([norm_kw["nodata_predicate"]]
+                                       + [None] * (len(first) - 1))
     seg_model.load_state_dict(ckpt.get("model_state_dict", ckpt))
     task = LCZResNetModule(PatchPoolHead(seg_model, zero_from=args.zero_aux_from),
                            num_classes=args.num_classes)
     task = task.to(device).eval()
     logger.info(f"Loaded {args.family}/{args.preset} from {args.checkpoint}")
 
-    ds = PatchDataset(test_items, args.patch_size, dequantize_fn=dequantize_fn)
+    ds = PatchDataset(test_items, args.patch_size, dequantize_fn=dequantize_fn,
+                      **norm_kw)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                         num_workers=args.num_workers)
 

@@ -35,18 +35,95 @@ def resolve_device(accelerator: str = "auto") -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def load_checkpoint_weights(task, checkpoint: Path, device: torch.device) -> Path:
+def load_checkpoint_weights(
+    task,
+    checkpoint: Path,
+    device: torch.device,
+    *,
+    embedding_name=None,
+    channel_mean=None,
+    channel_std=None,
+) -> Path:
     """Load model weights from a training checkpoint into a task module.
 
     Accepts both the training-loop checkpoint format
     ``{"model_state_dict", "epoch", <monitor>}`` and a bare state dict.
     Returns the checkpoint path (mirrors run_training_loop's return).
+
+    ``embedding_name`` runs the same provenance guard ``infer_roi`` applies, so
+    an evaluate-only run cannot score a checkpoint on a different product with
+    the same channel count. ``channel_mean``/``channel_std`` are the statistics
+    this run is about to feed the model; when the checkpoint recorded its own
+    and they differ, the evaluation would be on mis-normalised inputs, so that
+    is refused rather than reported as a number.
     """
     logger.info(f"Loading checkpoint: {checkpoint}")
     ckpt = torch.load(checkpoint, map_location=device)
+    is_wrapped = isinstance(ckpt, dict) and "model_state_dict" in ckpt
+    if embedding_name is not None and is_wrapped:
+        from datasets.registry import check_checkpoint_provenance
+        check_checkpoint_provenance(ckpt, embedding_name)
+    if is_wrapped and channel_mean is not None and ckpt.get("channel_mean") is not None:
+        for key, ours in (("channel_mean", channel_mean), ("channel_std", channel_std)):
+            theirs = np.asarray(torch.as_tensor(ckpt[key]).cpu(), dtype=np.float32)
+            if ours is None or theirs.shape != np.shape(ours) or not np.allclose(
+                    theirs, np.asarray(ours, dtype=np.float32), rtol=1e-4, atol=1e-6):
+                raise ValueError(
+                    f"{key} recomputed for this run does not match the one stored in "
+                    f"{checkpoint}. The model would be evaluated on inputs normalised "
+                    "differently from training; re-run with the training run's "
+                    "split/sample/seed flags (or --recompute-stats off)."
+                )
     task.model.load_state_dict(ckpt.get("model_state_dict", ckpt))
     task.to(device)
     return checkpoint
+
+
+def eval_dataset_kwargs(ckpt, embedding_names, *, pipeline: str = "classification") -> dict:
+    """``PatchDataset`` kwargs that reproduce a checkpoint's own input pipeline.
+
+    Evaluators that rebuild a model from a checkpoint must feed it what it was
+    trained on, or they score a model that never existed. Three things travel:
+
+    * **provenance** -- refused if the checkpoint belongs to another product;
+    * **normalisation** -- channel z-scoring with the checkpoint's own stats
+      iff it recorded ``normalize == "channel"``; checkpoints from before
+      2026-08-11 record nothing and were trained unnormalised;
+    * **nodata handling** -- the recorded ``nodata_mode`` if present, else the
+      default of the checkpoint's era: patch runs have masked by default since
+      the same 2026-08-11 change (so a checkpoint that records ``normalize`` is
+      post-change), segmentation runs only since 2026-10-06 (when the key
+      started being written).
+
+    ``embedding_names`` is one registry key or a list (fused sources).
+    """
+    from datasets.registry import check_checkpoint_provenance, get_nodata_predicate
+
+    names = [embedding_names] if isinstance(embedding_names, str) else list(embedding_names)
+    wrapped = isinstance(ckpt, dict) and "model_state_dict" in ckpt
+    meta = ckpt if wrapped else {}
+    if wrapped:
+        check_checkpoint_provenance(ckpt, names[0] if len(names) == 1 else names)
+
+    kw: dict = {}
+    if meta.get("normalize") == "channel":
+        mean, std = meta.get("channel_mean"), meta.get("channel_std")
+        if mean is None or std is None:
+            raise ValueError("checkpoint says normalize='channel' but carries no stats")
+        kw.update(normalize="channel",
+                  channel_mean=np.asarray(torch.as_tensor(mean).cpu(), dtype=np.float32),
+                  channel_std=np.asarray(torch.as_tensor(std).cpu(), dtype=np.float32))
+    mode = meta.get("nodata_mode")
+    if mode is None:
+        mode = ("mask" if pipeline == "classification" and "normalize" in meta
+                else "zero")
+    if mode == "mask":
+        preds = [get_nodata_predicate(n) for n in names]
+        kw.update(nodata_mode="mask",
+                  nodata_predicate=preds[0] if len(preds) == 1 else preds)
+    logger.info(f"Eval inputs from checkpoint: normalize={kw.get('normalize', 'none')}, "
+                f"nodata_mode={mode}")
+    return kw
 
 
 def resolve_dequantize(

@@ -45,7 +45,8 @@ from datasets.so2sat import PatchDataset, PatchItem, build_patch_index
 from models import build_model
 from training.evaluate import predict_probs, save_confusion_matrix
 from utils.cli import add_eval_args, parse_model_spec
-from utils.runtime import detect_in_channels, resolve_dequantize, resolve_device
+from utils.runtime import (detect_in_channels, eval_dataset_kwargs,
+                           resolve_dequantize, resolve_device)
 
 
 
@@ -122,16 +123,24 @@ def main() -> None:
             items = [PatchItem(idx[pid], lab, args.split) for pid, lab in aligned]
             dequantize_fn, override = deq[0]
             in_channels = detect_in_channels(items[0].path, override)
+        ckpt = torch.load(m["checkpoint"], map_location=device)
+        trained = ckpt.get("patch_size") if isinstance(ckpt, dict) else None
+        if trained is not None and int(trained) != args.patch_size:
+            raise SystemExit(f"{m['checkpoint']} was trained at --patch-size "
+                             f"{int(trained)}; pass that, not {args.patch_size}.")
         model = build_model(
             m["family"], m["preset"], None,
             in_channels=in_channels, num_classes=args.num_classes,
+            img_size=args.patch_size,
         )
-        ckpt = torch.load(m["checkpoint"], map_location=device)
         model.load_state_dict(ckpt.get("model_state_dict", ckpt))
         model = model.to(device)
         logger.info(f"{name}: loaded {m['checkpoint']} (in_channels={in_channels})")
 
-        ds = PatchDataset(items, args.patch_size, dequantize_fn=dequantize_fn)
+        # Each member on its own training-time inputs (normalisation, nodata
+        # handling, provenance) -- members of one ensemble can differ.
+        ds = PatchDataset(items, args.patch_size, dequantize_fn=dequantize_fn,
+                          **eval_dataset_kwargs(ckpt, m["embedding_names"]))
         loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                             num_workers=args.num_workers)
         all_probs[name] = predict_probs(model, loader, device, tta=args.tta)

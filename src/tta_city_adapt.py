@@ -50,7 +50,8 @@ from utils.cli import add_eval_args, parse_model_spec
 from utils.geo_lookup import assign_cities
 from models import build_model
 from training.evaluate import predict_probs
-from utils.runtime import detect_in_channels, resolve_dequantize, resolve_device
+from utils.runtime import (detect_in_channels, eval_dataset_kwargs,
+                           resolve_dequantize, resolve_device)
 
 
 def align_split(gdf, split: str, indexes: dict, label_col: str):
@@ -156,8 +157,11 @@ def main() -> None:
     logger.info(f"Cities: {city_list}")
 
     # ── Per-model, per-city adaptation + inference ────────────────────────────
-    def make_loader(items, dequantize_fn, shuffle=False):
-        ds = PatchDataset(items, args.patch_size, dequantize_fn=dequantize_fn)
+    def make_loader(items, dequantize_fn, shuffle=False, ds_kw=None):
+        # ds_kw: the model's own training-time input pipeline (normalisation,
+        # nodata handling) from eval_dataset_kwargs.
+        ds = PatchDataset(items, args.patch_size, dequantize_fn=dequantize_fn,
+                          **(ds_kw or {}))
         return DataLoader(ds, batch_size=args.batch_size, shuffle=shuffle,
                           num_workers=args.num_workers)
 
@@ -174,10 +178,12 @@ def main() -> None:
         in_channels = detect_in_channels(items["val"][0].path, override)
         ckpt = torch.load(m["checkpoint"], map_location=device)
         state = ckpt.get("model_state_dict", ckpt)
+        ds_kw = eval_dataset_kwargs(ckpt, m["embedding_names"])
 
         def fresh_model() -> nn.Module:
             model = build_model(m["family"], m["preset"], None,
-                                in_channels=in_channels, num_classes=args.num_classes)
+                                in_channels=in_channels, num_classes=args.num_classes,
+                                img_size=args.patch_size)
             model.load_state_dict(state)
             return model.to(device)
 
@@ -188,7 +194,8 @@ def main() -> None:
             model = fresh_model()
             for split in ("val", "test"):
                 probs[split][:] = predict_probs(
-                    model, make_loader(items[split], dequantize_fn), device, tta=args.tta)
+                    model, make_loader(items[split], dequantize_fn, ds_kw=ds_kw),
+                    device, tta=args.tta)
             del model
         else:
             for city in city_list:
@@ -203,7 +210,7 @@ def main() -> None:
                 mean_before = bn0.running_mean.detach().clone()
                 reset_bn(model)
                 adapt_loader = make_loader(adapt_items, dequantize_fn,
-                                           shuffle=(args.method == "tent"))
+                                           shuffle=(args.method == "tent"), ds_kw=ds_kw)
                 adabn_pass(model, adapt_loader, device)
                 if args.method == "tent":
                     ent = tent_pass(model, adapt_loader, device,
@@ -215,7 +222,8 @@ def main() -> None:
                     sub = [it for it, keep in zip(items[split], masks[split]) if keep]
                     if sub:
                         probs[split][masks[split]] = predict_probs(
-                            model, make_loader(sub, dequantize_fn), device, tta=args.tta)
+                            model, make_loader(sub, dequantize_fn, ds_kw=ds_kw),
+                            device, tta=args.tta)
                 k_city = cohen_kappa_score(
                     labels["test"][masks["test"]],
                     probs["test"][masks["test"]].argmax(axis=1))
