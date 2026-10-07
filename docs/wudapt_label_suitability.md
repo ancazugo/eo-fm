@@ -187,7 +187,12 @@ WUDAPT AOI names, so it falls back to the label extent and builds a **different*
 3×3 checkerboard from So2Sat's. Measured on Nairobi, that puts 1,327 So2Sat
 *testing* and 1,124 *validation* patches under WUDAPT training tiles. Aligning
 the two grids (reusing the So2Sat bbox for the 51 shared AOIs) removes it by
-construction. **This is not yet implemented.**
+construction. **Implemented 2026-10-06:** `create_city_grids.py` now matches a
+`{City}__{SMOD_ID}` AOI to the So2Sat bbox by its SMOD_ID (not its name, which
+repeats across countries), so the 51 shared AOIs get So2Sat's grid. Existing
+WUDAPT grids predate it and must be rebuilt with `--overwrite`. Residual caveat:
+the UTM zone is still estimated from each label set, so an AOI whose polygons
+straddle a zone edge differently from So2Sat's could still land in another CRS.
 
 For the patch arm the equivalent control is simply to drop the overlapping
 patches — the `w_clean` column above is that count.

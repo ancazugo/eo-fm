@@ -488,7 +488,8 @@ python src/semantic_segmentation.py \
 - `--family` — model family (`unet`, `resnet_unet`, `fcn8` or `attention_unet`)
 - `--preset` — size preset (see table above)
 - `--dequantize` — force dequantization (auto-applied for `alpha_earth_coop`/`seamless`)
-- `--checkpoint` — skip training, load weights and run inference only
+- `--checkpoint` — skip training, load weights and run inference only (refused if the checkpoint's provenance or stored channel statistics disagree with this run's)
+- `--nodata-mode` — `mask` (default) fills per-family nodata sentinels with the channel mean and drops them from the loss, the metrics and patch pooling, as the patch pipeline does; `zero` reproduces every segmentation run before 2026-10-06
 
 Test metrics are reported at two scales: native 10 m per-pixel (`test_*`) and majority-pooled 10×10 blocks (`test_*_100m`) — the ~100 m scale LCZ is defined at.
 
@@ -612,6 +613,9 @@ python src/generate_pseudo_labels.py \
 appends the pseudo items to the train split with per-sample loss weights (weighted CE,
 compatible with mixup and class weights); `--pseudo-weight-scale` is a global multiplier.
 Without `--pseudo-gpkg` the labeled-only path is byte-identical to before.
+`--pseudo-holdout-km` drops pseudo patches within that distance of any validation/testing
+patch: the unlabeled pool was only de-overlapped from So2Sat, and 7.4% of the student-v3
+pool sits inside the 10 test cities (30 km removes all of them; see the campaign doc §10).
 
 ---
 
@@ -633,6 +637,12 @@ Runs inference over an arbitrary bounding box from raw source embedding tiles (n
 | `--no-native` | off | suppress the `<output>_<res>m.tif` sidecar at the embedding's own resolution |
 
 `--aggregate soft` averages the probabilities (a confidence-weighted vote); `majority` counts fine argmax votes, matching the `test_*_100m` eval metrics; `gaussian` applies Demuzere et al. 2020's per-class kernel to the probabilities first. Every run also writes the native-resolution map alongside the primary one, so nothing that depended on the 10 m output loses it. `--coarsen-to` is now a *third*, post-hoc coarsening of the finished primary map (see `coarsen_lcz_map.py`).
+
+For classification, `--patch-size` is the size the model was **trained** at, not a free
+sliding-window choice: the timm stem adaptation depends on it, and a model rebuilt at another
+size loads without error but is a different network. It is read from the checkpoint (recorded
+since 2026-10-06; older checkpoints default to 32) and a conflicting value is refused. For
+segmentation it is the window size (default 64).
 
 Legacy linear-probe checkpoints (fc-only state dict from the retired standalone script) are also handled: pass `--model-type linear_probe --stats-file <cache>/<key>_stats.npz` and the checkpoint is converted on load (numerically identical to the old normalisation). Probes trained via `patch_classification.py --family linear_probe` need no stats file.
 

@@ -49,8 +49,10 @@ cities, and 10 held-out evaluation cities spanning all inhabited
 continents. Under an identical training recipe, TESSERA leads by
 $\sim$0.10 Cohen's kappa (0.619 vs.\ 0.520/0.513), and the kNN and
 linear probes agree. Intrinsic representation diagnostics do \emph{not} predict
-this ranking: TESSERA is the most geography-entangled embedding by
-silhouette and domain-classifier analysis yet wins downstream, and
+this ranking: TESSERA shows the weakest class structure (the only
+negative class silhouette) and a strong train/test shift yet wins
+downstream, while Seamless, the best-scoring embedding on both
+diagnostics, ranks last; and
 the one probe that follows the diagnostics --- a generative GMM
 density on pooled features, where Seamless leads --- is also the one
 that discards spatial patch structure. The
@@ -219,6 +221,13 @@ needs a strong teacher: AlphaEarth 0.5195 $\to$ 0.5218 (keep-rate
 11.4\%) and Seamless 0.5125 $\to$ 0.5135 (keep-rate 5.1\% --- the
 weak teacher rarely agrees with the weak-label map; 48.9\% of the
 pool has Seamless coverage).
+\emph{Caveat:} the unlabeled pool was de-overlapped from the So2Sat
+patches but not held away from the evaluation cities; 7.4\% of the
+final student's pseudo-labelled patches lie in the 10 culture cities
+(3.9\% within 2\,km of a validation/test patch). These carry weak
+map labels, not benchmark labels, but the SSL rows are therefore
+transductive with respect to the test cities, and every result built
+on them inherits that. \todo{re-run with test-city patches excluded}
 
 \subsection{Ensembling, calibration, and the LOCO protocol}
 \label{sec:methods-loco}
@@ -294,15 +303,16 @@ embeddings}.
 Embedding & continent & LCZ class & AUC & train regions\\
 \midrule
 TESSERA v1.1 & $+$0.039 & $-$0.006 & 0.885 & 55.4\\
-AlphaEarth & $+$0.153 & $+$0.075 & 0.958 & 76.6\\
+AlphaEarth & $+$0.154 & $+$0.082 & 0.958 & 76.6\\
 Seamless & $-$0.012 & $+$0.091 & 0.786 & 37.5\\
 \bottomrule
 \end{tabular}
 \caption{Intrinsic diagnostics (GAP-pooled, PCA-50). Seamless looks
 best on \emph{both} axes --- highest class silhouette \emph{and}
-lowest train/test shift --- yet ranks last downstream; TESSERA is the
-most geography-entangled with near-zero class structure, yet wins;
-AlphaEarth clusters most strongly by geography and shifts most.}
+lowest train/test shift --- yet ranks last downstream; TESSERA has
+near-zero (negative) class structure and clusters more by continent
+than by class, yet wins; AlphaEarth clusters most strongly by
+geography and shifts most.}
 \label{tab:diag}
 \end{table}
 

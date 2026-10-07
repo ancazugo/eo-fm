@@ -205,6 +205,7 @@ different class count would raise. Mismatched tensors are dropped and reported.
 | Global patch | `patch_classification.py --global-split --global-gpkg patches_wudapt_rxr.gpkg --split-col wudapt_split --init-checkpoint <so2sat-best>.pt` |
 | Global segmentation | `semantic_segmentation.py --cities-dir $DATA_DIR/input/WUDAPT/cities --split-mode global --init-checkpoint <so2sat-seg-best>.pt --family unet` |
 | Per-city patch | per held-out city: **A** `--freeze backbone` (head-only), **B** full fine-tune, at `--shots-per-class 1,5,10,25,all` |
+| | *2026-10-06:* arm **A** is now truly head-only — `--freeze backbone` also keeps the backbone's BatchNorm running statistics fixed. Before that fix BN stats re-estimated on the adaptation data, so any arm-A run before 2026-10-06 was "AdaBN + head refit". `backbone_keep_bn` is unchanged. |
 | Per-city segmentation | same two-stage protocol on the segmentation family |
 
 Both must report **two** numbers: kappa on the frozen So2Sat culture-10 (does
@@ -333,6 +334,10 @@ Note `create_city_grids.py` logs "no CSV bbox found, falling back to label
 extent" for WUDAPT AOIs — its `--bounds-csv` default only knows the 51 So2Sat
 cities. The fallback is correct and arguably better here: it fits the grid to the
 labelled footprint rather than a GUPPD bounding box that is mostly empty.
+(Superseded 2026-10-06 for the 51 AOIs that are So2Sat cities: those now reuse
+So2Sat's bbox by SMOD_ID, because a label-extent grid there is a different
+checkerboard and leaks So2Sat evaluation patches into WUDAPT training tiles —
+see `wudapt_label_suitability.md`. Non-So2Sat AOIs keep the fallback.)
 
 ## Is any of it usable?
 

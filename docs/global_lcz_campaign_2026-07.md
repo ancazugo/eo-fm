@@ -67,6 +67,11 @@ weighted CE alongside the labeled set.
 | **student-noisy-v3** | v1 | 0.7 | 89,320 (31.2%) | **0.6497** |
 | student-coop-v1 (coop self-teacher) | coop 0.513 | 0.7 | 16,234 (11.4%) | 0.5218 |
 
+> **Audit caveat (2026-10-06, see §10):** the unlabeled pool was de-overlapped from So2Sat
+> patches but not kept away from the 10 test cities. 6,615 of v3's 89,320 kept pseudo
+> patches (7.4%) lie in culture-10 cities, 3,462 within 2 km and 340 within 500 m of a
+> val/test patch. The SSL gain is therefore not yet a clean held-out-city number.
+
 Findings:
 - **v2's failure is a calibration lesson**: a mixup + label-smoothed teacher has a softmax
   ceiling ≈ 0.9, so an absolute threshold of 0.8 is far stricter than intended — keep-rate
@@ -362,6 +367,45 @@ transfer.
   retraining base models per fold).
 - **Rare-class supervision**: LCZ 7/1/10/15 need labeled data or a richer weak-label source;
   no amount of SSL on the current pool helps (§3).
+
+## 10. Audit notes (2026-10-06)
+
+A code + science audit of the whole repo. Items that bear on numbers in this report:
+
+1. **Noisy-student pool reaches into the test cities (§3).** `sample_unlabeled_patches.py`
+   excluded only patches that *overlap* a So2Sat patch. Measured on
+   `data/pseudo_labels_v3/patches_reference_pseudo.gpkg` against the global
+   validation+testing patches (great-circle distance between centroids):
+
+   | within | pseudo patches | share of 89,320 |
+   |---|---|---|
+   | 0.5 km | 340 | 0.4% |
+   | 2 km | 3,462 | 3.9% |
+   | 30 km (= every culture-10 city) | 6,615 | 7.4% |
+
+   These carry Demuzere weak labels gated by teacher agreement, not So2Sat labels, so this is
+   transductive test-domain exposure rather than label leakage. It is still exposure the
+   LOCO-honest numbers (0.6871 / 0.7055) inherit through student-v3 and coop-v1, and its size is
+   unknown without a re-run. **To resolve:** retrain v1→v3 with
+   `patch_classification.py --pseudo-holdout-km 30` (new flag; drops all 6,615) and compare.
+   The later WUDAPT arm (`build_wudapt_train_gpkg.py`) already excludes culture-10 cities plus
+   a buffer, so the project's newer protocol is the clean one.
+2. **Evaluator input pipelines.** `ensemble_eval.py`, `tta_city_adapt.py`,
+   `generate_pseudo_labels.py` and `eval_seg_on_patches.py` built their datasets with no
+   channel normalisation and no nodata masking. Every checkpoint in this report predates
+   `--normalize channel` (2026-08-11) and was trained unnormalised, so **the numbers here are
+   consistent**; the scripts would have silently mis-scored any later checkpoint. They now
+   take normalisation, nodata mode and provenance from the checkpoint
+   (`utils.runtime.eval_dataset_kwargs`).
+3. **City prediction maps (`run_paper_city_predictions.sh`).** `infer_roi.py` defaulted
+   `--patch-size` to 64 for classification too; a classifier trained at 32 px rebuilt at 64
+   loads without error but is a different network (ResNet keeps the max-pool the stem
+   adaptation removed) and sees 2x-upsampled patches. The classification maps from that
+   launcher should be regenerated; `infer_roi` now reads the trained size from the
+   checkpoint (or uses 32) and refuses a conflicting one.
+4. The segmentation ladder in `data/segmentation_plan.md` §9 was evaluated with a misaligned
+   dihedral TTA; see that file's §10 for the re-scored values. §8d here is unaffected: its
+   segmentation numbers come from `infer_roi`'s sliding window, which never used that path.
 
 ## Appendix — artifacts
 

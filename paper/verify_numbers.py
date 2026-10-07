@@ -104,8 +104,12 @@ def main() -> int:
             sil[emb] = {row["facet"]: float(row["silhouette"]) for row in csv.DictReader(fh)}
     expect("tessera continent silhouette", 0.0392, sil["GeoTessera_v1.1_global"]["continent"])
     expect("tessera lcz silhouette", -0.0063, sil["GeoTessera_v1.1_global"]["lcz_name"])
-    expect("coop continent silhouette", 0.1529, sil["AlphaEarthCoop"]["continent"])
-    expect("coop lcz silhouette", 0.0753, sil["AlphaEarthCoop"]["lcz_name"])
+    # The coop projection was regenerated 2026-09-09 (re-extracted, valid-bbox
+    # clipped coop patches; projection schema v2) and overwrote the June run
+    # the first draft quoted (0.1529 / 0.0753). These are the values on disk;
+    # the ranking the paper draws from them is unchanged.
+    expect("coop continent silhouette", 0.1537, sil["AlphaEarthCoop"]["continent"])
+    expect("coop lcz silhouette", 0.0822, sil["AlphaEarthCoop"]["lcz_name"])
     expect("seamless continent silhouette", -0.0124, sil["EmbeddedSeamless"]["continent"])
     expect("seamless lcz silhouette", 0.0908, sil["EmbeddedSeamless"]["lcz_name"])
     auc = json.load(open(Path(__file__).parent / "artifacts/domain_auc_recompute_2026-07-14.json"))
