@@ -143,6 +143,10 @@ TIMM_PRESETS: dict[str, dict[str, str]] = {
         "medium": "convnext_base",
         "large":  "convnext_large",
     },
+    # NOT monotone in parameters: densenet161 (small, 26.6M) is wider than
+    # densenet169 (base, 12.6M) and densenet201 (medium, 18.2M). Kept as is
+    # because small and base carry run history; read a densenet "capacity
+    # curve" by parameter count, not by preset order.
     "densenet": {
         "nano":   "densenet121",
         "small":  "densenet161",
@@ -157,12 +161,17 @@ TIMM_PRESETS: dict[str, dict[str, str]] = {
         "medium": "mobilenetv3_large_150d",
         "large":  "mobilenetv4_conv_large",
     },
+    # build_timm forces patch_size=2 for every ViT, so the patch size in these
+    # names is irrelevant -- only depth/width differ. The ladder used to list
+    # vit_small_patch8 / vit_base_patch8 for base / large, which built exactly
+    # the small / medium networks again (5 presets, 3 models). nano, small and
+    # medium are unchanged, so their checkpoints still load.
     "vit": {
-        "nano":   "vit_tiny_patch16_224",
-        "small":  "vit_small_patch16_224",
-        "base":   "vit_small_patch8_224",
-        "medium": "vit_base_patch16_224",
-        "large":  "vit_base_patch8_224",
+        "nano":   "vit_tiny_patch16_224",        #   5.5M
+        "small":  "vit_small_patch16_224",       #  21.6M
+        "base":   "vit_medium_patch16_gap_256",  #  38.2M
+        "medium": "vit_base_patch16_224",        #  85.7M
+        "large":  "vit_large_patch16_224",       # 303.1M
     },
 }
 
