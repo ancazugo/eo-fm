@@ -22,6 +22,8 @@ import numpy as np
 import torch
 from loguru import logger
 
+from utils.adapt import keep_frozen_bn_in_eval
+
 
 def run_training_loop(
     task_module,
@@ -114,6 +116,7 @@ def run_training_loop(
     for epoch in range(max_epochs):
         # ── Train ─────────────────────────────────────────────────────────
         task_module.train()
+        keep_frozen_bn_in_eval(task_module.model)
         task_module.reset_train_metrics()
         for batch in train_loader:
             opt.zero_grad()

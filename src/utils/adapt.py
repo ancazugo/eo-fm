@@ -160,6 +160,7 @@ def apply_freeze(model: nn.Module, mode: str, num_classes: int) -> dict:
     """
     if mode not in FREEZE_MODES:
         raise ValueError(f"unknown freeze mode {mode!r}; expected one of {FREEZE_MODES}")
+    model._frozen_bn_stats = False
     if mode == "none":
         for p in model.parameters():
             p.requires_grad_(True)
@@ -186,6 +187,13 @@ def apply_freeze(model: nn.Module, mode: str, num_classes: int) -> dict:
             if isinstance(mod, nn.modules.batchnorm._BatchNorm):
                 for p in mod.parameters():
                     p.requires_grad_(True)
+    else:
+        # requires_grad does not touch BatchNorm *running statistics*: in
+        # train() mode every BN layer re-estimates its mean/var on the new data,
+        # so a "frozen" backbone would still drift (AdaBN in disguise) and the
+        # head-only arm would not be the clean probe it claims to be.
+        # keep_frozen_bn_in_eval() honours this mark after every .train().
+        model._frozen_bn_stats = True
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
@@ -194,6 +202,22 @@ def apply_freeze(model: nn.Module, mode: str, num_classes: int) -> dict:
         f"({100 * trainable / max(trainable + frozen, 1):.2f}% trainable), head={heads}"
     )
     return {"mode": mode, "trainable": trainable, "frozen": frozen, "head_modules": heads}
+
+
+def keep_frozen_bn_in_eval(model: nn.Module) -> None:
+    """Put the BatchNorm layers outside the head back in eval mode.
+
+    Call after every ``model.train()``. A no-op unless :func:`apply_freeze` ran
+    in ``backbone`` mode, so ordinary training and ``backbone_keep_bn`` (whose
+    whole point is BN adaptation) are unaffected.
+    """
+    if not getattr(model, "_frozen_bn_stats", False):
+        return
+    for mod in model.modules():
+        if isinstance(mod, nn.modules.batchnorm._BatchNorm) and not any(
+            p.requires_grad for p in mod.parameters()
+        ):
+            mod.eval()
 
 
 def trainable_parameters(model: nn.Module) -> list:

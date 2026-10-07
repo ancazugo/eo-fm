@@ -282,3 +282,29 @@ def test_partial_batch_is_kept_when_the_shot_budget_is_below_one_batch():
                                    drop_last=_drop_last_for(n, bs)))) > 0
     # and a comfortably large set still drops its ragged tail
     assert _drop_last_for(4828, 64)
+
+
+# ── Frozen backbone keeps its BatchNorm statistics ───────────────────────────
+
+def _bn_running_means(model):
+    return [m.running_mean.clone() for m in model.modules()
+            if isinstance(m, nn.modules.batchnorm._BatchNorm) and m.running_mean is not None]
+
+
+@pytest.mark.parametrize("mode,should_move", [
+    ("backbone", False), ("backbone_keep_bn", True), ("none", True)])
+def test_frozen_backbone_does_not_re_estimate_bn_statistics(mode, should_move):
+    """requires_grad=False does not stop BN running stats from updating in
+    train(); the head-only arm must not quietly become AdaBN."""
+    from utils.adapt import keep_frozen_bn_in_eval
+
+    model = build_model("resnet", "nano", in_channels=8, num_classes=17)
+    apply_freeze(model, mode, 17)
+    before = _bn_running_means(model)
+    assert before, "resnet/nano should carry BatchNorm layers"
+    model.train()
+    keep_frozen_bn_in_eval(model)
+    with torch.no_grad():
+        model(torch.randn(4, 8, 32, 32) * 5 + 3)
+    moved = any(not torch.equal(a, b) for a, b in zip(before, _bn_running_means(model)))
+    assert moved == should_move
