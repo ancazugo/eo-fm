@@ -5,6 +5,9 @@ variable quality, 1990s–2024 labels), how do we choose training and held-out c
 global, multi-year segmentation model? Choose on Köppen class, geography, or something else?
 And how does time enter?
 
+This document is Phase M1 of `PLAN-multitemporal.md`, which covers labels, training,
+embedding drift, evaluation and map production around it.
+
 **Short answer.**
 
 1. **Unit.** Group neighbouring urban areas into *blocks* of bounded diameter (≤ 50 km).
