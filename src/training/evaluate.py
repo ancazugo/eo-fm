@@ -128,6 +128,29 @@ def save_confusion_matrix(
     return cm_path
 
 
+def dihedral_tta(fn, imgs: torch.Tensor, spatial: bool = False) -> torch.Tensor:
+    """Average ``fn``'s logits over the dihedral group (4 rotations × {id, hflip}).
+
+    The same transforms used for training augmentation. ``spatial=True`` is for
+    dense (segmentation) outputs, which come back in the *transformed* frame
+    and must be mapped back before they are summed: without the inverse, pixel
+    (i, j) of the average mixes predictions made for eight different ground
+    locations. Classification logits are frame-free, so they are summed as is.
+    """
+    logits = None
+    for k in range(4):
+        r = torch.rot90(imgs, k, dims=(-2, -1)) if k else imgs
+        a, b = fn(r), fn(r.flip(-1))
+        if spatial:
+            b = b.flip(-1)
+            if k:
+                a = torch.rot90(a, -k, dims=(-2, -1))
+                b = torch.rot90(b, -k, dims=(-2, -1))
+        out = a + b
+        logits = out if logits is None else logits + out
+    return logits / 8.0
+
+
 @torch.no_grad()
 def predict_probs(
     model: torch.nn.Module,
@@ -145,15 +168,7 @@ def predict_probs(
     out = []
     for batch in loader:
         imgs = batch["image"].to(device).float()
-        if tta:
-            logits = None
-            for k in range(4):
-                r = torch.rot90(imgs, k, dims=(-2, -1)) if k else imgs
-                o = model(r) + model(r.flip(-1))
-                logits = o if logits is None else logits + o
-            logits = logits / 8.0
-        else:
-            logits = model(imgs)
+        logits = dihedral_tta(model, imgs) if tta else model(imgs)
         out.append(torch.softmax(logits, dim=1).cpu().numpy())
     return np.concatenate(out, axis=0)
 
@@ -251,16 +266,7 @@ def _evaluate(
     task.eval()
 
     def _forward(imgs: torch.Tensor) -> torch.Tensor:
-        if not tta:
-            return task(imgs)
-        # Average logits over the dihedral group (4 rotations × {id, hflip}),
-        # the same transforms used for training augmentation.
-        logits = None
-        for k in range(4):
-            r = torch.rot90(imgs, k, dims=(-2, -1)) if k else imgs
-            out = task(r) + task(r.flip(-1))
-            logits = out if logits is None else logits + out
-        return logits / 8.0
+        return dihedral_tta(task, imgs, spatial=segmentation) if tta else task(imgs)
 
     metrics = _make_metrics(num_classes, device, with_miou=segmentation)
     coarse_metrics = (
@@ -444,14 +450,7 @@ def evaluate_segmentation_as_patches(
     pix_count: dict[int, int] = {}
 
     def _forward(imgs):
-        if not tta:
-            return task(imgs)
-        logits = None
-        for k in range(4):
-            r = torch.rot90(imgs, k, dims=(-2, -1)) if k else imgs
-            out = task(r) + task(r.flip(-1))
-            logits = out if logits is None else logits + out
-        return logits / 8.0
+        return dihedral_tta(task, imgs, spatial=True) if tta else task(imgs)
 
     seen_uid_key = False
     for batch in test_loader:
