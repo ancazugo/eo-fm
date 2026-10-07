@@ -59,7 +59,9 @@ def separability(
 
     Higher silhouette / agreement ⇒ the embedding clusters by that facet. If a
     geography facet (city/country/continent) scores above ``lcz_name``, the
-    embedding encodes location more than LCZ semantics.
+    embedding encodes location more than LCZ semantics. Compare facets on
+    ``knn_agreement_adj`` (chance-corrected), never on raw ``knn_agreement``,
+    whose chance level grows as the number of groups shrinks.
     """
     sel = _subsample(len(X), cap, seed)
     Xs = X[sel]
@@ -71,8 +73,16 @@ def separability(
             continue
         sil = float(silhouette_score(Xs, codes, metric="cosine"))
         agr = _knn_label_agreement(Xs, codes, k)
+        # Raw agreement is not comparable across facets: its chance level is
+        # sum(p_g^2), which is far higher for 6 continents than for 17 LCZ
+        # classes. The kappa-style adjustment puts every facet on one scale.
+        p = np.bincount(codes) / len(codes)
+        chance = float((p ** 2).sum())
+        adj = (agr - chance) / (1.0 - chance) if chance < 1.0 else float("nan")
         rows.append(dict(facet=facet, n_groups=n_groups,
-                         silhouette=sil, knn_agreement=agr))
+                         silhouette=sil, knn_agreement=agr,
+                         knn_agreement_chance=chance,
+                         knn_agreement_adj=adj))
     df = pd.DataFrame(rows).sort_values("silhouette", ascending=False).reset_index(drop=True)
     logger.info(f"Separability (cap={len(sel)}, k={k}):\n{df.to_string(index=False)}")
     return df

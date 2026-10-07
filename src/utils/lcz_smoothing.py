@@ -3,8 +3,10 @@
 ``majority_pool`` and ``gaussian_likelihood_filter`` operate on an
 already-classified (argmaxed) hard-label raster — 1-indexed LCZ classes 1-17,
 ``nodata`` (default 0) elsewhere. That is the form Demuzere et al. 2020 (*Sci
-Data*, "A global map of local climate zones") define their Gaussian-likelihood
-smoothing on: the classified map's per-class binary membership masks. Use them
+Data*, "Combining expert and crowd-sourced training data to map urban
+form and functions for the continental US", doi:10.1038/s41597-020-00605-z)
+define their Gaussian-likelihood smoothing on, and the one the 2022 global LCZ
+map (Demuzere et al., *ESSD* 14:3835) reuses: the classified map's per-class binary membership masks. Use them
 on a map that is already on disk (``coarsen_lcz_map.py``), or as a further
 coarsening of a finished ``infer_roi.py`` output.
 

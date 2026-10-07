@@ -22,8 +22,8 @@ Example:
     python src/generate_seg_pseudo_rasters.py \\
         --checkpoint <run_dir>/resnet_small_GeoTessera_v1.1_global_global-best.pt \\
         --cities-dir ${DATA_DIR}/input/So2Sat-LCZ42/v4/cities --cities Nairobi \\
-        --embedding-name tesserav1.1 \\
-        --embedding-dir ${DATA_DIR}/input/GeoTessera/v1.1/2017 --year 2017 \\
+        --embedding-name tesserav1.1_global \\
+        --embedding-dir /tessera/v1.1 --year 2017 \\
         --output-dir data/pseudo_seg_rasters
 """
 

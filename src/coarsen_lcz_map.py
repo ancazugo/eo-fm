@@ -75,6 +75,12 @@ def main() -> None:
         nodata = int(src.nodata) if src.nodata is not None else 0
 
     native_res_m = abs(transform.a)
+    if args.resolution is not None and crs is not None and crs.is_geographic:
+        raise SystemExit(
+            f"{args.input} is in a geographic CRS ({crs}); its pixel size is in "
+            "degrees, so metre resolutions and Gaussian sigmas would be "
+            "meaningless. Reproject it to a projected CRS (e.g. its UTM zone) first."
+        )
 
     if args.repair_seams:
         raster, _ = repair_seams(raster)
