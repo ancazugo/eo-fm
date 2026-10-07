@@ -587,11 +587,11 @@ def main() -> None:
     city_names = [d.name for d in city_dirs]
     split_mode = "global" if args.global_split else "grid"
 
-    split_counts = {s: sum(1 for _, _, sp in all_items if sp == s) for s in ("train", "val", "test")}
+    split_counts = {s: sum(1 for it in all_items if it.split == s) for s in ("train", "val", "test")}
     logger.info(f"Total patches: {len(all_items)}  splits: {split_counts}")
 
     # ── Channel count ─────────────────────────────────────────────────────────
-    in_channels = int(np.load(all_items[0][0], mmap_mode="r").shape[0])
+    in_channels = int(np.load(all_items[0].path, mmap_mode="r").shape[0])
     if in_channels_override is not None:
         in_channels = in_channels_override
     feature_dim = recipe_feature_dim(args.pooling, in_channels)
