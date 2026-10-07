@@ -167,3 +167,35 @@ def test_a_constant_channel_cannot_divide_by_zero(tmp_path):
     ds = GridSegDataset(items, "gpkg", normalize="channel",
                         channel_mean=mean, channel_std=std)
     assert torch.isfinite(ds[0]["image"]).all()
+
+
+# ── --nodata-mode mask (segmentation parity with the patch pipeline) ─────────
+
+def _sentinel_tile(tmp_path):
+    arr = np.full((C, H, W), 2.0)
+    arr[:, 3, :] = -128.0                       # one sentinel row inside the label
+    # POLYS covers (100..420 m) of a 1280 m tile on a 16 px grid -> rows 11..14
+    # from the top; put the label over the sentinel row too.
+    polys = [(box(0, 0, 1280, 1280), 3, 0)]
+    return [(_write(tmp_path, "s", arr), TILE, "EPSG:32637", polys, None)]
+
+
+def _pred(raw):
+    return (raw == -128.0).all(axis=0)
+
+
+def test_mask_mode_ignores_sentinel_pixels_in_loss_and_patch_pooling(tmp_path):
+    ds = GridSegDataset(_sentinel_tile(tmp_path), "gpkg", nodata_predicate=_pred,
+                        nodata_mode="mask", emit_patch_uids=True)
+    out = ds[0]
+    assert (out["mask"][3, :] == -1).all()         # not trained on
+    assert (out["patch_uid"][3, :] == -1).all()    # not pooled into the patch
+    assert (out["image"][:, 3, :] == 0).all()      # filled, sentinel gone
+    assert (out["mask"][4, :] == 2).all()          # LCZ 3 -> class index 2
+
+
+def test_zero_mode_keeps_the_historical_behaviour(tmp_path):
+    ds = GridSegDataset(_sentinel_tile(tmp_path), "gpkg", nodata_predicate=_pred)
+    out = ds[0]
+    assert (out["mask"][3, :] == 2).all()
+    assert (out["image"][:, 3, :] == -128.0).all()

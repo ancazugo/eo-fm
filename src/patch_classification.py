@@ -28,16 +28,16 @@ by channel concatenation.
 
 Label convention: LCZ_class 1-17 → 0-16 (class index)
 
-Example (single city, AlphaEarth):
+Example (single city, Tessera v1.1 global):
     python src/patch_classification.py \\
         --so2sat-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4 \\
         --cities-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4/cities \\
         --cities Nairobi \\
-        --output-name AlphaEarth --year 2017 \\
-        --preset large --patch-size 32 \\
+        --output-name GeoTessera_v1.1_global --year 2017 \\
+        --preset small --patch-size 32 \\
         --batch-size 64 --num-workers 4 --max-epochs 50 \\
-        --embedding-name alpha_earth \\
-        --embedding-dir /maps/acz25/phd-thesis-data/input/Google/AlphaEarth/2017 \\
+        --embedding-name tesserav1.1_global \\
+        --embedding-dir /tessera/v1.1 \\
         --output-dir /maps/acz25/phd-thesis-data/output/lcz-classification/dl
 
 Example (global split, AlphaEarthCoop):
@@ -244,6 +244,12 @@ def main() -> None:
                         "loss weights.")
     g.add_argument("--pseudo-weight-scale", type=float, default=1.0,
                    help="Global multiplier on the pseudo-label sample weights (default: 1.0).")
+    g.add_argument("--pseudo-holdout-km", type=float, default=0.0,
+                   help="Drop pseudo-labelled patches within this many km of any "
+                        "validation/testing patch of the global GPKG (default 0 = keep "
+                        "all, the historical behaviour). The unlabeled pool was only "
+                        "de-overlapped from So2Sat, so without this the student trains "
+                        "on test-city imagery; 30 removes every culture-city patch.")
     g.add_argument("--monitor", choices=["val_f1", "val_kappa"], default="val_f1",
                    help="Validation metric for checkpointing/early stopping (default: val_f1).")
     g.add_argument("--tta", action="store_true",
@@ -311,7 +317,9 @@ def main() -> None:
                    for n in args.output_name]
         pseudo_index = indexes[0] if not fused else merge_patch_indexes(indexes)
         pseudo_items = build_pseudo_items(
-            args.pseudo_gpkg, pseudo_index, weight_scale=args.pseudo_weight_scale
+            args.pseudo_gpkg, pseudo_index, weight_scale=args.pseudo_weight_scale,
+            holdout_gpkg=(args.global_gpkg or args.so2sat_dir / "patches_reference_rxr.gpkg"),
+            holdout_buffer_km=args.pseudo_holdout_km,
         )
         n_pseudo = len(pseudo_items)
         all_items = all_items + pseudo_items
@@ -365,6 +373,14 @@ def main() -> None:
             "--class-weights and --logit-adjustment are mutually exclusive: both "
             "reweight the same class imbalance, one in the loss and one in the "
             "logits, so combining them double-corrects it. Pick one."
+        )
+
+    if args.class_weights != "none" and args.sampler != "none":
+        logger.warning(
+            f"--class-weights {args.class_weights} with --sampler {args.sampler}: "
+            "both correct the same class imbalance (one in the loss, one in the "
+            "draw), so together they over-correct towards rare classes. Fine as a "
+            "deliberate ablation, not as a recipe."
         )
 
     if args.normalize == "none" and args.noise_sigma > 0:
@@ -523,6 +539,7 @@ def main() -> None:
         pseudo_gpkg=str(args.pseudo_gpkg) if args.pseudo_gpkg else None,
         pseudo_patches=n_pseudo,
         pseudo_weight_scale=args.pseudo_weight_scale,
+        pseudo_holdout_km=args.pseudo_holdout_km,
         monitor=args.monitor,
         tta=args.tta,
         warmup_epochs=args.warmup_epochs,
@@ -553,7 +570,10 @@ def main() -> None:
 
     # ── Train (or load checkpoint) ────────────────────────────────────────────
     if args.checkpoint is not None:
-        ckpt_path = load_checkpoint_weights(task, args.checkpoint, device)
+        ckpt_path = load_checkpoint_weights(
+            task, args.checkpoint, device, embedding_name=args.embedding_name,
+            channel_mean=channel_mean, channel_std=channel_std,
+        )
     else:
         task, ckpt_path = run_training_loop(
             task_module=task,
@@ -580,6 +600,12 @@ def main() -> None:
                 "max_invalid_frac": args.max_invalid_frac,
                 "min_native_frac": args.min_native_frac,
                 "patch_manifest_sha256": manifest_sha,
+                # The input size the stem adaptation was calibrated for. A
+                # rebuild at another size loads without error but is a
+                # different network (strides/pooling differ, not shapes), so
+                # infer_roi reads this instead of trusting its own default.
+                "patch_size": args.patch_size,
+                "nodata_mode": args.nodata_mode,
             },
         )
     logger.info(f"Best checkpoint: {ckpt_path}")

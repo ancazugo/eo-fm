@@ -361,9 +361,18 @@ class GridSegDataset(Dataset):
         channel_std: np.ndarray | None = None,
         nodata_predicate=None,
         emit_valid: bool = False,
+        nodata_mode: str = "zero",
     ) -> None:
         if normalize not in ("none", "channel"):
             raise ValueError(f"normalize must be 'none' or 'channel', got {normalize!r}")
+        if nodata_mode not in ("zero", "mask"):
+            raise ValueError(f"nodata_mode must be 'zero' or 'mask', got {nodata_mode!r}")
+        # "mask" mirrors PatchDataset: sentinel pixels are filled with the
+        # channel mean (0 after normalisation), dropped from the loss
+        # (mask = ignore_index) and from patch-level pooling (uid = -1). "zero"
+        # feeds them through unchanged -- the historical behaviour, under which
+        # every coop/tessera fill pixel was trained on with a real label.
+        self.nodata_mode = nodata_mode
         self.items = items
         self.label_source = label_source
         self.dequantize_fn = dequantize_fn
@@ -448,6 +457,14 @@ class GridSegDataset(Dataset):
         if self.normalize == "channel":
             image = (image - self._norm_mean) / (self._norm_std + 1e-6)
 
+        masked = (self.nodata_mode == "mask" and invalid is not None
+                  and bool(invalid.any()))
+        if masked:
+            inv_t = torch.from_numpy(invalid)
+            # 0 is the channel mean once normalised; with --normalize none it
+            # is at least a value no sentinel decodes to.
+            image[:, inv_t] = 0.0
+
         if self.label_source == "gpkg":
             raw = rasterize_polys(tile_geom, polys, (H, W), erode_px=self.erode_px)
         else:
@@ -455,13 +472,18 @@ class GridSegDataset(Dataset):
 
         # 0→-1, 1-17→0-16
         mask = torch.from_numpy(raw.astype(np.int64)) - 1
+        if masked:
+            mask[inv_t] = -1
         out = {"image": image, "mask": mask}
 
         if self.emit_patch_uids and self.label_source == "gpkg":
             uids = rasterize_patch_uids(
                 tile_geom, polys, (H, W), erode_px=self.erode_px
             )
-            out["patch_uid"] = torch.from_numpy(uids.astype(np.int64))
+            uids_t = torch.from_numpy(uids.astype(np.int64))
+            if masked:
+                uids_t[inv_t] = -1
+            out["patch_uid"] = uids_t
         if self.emit_valid:
             out["valid"] = (
                 torch.ones((H, W), dtype=torch.bool) if invalid is None
@@ -506,7 +528,9 @@ class GridSegDataModule:
         channel_mean: np.ndarray | None = None,
         channel_std: np.ndarray | None = None,
         nodata_predicate=None,
+        nodata_mode: str = "zero",
     ) -> None:
+        self.nodata_mode = nodata_mode
         self.erode_px = erode_px
         self.emit_patch_uids = emit_patch_uids
         self.normalize = normalize
@@ -539,6 +563,7 @@ class GridSegDataModule:
         norm_kw = dict(
             normalize=self.normalize, channel_mean=self.channel_mean,
             channel_std=self.channel_std, nodata_predicate=self.nodata_predicate,
+            nodata_mode=self.nodata_mode,
         )
 
         def _eval_ds(split):

@@ -14,28 +14,28 @@ For each city the script:
 
 Label convention: raw 1-17 → 0-16 (class index), raw 0 (nodata) → -1 (ignore_index)
 
-Example (single city, AlphaEarth, labels from GeoPackage):
+Example (single city, AlphaEarth coop, labels from GeoPackage):
     python src/semantic_segmentation.py \\
         --cities-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4/cities \\
         --cities Nairobi \\
-        --output-name AlphaEarth --year 2017 \\
+        --output-name AlphaEarthCoop --year 2017 \\
         --label-source gpkg \\
         --preset large --batch-size 16 --num-workers 4 \\
         --max-epochs 50 \\
-        --embedding-name alpha_earth \\
-        --embedding-dir /maps/acz25/phd-thesis-data/input/Google/AlphaEarth/2017 \\
+        --embedding-name alpha_earth_coop \\
+        --embedding-dir /maps/acz25/phd-thesis-data/input/Google/AlphaEarth/coop \\
         --output-dir /maps/acz25/phd-thesis-data/output/lcz-classification/dl
 
-Example (ResNet-UNet, labels from raster TIF):
+Example (ResNet-UNet, Tessera v1.1 global, labels from raster TIF):
     python src/semantic_segmentation.py \\
         --cities-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4/cities \\
         --cities Nairobi Paris Berlin \\
-        --output-name GeoTessera --year 2017 \\
+        --output-name GeoTessera_v1.1_global --year 2017 \\
         --label-source tif \\
         --family resnet_unet --preset base --batch-size 8 --num-workers 4 \\
         --max-epochs 50 \\
-        --embedding-name tessera \\
-        --embedding-dir /maps/acz25/phd-thesis-data/input/GeoTessera/2017 \\
+        --embedding-name tesserav1.1_global \\
+        --embedding-dir /tessera/v1.1 \\
         --output-dir /maps/acz25/phd-thesis-data/output/lcz-classification/dl
 """
 
@@ -324,6 +324,13 @@ def main() -> None:
                    help="Train tiles sampled to estimate channel statistics "
                         "(default: 400; a 128 px tile is 16k pixels, so this is "
                         "already millions of samples).")
+    g.add_argument("--nodata-mode", choices=["zero", "mask"], default="mask",
+                   help="Per-family nodata sentinels (coop's all -128 pixels, "
+                        "Tessera's all-zero ones): 'mask' (default, as in the patch "
+                        "pipeline) fills them with the channel mean and drops them "
+                        "from the loss, the metrics and patch pooling; 'zero' feeds "
+                        "them through with their polygon label, which is what every "
+                        "segmentation run before 2026-10-06 did.")
     g.add_argument("--erode-px", type=float, default=2.0,
                    help="Shrink each patch footprint by this many pixels before "
                         "burning labels (default: 2). So2Sat patch edges carry "
@@ -635,6 +642,7 @@ def main() -> None:
         channel_mean=channel_mean,
         channel_std=channel_std,
         nodata_predicate=get_nodata_predicate(args.embedding_name),
+        nodata_mode=args.nodata_mode,
     )
 
     # ── WandB ─────────────────────────────────────────────────────────────────
@@ -648,6 +656,7 @@ def main() -> None:
         cities=city_names,
         year=args.year,
         label_source=args.label_source,
+        nodata_mode=args.nodata_mode,
         label_tif_dir=str(args.label_tif_dir) if args.label_tif_dir else None,
         aux_channel_dropout=aux_dropout,
         family=args.family,
@@ -680,7 +689,10 @@ def main() -> None:
 
     # ── Train (or load checkpoint) ────────────────────────────────────────────
     if args.checkpoint is not None:
-        ckpt_path = load_checkpoint_weights(task, args.checkpoint, device)
+        ckpt_path = load_checkpoint_weights(
+            task, args.checkpoint, device, embedding_name=args.embedding_name,
+            channel_mean=channel_mean, channel_std=channel_std,
+        )
     else:
         task, ckpt_path = run_training_loop(
             task_module=task,
@@ -698,6 +710,7 @@ def main() -> None:
                 "normalize": args.normalize,
                 "channel_mean": channel_mean,
                 "channel_std": channel_std,
+                "nodata_mode": args.nodata_mode,
                 **provenance(args.embedding_name),
                 "year": args.year,
             },
@@ -785,6 +798,7 @@ def main() -> None:
                     normalize=args.normalize, channel_mean=channel_mean,
                     channel_std=channel_std,
                     nodata_predicate=get_nodata_predicate(args.embedding_name),
+                    nodata_mode=args.nodata_mode,
                 )
                 full_loader = DataLoader(
                     full_ds, batch_size=args.batch_size, shuffle=False,

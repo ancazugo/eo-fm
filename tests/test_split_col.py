@@ -123,3 +123,30 @@ def test_empty_split_raises_rather_than_training_on_a_truncated_set(tmp_path):
     gpkg = _write_gpkg(tmp_path, rows)
     with pytest.raises(ValueError, match="produced no val/test"):
         build_global_items(gpkg, PATCH_INDEX, split_col="fold")
+
+
+def test_city_column_with_nulls_does_not_crash(tmp_path):
+    """A gpkg-supplied 'city' column is read as pandas "string" dtype, whose
+    missing value is pd.NA; comparing pd.NA to itself is NA, not False, and
+    coercing that to bool raised. A null city must simply become None."""
+    rows = _rows()
+    for r, city in zip(rows, ["Nairobi", None, "Paris", None]):
+        r["city"] = city
+    gpkg = _write_gpkg(tmp_path, rows)
+    items = build_global_items(gpkg, PATCH_INDEX)
+    assert sorted((it.city or "") for it in items) == ["", "", "Nairobi", "Paris"]
+
+
+def test_pseudo_holdout_mask_drops_only_patches_near_val_test():
+    """The unlabeled pool is only de-overlapped from So2Sat; the buffer is what
+    keeps test-city imagery out of noisy-student training."""
+    from datasets.so2sat import pseudo_holdout_mask
+
+    hold = gpd.GeoDataFrame(geometry=[Point(36.80, -1.28)], crs="EPSG:4326")   # Nairobi
+    pseudo = gpd.GeoDataFrame(
+        geometry=[Point(36.81, -1.28),     # ~1.1 km away
+                  Point(37.10, -1.28),     # ~33 km away
+                  Point(2.35, 48.85)],     # Paris
+        crs="EPSG:4326")
+    assert pseudo_holdout_mask(pseudo, hold, 2.0).tolist() == [True, False, False]
+    assert pseudo_holdout_mask(pseudo, hold, 40.0).tolist() == [True, True, False]

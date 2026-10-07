@@ -250,8 +250,10 @@ def build_global_items(
             continue
         label = int(row[label_col]) - 1   # 1-17 → 0-16
         city = None if cities is None else cities.get(i)
+        # pd.isna, not `city != city`: a "string"-dtype column holds pd.NA,
+        # whose comparisons are NA and raise when coerced to bool.
         items.append(PatchItem(path, label, split,
-                               city=None if city is None or city != city else str(city)))
+                               city=None if city is None or pd.isna(city) else str(city)))
     counts = Counter(it.split for it in items)
     source = f"column {split_col!r}" if split_col else "column 'dataset'"
     logger.info(
@@ -277,20 +279,56 @@ def build_global_items(
     return items
 
 
+def pseudo_holdout_mask(pseudo_gdf, holdout_gdf, buffer_km: float):
+    """Bool mask: pseudo patches whose centroid lies within ``buffer_km`` of a
+    held-out (val/test) patch centroid. Great-circle distance, so it works on
+    the global EPSG:4326 GeoPackages without a projection per city.
+    """
+    from sklearn.neighbors import BallTree
+
+    def _lonlat(g):
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*geographic CRS.*")
+            c = g.to_crs("EPSG:4326").geometry.centroid
+        return np.radians(np.c_[c.y.to_numpy(), c.x.to_numpy()])
+
+    tree = BallTree(_lonlat(holdout_gdf), metric="haversine")
+    d, _ = tree.query(_lonlat(pseudo_gdf), k=1)
+    return d[:, 0] * 6371.0088 < buffer_km
+
+
 def build_pseudo_items(
     pseudo_gpkg: Path,
     patch_index: dict,
     label_col: str = "LCZ_class",
     weight_col: str = "weight",
     weight_scale: float = 1.0,
+    holdout_gpkg: Path | None = None,
+    holdout_buffer_km: float = 0.0,
 ) -> list[PatchItem]:
     """Build weighted train items from a pseudo-label GeoPackage
     (generate_pseudo_labels.py output).
 
     Returns train PatchItems carrying a ``weight`` (scaled by ``weight_scale``)
     that flows through PatchDataset into the per-sample weighted CE loss.
+
+    ``holdout_gpkg`` + ``holdout_buffer_km`` drop pseudo patches near any
+    validation/testing patch of that GeoPackage. The unlabeled pool was only
+    de-overlapped from So2Sat, so 7.4% of the student-v3 pool (6,615 patches)
+    sits in the 10 culture cities and 3,462 within 2 km of a val/test patch --
+    training on test-city imagery with near-truth weak labels. 30 km removes
+    every one of them (measured 2026-10-06).
     """
     gdf = gpd.read_file(pseudo_gpkg, **GPKG_OPEN)
+    if holdout_gpkg is not None and holdout_buffer_km > 0:
+        hold = gpd.read_file(holdout_gpkg, **GPKG_OPEN)
+        hold = hold[hold["dataset"].isin(["validation", "testing"])]
+        near = pseudo_holdout_mask(gdf, hold, holdout_buffer_km)
+        logger.info(
+            f"Pseudo items: dropped {int(near.sum())} of {len(gdf)} within "
+            f"{holdout_buffer_km:g} km of a validation/testing patch"
+        )
+        gdf = gdf[~near].reset_index(drop=True)
     items: list[PatchItem] = []
     n_missing = 0
     for _, row in gdf.iterrows():
