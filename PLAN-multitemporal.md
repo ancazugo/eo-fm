@@ -177,6 +177,36 @@ So2Sat stays authoritative inside its cities, and WUDAPT is admitted there only 
 
 Caveat: `oa` falls with recency (0.768 in 2019 → 0.615 in 2023), so `w_time` and `w_acc` partly cancel. Report them jointly.
 
+#### WUDAPT polygon filtering
+
+Do **not** use a So2Sat patch (10.24 ha) as the minimum polygon size. That constraint came from the patch classifier, and it would discard most of the small, carefully drawn polygons that motivated segmentation (D1).
+
+| Step | Rule | Source of the threshold |
+|---|---|---|
+| Hard minimum | area ≥ 4 ha **and** shape < 3 (`perimeter² / 4π·area`), recomputed on EPSG:6933 | LCZ-Generator QC step 1. It reproduces `qc_step1` on all 630,311 rows, so it is applied from geometry rather than from the flag |
+| Hard maximum | area ≤ 100 km² (unchanged `lcz_wudapt` default) | removes city-scale boxes only |
+| Large polygons | no further hard cut. Polygons > 1.5 km² are reduced to a ~350 m-radius core around their pole of inaccessibility; `w_size` down-weights > 1 km² as now | the Generator does the same reduction before classifying; large polygons are typically coarse boxes over mixed ground |
+| Submission and class quality | `oa` ≥ 0.50; `qc_step2/3` as soft penalties; `w_acc` from `oa`/`oau` × per-class F1 | Bechtel et al. 2019 floor; existing `lcz_wudapt` weight model |
+| Crop cap | ≤ ~5 crops per polygon per epoch (M3.2) | stops large or numerous polygons dominating |
+
+Report the surviving polygon count and area per class and region after each step, so it is clear which classes the filters thin out.
+
+#### Conflicting overlaps
+
+Where overlapping labels survive the filters and disagree, they are **not** resolved by picking a winner. The existing `lcz_wudapt` consensus already handles most of this:
+
+- author collapse (a later revision by the same author overwrites the earlier one);
+- per-annotator, quality-weighted votes per pixel;
+- a Dirichlet-smoothed posterior that yields a hard label, a 2–3-class set, or no label;
+- city quarantine at `nbr_conflict` > 0.40.
+
+Two changes for the multi-year setting:
+
+1. **Vote within a label year, not across years.** At present, all years are pooled with a `w_time` decay. Under year matching, a 2018 polygon and a 2023 polygon that disagree may both be right. Run the consensus separately per `label_year`. Pool votes across years only for polygons whose `valid_years` (M2.4) cover both years.
+2. **Only allow sets of similar classes.** A coarse set is admitted only if every pair in it has Bechtel et al. (2020) similarity ≥ 0.67 (`docs/lcz_class_similarity.csv`; e.g. {2, 3}, {5, 6}, {8, 10}, {A, B}). A conflict between dissimilar classes (e.g. 2 vs G) indicates an annotation error, not ambiguity, so the pixel is left unlabelled. Report how much area each change moves between hard, set and unlabelled.
+
+**So2Sat vs WUDAPT.** So2Sat stays authoritative inside its cities (leakage rule above), so the two never both supervise the same pixel. Where they overlap, report their agreement per city and per WUDAPT author on M2.4-stable sites only, as a diagnostic of WUDAPT quality. It is not fed back into the weights.
+
 ### M2.2 Validity windows
 
 Every labelled polygon or block carries `valid_years`, a 9-bit mask over 2017–2025. It starts at the source window above. It is **extended only by M2.4**, and every extension is recorded with a reason code. The sampler (M3.4) draws a year only from `valid_years`.
@@ -190,7 +220,7 @@ The class lists below are bitmask *sets*. A pixel labelled `{A, B}` costs nothin
 | `natural=water`, riverbank/`water=*`, coastline polygons | {G} | erode 2 px; drop `intermittent=yes`, `tidal=yes`, wetlands |
 | large `landuse=forest` / `natural=wood` | {A, B} | ≥ 4 ha, no buildings inside, erode 2 px |
 | `landuse=farmland/meadow/grass`, `natural=grassland/heath` | {D} | ≥ 4 ha, no buildings inside |
-| `landuse=industrial` with large footprints (median ≥ 1,000 m²) | {8, 10} | ≥ 4 ha |
+| `landuse=industrial` with large footprints (median ≥ 1,000 m²) | {8, 10} | ≥ 4 ha; buildings must cover ≥ 10% of the polygon; erode 2 px (these polygons are zoning-like and include parking, grass and vacant plots) |
 | `natural=sand/beach`, dunes | {F} | ≥ 4 ha |
 | `natural=bare_rock/scree`, `landuse=quarry` | {E} | ≥ 4 ha |
 | `natural=scrub` | {C} | ≥ 4 ha, no buildings |
@@ -198,6 +228,8 @@ The class lists below are bitmask *sets*. A pixel labelled `{A, B}` costs nothin
 - **Never for LCZ 1–6, 7 or 9:** those need density and height, which tags do not give (`docs/osm_lcz_tag_mapping.md`).
 - Minimum area matches the WUDAPT QC minimum (4 ha ≈ 400 px).
 - Valid for 2024–25 only, unless M2.4 extends them.
+- **Industrial is kept as the set {8, 10}.** Do not split it into 8 or 10 from tags such as `man_made=works` or `building=warehouse`. Those tags are sparse and unevenly mapped, so a split would be decided by mapping effort more than by form. The model resolves 8 vs 10 from the embeddings, supervised by So2Sat and WUDAPT.
+- **Overture is used only for OSM-sourced features** (`sources[].dataset == "OpenStreetMap"`). Its buildings layer also merges Microsoft and Google ML footprints, which D5 excludes. That applies to the building filters above ("no buildings inside", building coverage), to the M2.4 rules, and to any morphometric target (M3.3).
 
 ### M2.4 OSM-history stability rule (no AI products)
 
@@ -314,8 +346,47 @@ Report:
 - `marginalized_ce` over label sets.
 - Class weights: sqrt inverse frequency of train-set pixel counts, where a set-labelled pixel counts 1/|S| toward each member.
 - Per-pixel weight from M3.1.
-- Optional adjacency smoothing (`smoothing_eps`), Stewart & Oke morphology; off by default.
 - **Optional temporal-consistency term** (rung R4b): for pixels the rule marks stable but which carry no label in the drawn year, a symmetric KL between predictions at two years of the window. It is label-free and pushes the model to ignore drift.
+
+#### Similar-class confusions (rung R5)
+
+LCZ classes are not equally different: confusing 2 with 3 matters far less than confusing 2 with G. Two options are tested, and nothing else:
+
+| Option | Form | What it does |
+|---|---|---|
+| **R5a adjacency smoothing** | `marginalized_ce(smoothing_eps=ε)`, ε ∈ {0.05, 0.1}; already implemented | moves ε of the target mass onto the hand-coded morphological neighbours (1–2, 2–3, 4–5, 5–6, 3–7, 8–10, B–C, C–D) |
+| **R5b expected-cost term** | `L = marginalized_ce + λ · Σ_c p_c · (1 − S[y, c])`, with S the Bechtel et al. (2020) similarity matrix and λ ∈ {0.1, 0.3}; for a set label, take the max similarity over the set | penalises a prediction in proportion to its physical dissimilarity; this is the quantity OA_w / kappa_w measure |
+
+- Choose between R5a and R5b, and set ε or λ, with FCN8 on the CV folds. Then run the winner with U-Net small, 3 seeds.
+- Do not combine either with heavy smoothing on pixels that already carry a coarse set (M2.1): the set already removes the penalty for those confusions.
+- **Pre-registered trade-off:** cheaper similar-class errors make them more frequent. R5 is kept only if test-B kappa_w rises **and** unweighted kappa falls by no more than 0.01. Unweighted kappa stays the headline (M5.2).
+
+Not adopted, deliberately:
+- similarity-derived soft targets: redundant with R5a/R5b;
+- factorised openness/height heads: more engineering for a gain R5 should already capture. Revisit only if confusions within LCZ 1–6 dominate the R5 error matrix.
+
+#### Morphometric auxiliary targets (rung R6, optional)
+
+OSM-derived urban form parameters (the lczkit family) are used as **auxiliary regression targets, never as inputs**.
+
+Why not as inputs:
+- They are a 2024–25 snapshot. As inputs they would stamp that year's structure onto every year, and OSM history would turn mapping growth into apparent change.
+- OSM completeness varies strongly by region, so the model would behave differently exactly where labels are scarcest.
+
+As targets, the model learns urban form from OSM during training and needs only embeddings at inference. Every year is then mapped the same way (D2).
+
+| Target (per 10 m pixel, computed over a 100 m window) | From |
+|---|---|
+| building surface fraction | OSM-sourced footprints only (M2.3) |
+| impervious surface fraction from roads/rail | OSM ways buffered with GeoClimate default widths, overridden by `width`/`lanes` tags (`docs/osm_lcz_tag_mapping.md`) |
+| log median footprint area | OSM-sourced footprints |
+
+Rules:
+- **2D only.** Heights are excluded: tags are too sparse (≈ 1% of building area in Cairo vs ≈ 80% in Berlin), and the raster height products are AI products (D5).
+- **Masked to where OSM is complete.** Use a history-saturation test per 1 km cell: the cell's building-count curve has flattened, < 5% growth over the last two years. This is computed from the same OSM history as M2.4, with no external reference.
+- **Masked to valid years.** The target is valid in 2024–25, and in earlier years only where M2.4 (R2/R3) marks the block stable.
+- **Model and loss:** a 1×1-conv regression head on the decoder, masked Huber loss, weight 0.1. The head is dropped at inference.
+- **Keep rule:** as the ladder, plus a check that test-B kappa does not fall in regions where the mask is mostly empty. Otherwise the targets would be helping only the already well-mapped regions.
 
 ### M3.4 Sampling (hierarchical, per crop)
 
@@ -359,8 +430,10 @@ Extend `PixelWindowDataset` or add `src/datasets/multisource_seg.py`. Either way
 | R3 | + OSM partial sets (weight 0.2–0.3) | 3 |
 | R4 | + stability-extended windows (M2.4), i.e. year jitter across years | 3 |
 | R4b | + temporal-consistency loss | 3 |
+| R5 | + similar-class loss: adjacency smoothing **or** expected cost, chosen on CV (M3.3) | FCN8 CV 4 settings + U-Net 3 |
+| R6 | + OSM morphometric auxiliary targets (optional, M3.3) | 3 |
 
-**Keep rule (pre-register):** a rung is kept if test-B mean city kappa rises by more than its bootstrap CI half-width, or by ≥ 0.01, **and** test A does not drop by more than 0.01.
+**Keep rule (pre-register):** a rung is kept if test-B mean city kappa rises by more than its bootstrap CI half-width, or by ≥ 0.01, **and** test A does not drop by more than 0.01. R5 has its own trade-off rule (M3.3).
 
 R4 and R4b are also judged on the stable-site flip rate (M4). They may be kept for temporal stability at equal accuracy.
 
@@ -496,7 +569,7 @@ Report:
   - Compare against v2-E3 ensemble-to-ensemble (`seed_ensemble.py --k`).
   - v2 cannot be the map product: it lacks global coverage for all years, and its basis differs.
 - **Label-shift correction per city** (BBSE/EM on predicted priors). Campaign doc open direction #1. Cheap and post-hoc.
-- **lczkit / `lcz_labels` morphometric labels** (OSM/Overture height-to-width, building surface fraction). These are a current-snapshot source. Through M2.4 they could span years in R2 blocks. Leave dormant until M7 passes.
+- **lczkit / `lcz_labels` morphometric *labels*** (rule-based LCZ from form parameters). Their 2D parameters enter the plan only as auxiliary targets (R6). Rule-based labels need heights, which here would come from tags or AI rasters, so they stay dormant until M7 passes.
 - **Demuzere noisy student** (`--pseudo-holdout-km 30` re-run). Benchmark chapter only (D5).
 
 ## Open decisions (for the author)
@@ -505,13 +578,14 @@ Report:
 2. R2 coverage threshold, 0.90 or 0.95. Decide after the M2.6 manual check.
 3. Whether to accept per-year linear alignment (M4.2 step 2) if it helps flip rate but costs ≤ 0.01 test-B kappa.
 4. Demuzere-based labels: confirm they stay out of the map recipe (D5).
+5. The similarity threshold for admitting a coarse WUDAPT set (0.67 proposed): check how much area it moves to "unlabelled" before fixing it.
 
 ## Budget (rough)
 
 | Phase | Cost |
 |---|---|
 | M0, M1, M2 | CPU; OSM history extraction for ~1,250 AOIs; ~1 day of manual checks (M2.6) |
-| M3 | ~25 U-Net/FCN8 runs + ~15 FCN8 CV/sweep runs |
+| M3 | ~31 U-Net/FCN8 runs + ~19 FCN8 CV/sweep runs (R5 adds 4 CV settings; R6 is optional) |
 | M4 | CPU on cached stable-pixel embeddings |
 | M6 | inference for ~1,250 AOIs × 9 years × 3 seeds, one tile read per pass |
 | M7 | CPU, except the VHR sample |
