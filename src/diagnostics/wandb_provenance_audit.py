@@ -58,6 +58,7 @@ LEGACY_OUTPUT_NAMES: dict[str, str] = {
     # extraction did not exist yet.
     "GeoTesserav1.1": "tesserav1.1",
     "GeoTessera_v1.1_global": "tesserav1.1_global",
+    "GeoTessera_v1.1_dClimate": "tesserav1.1_dclimate",
     "GeoTessera_v2": "tesserav2",
     "AlphaEarth": "alpha_earth",
     "AlphaEarthCoop": "alpha_earth_coop",

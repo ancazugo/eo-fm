@@ -11,7 +11,7 @@ dependencies = [
     "exactextract>=0.3.0",
     "folium>=0.20.0",
     "geopandas>=1.1.2",
-    "geotessera==0.8.0",
+    "geotessera==0.11.0",
     "ipywidgets>=8.1.8",
     "libpysal>=4.9",
     "loguru>=0.7.3",
@@ -56,6 +56,10 @@ dev = [
     "ipykernel>=7.1.0",
     "nbformat>=5.10.4",
     "pytest>=9.1.1",
+    # There is no node or browser on this host, so tests/test_site_client_js.py
+    # runs src/site/app.js in QuickJS against the real built payload. The tests
+    # skip themselves if it is absent, so this is not a hard requirement.
+    "quickjs>=1.19.4",
 ]
 
 [tool.pytest.ini_options]

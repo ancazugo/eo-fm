@@ -203,7 +203,8 @@ def main() -> None:
         # This is only a pre-sort: tasks are re-sorted by tile below, which is
         # what actually makes the per-tile LRU hit.
         if args.embedding_name in (
-            "tesserav1.1", "tesserav1.1_global", "tesserav2", "aux_struct"
+            "tesserav1.1", "tesserav1.1_global", "tesserav1.1_dclimate",
+            "tesserav2", "aux_struct",
         ):
             cx = split_patches.geometry.centroid.x
             cy = split_patches.geometry.centroid.y
@@ -258,9 +259,13 @@ def main() -> None:
             # max_tasks_per_child would also cap it but is incompatible with
             # the fork start method (it silently switches to spawn, which
             # deadlocks here).
+            # A streamed source has no tile to amortise: each patch is a few
+            # latency-bound chunk reads, so small chunks keep every worker busy
+            # (256 left a 2.4k-patch split on 10 of 32 workers).
+            chunksize = 16 if args.embedding_name == "tesserav1.1_dclimate" else 256
             with ProcessPoolExecutor(max_workers=args.workers) as pool:
                 for _, ok in tqdm(
-                    pool.map(_process_patch, tasks, chunksize=256),
+                    pool.map(_process_patch, tasks, chunksize=chunksize),
                     total=len(tasks),
                     desc=split,
                     unit="patch",

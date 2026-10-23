@@ -41,6 +41,7 @@ PRODUCTS = {"tessera", "alphaearth", "esd", "sentinel", "osm", "aux"}
 VERSIONS = {"v1", "v1.1", "v2", "coop", None}
 SOURCES = {
     "percity_geotessera", "global_0.1deg", "source_coop", "gee_zarr", "local_tif",
+    "dclimate_zarr",
 }
 STATUSES = {"canonical", "supported", "pending", "deprecated", "untested"}
 
@@ -137,6 +138,25 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         # the only Tessera entry that can carry a global-split claim.
         "status": "canonical",
     },
+    "tesserav1.1_dclimate": {
+        "in_channels": 128,
+        "resolution": 10,
+        "description": "Tessera v1.1 dClimate run, streamed from the geotessera Zarr store "
+                       "(source.coop, per-UTM-zone groups, 2017-2025), dequantized to "
+                       "128-band float32. --embedding-dir = local zarr cache dir",
+        # Dequantized reads give NaN for gaps (no landmask: water is embedded),
+        # but merge_multi_crs turns NaN into 0 for zone-crossing patches and
+        # infer_roi only builds the nodata predicate when this key is present.
+        "nodata_all_channels_eq": 0.0,
+        "product": "tessera",
+        "version": "v1.1",
+        # The COMPLETE global v1.1 inference run, a different run from the
+        # "cambridge" npy archive behind tesserav1.1_global (/tessera/v1.1).
+        # Its own source keeps the two non-comparable, so a checkpoint from one
+        # is refused on the other despite the shared version and channel count.
+        "source": "dclimate_zarr",
+        "status": "supported",
+    },
     "tesserav2": {
         "in_channels": 128,
         "resolution": 10,
@@ -213,7 +233,9 @@ def get_nodata_predicate(name: str):
       never caught them. Under the (correct) dequantization each becomes a
       vector of L2 norm 8.06 instead of 1.0.
     * ``tesserav1.1`` / ``tesserav1.1_global`` / ``tesserav2`` — invalid where
-      all 128 channels are exactly 0 (0.05-0.15% of pixels). Tessera also has
+      all 128 channels are exactly 0 (0.05-0.15% of pixels).
+      ``tesserav1.1_dclimate`` shares the rule: it reads NaN for gaps (caught by
+      the NaN test below) except where a zone-crossing merge has zero-filled them. Tessera also has
       ~0.9% *per-channel* quantization zeros affecting 61% of pixels, which are
       valid data: testing per-channel here would discard most of the dataset.
     * ``seamless`` — none. Measured 0.0000% all-zero pixels.

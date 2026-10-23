@@ -41,7 +41,9 @@ def tile_index_name(path: Path) -> str:
     parent is the tile directory (``.npy``) or which is itself the tile
     (geoinfo ``.tiff``).
     """
-    if path.is_dir():
+    from datasets.dclimate import is_cell_path
+
+    if path.is_dir() or is_cell_path(path):  # dClimate cells are virtual paths
         return path.name
     if path.suffix == ".npy":
         return path.parent.name
@@ -266,6 +268,18 @@ def build_tile_index(
             paths.append(npy_dir)
         logger.info(f"Tile index (tesserav1.1_global): {len(paths)} tiles from {npy_root}")
         return paths, STRtree(geoms)
+
+    # ── tessera v1.1 dClimate: virtual 0.1° cells over a streamed zarr store ─
+    if embedding_name == "tesserav1.1_dclimate":
+        if year is None:
+            raise ValueError("--year is required for tesserav1.1_dclimate.")
+        from datasets.dclimate import CellGrid, CellPaths
+
+        # Arithmetic index over the global 0.1° lattice: nothing is listed or
+        # opened here, so a forking caller holds no store client yet.
+        # embedding_dir is the local zarr cache, not a tile directory.
+        logger.info(f"Tile index (tesserav1.1_dclimate): global 0.1° cells, cache {embedding_dir}")
+        return CellPaths(embedding_dir, year), CellGrid()
 
     # ── tessera v2: NPY subdirs, geometry derived from the tile names ────────
     if embedding_name == "tesserav2":
@@ -517,6 +531,13 @@ def _open_tile_aux_struct(path: Path) -> xr.DataArray:
 def open_tile(path: Path) -> xr.DataArray:
     """Open a .zarr or .tif tile as a (band, y, x) DataArray with CRS set."""
     import rioxarray as rxr
+
+    from datasets.dclimate import is_cell_path, open_dclimate_cell
+
+    # Virtual dClimate cell: nothing exists at the path, so test it before any
+    # filesystem-based branch.
+    if is_cell_path(path):
+        return open_dclimate_cell(path)
 
     # .zarr FIRST: a zarr store is itself a directory, so this must be tested
     # before the is_dir() branch below — otherwise every zarr tile is misrouted

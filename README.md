@@ -125,6 +125,7 @@ in `infer_roi.py --model-type`.
 | `tesserav1.1` | GeoTessera v1.1 | `.tiff` (geoinfo) + `.npy` pairs | 128 | 10 m | Auto-dequantized at extraction time |
 | `tesserav1.1_global` | GeoTessera v1.1 global | `grid_*/` npy dirs + `tiff_all` | 128 | 10 m | Covers 97.5% of So2Sat 2017 patches |
 | `tesserav2` | GeoTessera v2 (`large_student`) | `grid_*/` npy dirs (no geoinfo) | 128 | 10 m | Georeferenced from the tile name; covers 99.2% of So2Sat 2017 patches |
+| `tesserav1.1_dclimate` | GeoTessera v1.1 dClimate run | Zarr store on source.coop, streamed (geotessera 0.11) | 128 | 10 m | Complete global v1.1 run, 2017–2025; `--embedding-dir` is a local cache dir. A different run from `tesserav1.1_global` |
 | `tessera` | GeoTessera v1.0 | `.zarr` | 128 | 10 m | Already float32 |
 | `seamless` | Embedded Seamless Data | `.tiff` | 13→72 | 30 m | 13 raw bands; use `--dequantize` to expand to 72 ch |
 
@@ -207,6 +208,15 @@ python src/extract_so2sat_embeddings.py \
     --output-name GeoTesserav1.1 \
     --year 2017 \
     --workers 8
+
+# GeoTessera v1.1 dClimate — streamed; --embedding-dir is only the local cache
+python src/extract_so2sat_embeddings.py \
+    --so2sat-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4 \
+    --embedding-dir /maps/acz25/phd-thesis-data/input/GeoTessera/v1.1-dclimate_cache \
+    --embedding-name tesserav1.1_dclimate \
+    --output-name GeoTessera_v1.1_dClimate \
+    --year 2017 \
+    --workers 16
 
 # Embedded Seamless Data
 python src/extract_so2sat_embeddings.py \
@@ -865,6 +875,7 @@ python src/osm_lcz_relabel.py lcz_labels_multiband.tif \
 | Embedded Seamless 2017 | `/maps/acz25/phd-thesis-data/input/EmbeddedSeamlessData/2017/` |
 | GeoTessera v1.1 global | `/tessera/v1.1/` (years 2015–2025) |
 | GeoTessera v2 | `/tessera/v2/large_student/` (years 2017–2025) |
+| GeoTessera v1.1 dClimate | streamed from `https://data.source.coop/tessera/tessera/zarr/v1.1-dclimate` (years 2017–2025); cache at `/maps/acz25/phd-thesis-data/input/GeoTessera/v1.1-dclimate_cache/` |
 | DL model outputs | `/maps/acz25/phd-thesis-data/output/lcz-classification/dl/` |
 
 ### GeoTessera v1.1 tile layout
@@ -907,6 +918,47 @@ python src/check_embedding_coverage.py \
 
 Because of those gaps, extract v2 with `--skip-partial-coverage` so patches straddling a
 missing tile are dropped rather than written as truncated (and later stretched) crops.
+
+### GeoTessera v1.1 dClimate (streamed Zarr)
+
+geotessera 0.11 publishes the complete global v1.1 run (the `dclimate` variant) as one
+Zarr v3 store, read anonymously over HTTPS from the source.coop bucket:
+
+```
+v1.1-dclimate/utm{01..60}/
+    embeddings   int8    [time=9 (2017-2025), band=128, y, x]   (shards 4096², chunks 32×32)
+    scales       float32 [time, y, x]                           (NaN = not embedded)
+    time, x, y, band, ...                                       (zone CRS in attrs `proj:code`)
+```
+
+There is nothing to download. `tesserav1.1_dclimate` presents the store to the pipelines as
+**virtual 0.1° cells** (`<embedding-dir>/dclimate_cells/<year>/grid_{lon}_{lat}`, named like
+Tessera tiles) that open lazily (`src/datasets/dclimate.py`). A patch clip fetches only the
+32×32 chunks it touches. The same code reads every year (`--year 2017`…`2025`).
+
+- `--embedding-dir` is a **cache directory**, not a tile directory. It holds the store
+  metadata on disk; chunk reads are cached in memory per process (512 MB budget each).
+- Water is embedded (the store has no landmask), so NaN only marks real gaps, and those read
+  as nodata.
+- It is a **different inference run** from `tesserav1.1_global` (`/tessera/v1.1` is the
+  "cambridge" run). Their provenance differs (`source: dclimate_zarr`), so a checkpoint
+  trained on one is refused on the other.
+- `TESSERA_DCLIMATE_STORE=<url-or-path>` points the reader at another copy of the store,
+  such as a local mirror.
+- The index covers every 0.1° cell, ocean included, so `check_embedding_coverage.py`
+  over-reports coverage for this key. Ocean cells read as all-NaN. For the same reason, the
+  random-tile rural supplement in `embedding_rgb.py fit` mostly draws ocean/polar cells
+  (9 of 40 usable in a test), so pass a larger `--tile-count`.
+- **2017 has gaps the store does not flag** (`geotessera:years_incomplete` is empty). On a
+  9×9 grid over Greater London, 2017 is 46% embedded and 2019–2025 are 100%. geotessera's own
+  `read_patch` shows the same holes. Measure coverage from the extracted patches with the
+  nodata predicate (`get_nodata_predicate`), not with `check_embedding_coverage.py`.
+- Extraction is network-latency-bound (about 1–2 s per cold read from this host), not
+  CPU-bound, so use many workers. 64 workers ran about 24 patches/s (about 180 MB RSS each),
+  which is about 5 h for all of So2Sat. The extractor hands this source out in chunks of 16
+  patches rather than 256.
+- Checked against geotessera: `crop_patch` through this key is bit-identical to
+  `GeoTesseraZarr.read_region` on the same window.
 
 ---
 

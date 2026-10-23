@@ -72,6 +72,11 @@ FAMILIES: dict[str, dict] = {
         "prefix": "patch_", "suffix": ".npy", "embedding_name": "tesserav1.1",
         "note": "51-city subset only — sample it on its own, not paired",
     },
+    "tesserav1.1_dclimate": {
+        "subdir": "GeoTessera_v1.1_dClimate", "year": True, "kind": "npy",
+        "prefix": "patch_", "suffix": ".npy", "embedding_name": "tesserav1.1_dclimate",
+        "note": "dequantized at extraction time; streamed from the dClimate zarr store",
+    },
     "tesserav2": {
         "subdir": "GeoTessera_v2", "year": True, "kind": "npy",
         "prefix": "patch_", "suffix": ".npy", "embedding_name": "tesserav2",

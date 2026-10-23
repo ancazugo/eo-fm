@@ -145,6 +145,9 @@ src/
     tiles.py                 #   build_tile_index/open_tile/crop_patch for raw source tiles;
                              #     also owns open_and_clip/setup_output/meters_to_out_res, the ROI
                              #     geometry shared with infer_roi (kept torch-free on purpose)
+    dclimate.py              #   tesserav1.1_dclimate: streamed geotessera-0.11 Zarr store (per-UTM-zone
+                             #     groups) exposed as VIRTUAL 0.1° cells (<emb-dir>/dclimate_cells/<year>/
+                             #     grid_*) that open lazily; arithmetic CellGrid index stands in for STRtree
     so2sat.py                #   patch items, PatchDataset/PatchDataModule, build_so2sat_items
     grid_tiles.py            #   grid-tile items, GridSegDataset/GridSegDataModule
     downloaders.py           #   GEE / geotessera / source.coop downloaders
@@ -198,6 +201,10 @@ lcz_train/                   # Training harness consuming ONLY the lcz_labels St
 - Geotessera global tiles: `/tessera/v1.1` (`tesserav1.1_global`) and `/tessera/v2/large_student`
   (`tesserav2`, no geoinfo tiffs — geometry derived from the tile name; 2017 covers 99.2% of
   So2Sat patches since the 2026-09-06 top-up, up from 37%; extract with `--skip-partial-coverage`)
+- Geotessera v1.1 dClimate (`tesserav1.1_dclimate`, geotessera 0.11): STREAMED from the source.coop
+  Zarr store `zarr/v1.1-dclimate` (2017-2025, nothing on disk); `--embedding-dir` is only a cache
+  dir (`${DATA_DIR}/input/GeoTessera/v1.1-dclimate_cache`); `TESSERA_DCLIMATE_STORE` overrides the
+  store. A different inference run from `/tessera/v1.1` ("cambridge"), so not comparable to it.
 - Embedded Seamless Data embeddings: `${DATA_DIR}/input/EmbeddedSeamlessData/{year}`
 - Demuzere LCZ files: `${DATA_DIR}/input/Demuzere_et_al_2022_LCZ`
 - So2Sat LCZ42 info: `${DATA_DIR}/input/So2Sat-LCZ42`
