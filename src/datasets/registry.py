@@ -37,8 +37,8 @@ from loguru import logger
 
 # Vocabularies. Kept explicit so a typo in an entry is a test failure rather
 # than a silently unique provenance that compares equal to nothing.
-PRODUCTS = {"tessera", "alphaearth", "esd", "sentinel", "osm", "aux"}
-VERSIONS = {"v1", "v1.1", "v2", "coop", None}
+PRODUCTS = {"tessera", "alphaearth", "esd", "sentinel", "osm", "aux", "olmoearth"}
+VERSIONS = {"v1", "v1.1", "v1.3", "v2", "coop", None}
 SOURCES = {
     "percity_geotessera", "global_0.1deg", "source_coop", "gee_zarr", "local_tif",
     "dclimate_zarr",
@@ -179,6 +179,39 @@ EMBEDDING_REGISTRY: dict[str, dict] = {
         # offered by the CLIs without becoming a second canonical baseline.
         "status": "supported",
     },
+    # OlmoEarth v1.3 (Ai2), streamed from its per-UTM-zone zarr on source.coop
+    # (datasets/zone_zarr.py). Matryoshka: bands 0:64 are a complete embedding
+    # in their own chunks, so the d64 key reads half the bytes. Same provenance
+    # for both widths on purpose -- they are the same model output -- but a
+    # checkpoint can never cross widths: the input layer shapes differ, and the
+    # load fails. Values are not L2-normalised (norm ~3.0-3.8 over 128 dims).
+    # 2017-2022 were only partly computed at release (2017: 18 of 52 So2Sat
+    # cities); the index is masked to the provenance windows, so uncovered
+    # patches are skipped rather than extracted as NaN.
+    "olmoearth_v1.3": {
+        "in_channels": 128,
+        "resolution": 10,
+        "description": "OlmoEarth v1.3 annual embeddings, all 128 bands, streamed from the "
+                       "source.coop zarr (2017-2025), signed-square dequantized to float32. "
+                       "--embedding-dir = local cache dir",
+        # Dequantized nodata (-128) is NaN; 0.0 catches merge_multi_crs zero-fill.
+        "nodata_all_channels_eq": 0.0,
+        "product": "olmoearth",
+        "version": "v1.3",
+        "source": "source_coop",
+        "status": "supported",
+    },
+    "olmoearth_v1.3_d64": {
+        "in_channels": 64,
+        "resolution": 10,
+        "description": "OlmoEarth v1.3, Matryoshka bands 0:64 only (half the bytes of "
+                       "olmoearth_v1.3). --embedding-dir = local cache dir",
+        "nodata_all_channels_eq": 0.0,
+        "product": "olmoearth",
+        "version": "v1.3",
+        "source": "source_coop",
+        "status": "supported",
+    },
     "osm_evidence": {
         "in_channels": 15,
         "resolution": 10,
@@ -234,8 +267,9 @@ def get_nodata_predicate(name: str):
       vector of L2 norm 8.06 instead of 1.0.
     * ``tesserav1.1`` / ``tesserav1.1_global`` / ``tesserav2`` — invalid where
       all 128 channels are exactly 0 (0.05-0.15% of pixels).
-      ``tesserav1.1_dclimate`` shares the rule: it reads NaN for gaps (caught by
-      the NaN test below) except where a zone-crossing merge has zero-filled them. Tessera also has
+      ``tesserav1.1_dclimate`` and ``olmoearth_v1.3``/``_d64`` share the rule:
+      they read NaN for gaps (caught by the NaN test below) except where a
+      zone-crossing merge has zero-filled them. Tessera also has
       ~0.9% *per-channel* quantization zeros affecting 61% of pixels, which are
       valid data: testing per-channel here would discard most of the dataset.
     * ``seamless`` — none. Measured 0.0000% all-zero pixels.

@@ -204,7 +204,7 @@ def main() -> None:
         # what actually makes the per-tile LRU hit.
         if args.embedding_name in (
             "tesserav1.1", "tesserav1.1_global", "tesserav1.1_dclimate",
-            "tesserav2", "aux_struct",
+            "tesserav2", "aux_struct", "olmoearth_v1.3", "olmoearth_v1.3_d64",
         ):
             cx = split_patches.geometry.centroid.x
             cy = split_patches.geometry.centroid.y
@@ -259,10 +259,11 @@ def main() -> None:
             # max_tasks_per_child would also cap it but is incompatible with
             # the fork start method (it silently switches to spawn, which
             # deadlocks here).
-            # A streamed source has no tile to amortise: each patch is a few
-            # latency-bound chunk reads, so small chunks keep every worker busy
-            # (256 left a 2.4k-patch split on 10 of 32 workers).
-            chunksize = 16 if args.embedding_name == "tesserav1.1_dclimate" else 256
+            # Streamed zone-zarr sources set their own: dClimate's 32² chunks
+            # want small hand-outs, OlmoEarth's 256² chunks want same-cell
+            # runs (see datasets.zone_zarr.SOURCES).
+            from datasets.zone_zarr import extract_chunksize
+            chunksize = extract_chunksize(args.embedding_name, default=256)
             with ProcessPoolExecutor(max_workers=args.workers) as pool:
                 for _, ok in tqdm(
                     pool.map(_process_patch, tasks, chunksize=chunksize),

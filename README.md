@@ -126,6 +126,8 @@ in `infer_roi.py --model-type`.
 | `tesserav1.1_global` | GeoTessera v1.1 global | `grid_*/` npy dirs + `tiff_all` | 128 | 10 m | Covers 97.5% of So2Sat 2017 patches |
 | `tesserav2` | GeoTessera v2 (`large_student`) | `grid_*/` npy dirs (no geoinfo) | 128 | 10 m | Georeferenced from the tile name; covers 99.2% of So2Sat 2017 patches |
 | `tesserav1.1_dclimate` | GeoTessera v1.1 dClimate run | Zarr store on source.coop, streamed (geotessera 0.11) | 128 | 10 m | Complete global v1.1 run, 2017–2025; `--embedding-dir` is a local cache dir. A different run from `tesserav1.1_global` |
+| `olmoearth_v1.3` | OlmoEarth v1.3 (Ai2) | Zarr store on source.coop, streamed | 128 | 10 m | 2023–2025 global; 2017–2022 partial at release (2017: 18 of 52 So2Sat cities). `--embedding-dir` is a local cache dir |
+| `olmoearth_v1.3_d64` | OlmoEarth v1.3, Matryoshka bands 0:64 | same store, first chunk half only | 64 | 10 m | Half the bytes of `olmoearth_v1.3`; never pool 64- and 128-d vectors |
 | `tessera` | GeoTessera v1.0 | `.zarr` | 128 | 10 m | Already float32 |
 | `seamless` | Embedded Seamless Data | `.tiff` | 13→72 | 30 m | 13 raw bands; use `--dequantize` to expand to 72 ch |
 
@@ -217,6 +219,15 @@ python src/extract_so2sat_embeddings.py \
     --output-name GeoTessera_v1.1_dClimate \
     --year 2017 \
     --workers 16
+
+# OlmoEarth v1.3 — streamed; uncovered patches are skipped, not written
+python src/extract_so2sat_embeddings.py \
+    --so2sat-dir /maps/acz25/phd-thesis-data/input/So2Sat-LCZ42/v4 \
+    --embedding-dir /maps/acz25/phd-thesis-data/input/OlmoEarth/v1.3_cache \
+    --embedding-name olmoearth_v1.3 \
+    --output-name OlmoEarth_v1.3 \
+    --year 2017 \
+    --workers 32 --skip-existing          # olmoearth_v1.3_d64 -> --output-name OlmoEarth_v1.3_d64
 
 # Embedded Seamless Data
 python src/extract_so2sat_embeddings.py \
@@ -876,6 +887,7 @@ python src/osm_lcz_relabel.py lcz_labels_multiband.tif \
 | GeoTessera v1.1 global | `/tessera/v1.1/` (years 2015–2025) |
 | GeoTessera v2 | `/tessera/v2/large_student/` (years 2017–2025) |
 | GeoTessera v1.1 dClimate | streamed from `https://data.source.coop/tessera/tessera/zarr/v1.1-dclimate` (years 2017–2025); cache at `/maps/acz25/phd-thesis-data/input/GeoTessera/v1.1-dclimate_cache/` |
+| OlmoEarth v1.3 | streamed from `https://data.source.coop/olmoearth/olmoearth-v1-3-embeddings/embeddings.zarr` (years 2017–2025); cache + coverage tables at `/maps/acz25/phd-thesis-data/input/OlmoEarth/v1.3_cache/` |
 | DL model outputs | `/maps/acz25/phd-thesis-data/output/lcz-classification/dl/` |
 
 ### GeoTessera v1.1 tile layout
@@ -933,7 +945,7 @@ v1.1-dclimate/utm{01..60}/
 
 There is nothing to download. `tesserav1.1_dclimate` presents the store to the pipelines as
 **virtual 0.1° cells** (`<embedding-dir>/dclimate_cells/<year>/grid_{lon}_{lat}`, named like
-Tessera tiles) that open lazily (`src/datasets/dclimate.py`). A patch clip fetches only the
+Tessera tiles) that open lazily (`src/datasets/zone_zarr.py`). A patch clip fetches only the
 32×32 chunks it touches. The same code reads every year (`--year 2017`…`2025`).
 
 - `--embedding-dir` is a **cache directory**, not a tile directory. It holds the store
@@ -959,6 +971,56 @@ Tessera tiles) that open lazily (`src/datasets/dclimate.py`). A patch clip fetch
   patches rather than 256.
 - Checked against geotessera: `crop_patch` through this key is bit-identical to
   `GeoTesseraZarr.read_region` on the same window.
+
+### OlmoEarth v1.3 (streamed Zarr)
+
+[OlmoEarth v1.3](https://source.coop/olmoearth/olmoearth-v1-3-embeddings) (Ai2, released
+2026-10-22) has annual 10 m embeddings from Sentinel-1/2 and Landsat 8/9, published like
+the dClimate store: one Zarr v3 group per UTM zone, read by the same code
+(`src/datasets/zone_zarr.py`, with the same virtual 0.1° cells):
+
+```
+embeddings.zarr/utm{01..60}/
+    embeddings   int8 [time=9 (2017-2025), band=128, y, x]   -128 = nodata
+                 shards 2048² x 128 bands, inner chunks 256² x 64 bands
+    time, x, y                                                (zone CRS in attrs `proj:code`)
+```
+
+- **Dequantised at read** with `(|q| / 127.5)² · sign(q)`, the same formula as
+  `alpha_earth_coop`. -128 becomes NaN. The vectors are not L2-normalised: the per-pixel
+  norm is about 3.0–3.8 (median 3.48 measured over Nairobi).
+- **Two keys, one model output.** `olmoearth_v1.3` reads all 128 bands, and
+  `olmoearth_v1.3_d64` reads only the Matryoshka bands 0:64. Those bands are a complete
+  embedding stored in their own chunks, so d64 costs half the bytes. Their provenance is
+  the same, but a checkpoint can't cross widths: the input layer shapes differ. Pick one
+  width per analysis.
+- **Coverage is uneven by year, and the index knows it.** At release, 2023–2025 were global
+  and 2017–2022 covered only selected countries, with a backfill announced for "the coming
+  weeks". For So2Sat 2017 that is 41% of patches: 18 of 52 cities and 5 of 9 val/test
+  cities. All of Europe except Lisbon, China, Japan, the Middle East, Moscow, Santiago and
+  Tehran were missing. For 2025 it is 100%.
+  - The index is masked to the windows the store's `provenance/windows/{year}.parquet` marks
+    as written, cached under `--embedding-dir/olmoearth_provenance/`.
+  - The table is re-fetched whenever its ETag changes.
+  - Uncovered patches are therefore *skipped* ("no coverage"), not written as NaN. After the
+    backfill, re-run the extraction with `--skip-existing` to add them.
+  - `check_embedding_coverage.py` is accurate for these keys.
+- `OLMOEARTH_STORE` / `OLMOEARTH_PROVENANCE` point the reader at another copy of the store
+  or its provenance tables.
+- Reads go to the bucket's own HTTPS endpoint (the same objects as `data.source.coop`,
+  without the proxy that throttles bulk reads), with zarr's chunk-range coalescing turned
+  off, as the dataset README asks.
+- **Extraction throughput.** The store's 256² chunks each hold about 60 So2Sat patches, but
+  zarr's `CacheStore` never sees sharded inner-chunk reads. The reader therefore keeps its
+  own per-process LRU of chunk-aligned int8 blocks (256 MB each process), and the extractor
+  gives each worker same-cell runs of 64 patches.
+  - Measured on 2.8k patches with 32 workers: about 26 patches/s for the 128-d key (11×
+    faster than without the block cache) and about 25% faster still for d64.
+  - That is roughly 2 h for the covered 2017 patches, or 4–5 h for a full year.
+  - Peak RSS was about 0.5 GB per worker.
+- Licence: [OlmoEarth Artifact License](https://source.coop/olmoearth/olmoearth-v1-3-embeddings/LICENSE.txt).
+  Cite: Team OlmoEarth et al., *OlmoEarth v1.3 Embeddings*, Allen Institute for AI, 2026,
+  <https://allenai.org/papers/olmoearth-v1-3>.
 
 ---
 

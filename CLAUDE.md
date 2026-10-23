@@ -145,9 +145,11 @@ src/
     tiles.py                 #   build_tile_index/open_tile/crop_patch for raw source tiles;
                              #     also owns open_and_clip/setup_output/meters_to_out_res, the ROI
                              #     geometry shared with infer_roi (kept torch-free on purpose)
-    dclimate.py              #   tesserav1.1_dclimate: streamed geotessera-0.11 Zarr store (per-UTM-zone
-                             #     groups) exposed as VIRTUAL 0.1° cells (<emb-dir>/dclimate_cells/<year>/
-                             #     grid_*) that open lazily; arithmetic CellGrid index stands in for STRtree
+    zone_zarr.py             #   streamed per-UTM-zone Zarr stores (tesserav1.1_dclimate, olmoearth_v1.3,
+                             #     olmoearth_v1.3_d64), one ZoneZarrSource spec per key, exposed as VIRTUAL
+                             #     0.1° cells (<emb-dir>/<key>_cells/<year>/grid_*) that open lazily; an
+                             #     arithmetic CellGrid (masked to OlmoEarth's provenance coverage) stands in
+                             #     for the STRtree
     so2sat.py                #   patch items, PatchDataset/PatchDataModule, build_so2sat_items
     grid_tiles.py            #   grid-tile items, GridSegDataset/GridSegDataModule
     downloaders.py           #   GEE / geotessera / source.coop downloaders
@@ -205,6 +207,11 @@ lcz_train/                   # Training harness consuming ONLY the lcz_labels St
   Zarr store `zarr/v1.1-dclimate` (2017-2025, nothing on disk); `--embedding-dir` is only a cache
   dir (`${DATA_DIR}/input/GeoTessera/v1.1-dclimate_cache`); `TESSERA_DCLIMATE_STORE` overrides the
   store. A different inference run from `/tessera/v1.1` ("cambridge"), so not comparable to it.
+- OlmoEarth v1.3 (`olmoearth_v1.3` 128-d, `olmoearth_v1.3_d64` Matryoshka 64-d): STREAMED from
+  source.coop `olmoearth/olmoearth-v1-3-embeddings`; `--embedding-dir` is a cache dir
+  (`${DATA_DIR}/input/OlmoEarth/v1.3_cache`). 2017-2022 only partly computed at release (2017:
+  18/52 So2Sat cities); the index follows `provenance/windows/{year}.parquet`, so uncovered
+  patches are skipped and a later `--skip-existing` run tops them up.
 - Embedded Seamless Data embeddings: `${DATA_DIR}/input/EmbeddedSeamlessData/{year}`
 - Demuzere LCZ files: `${DATA_DIR}/input/Demuzere_et_al_2022_LCZ`
 - So2Sat LCZ42 info: `${DATA_DIR}/input/So2Sat-LCZ42`

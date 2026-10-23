@@ -41,9 +41,9 @@ def tile_index_name(path: Path) -> str:
     parent is the tile directory (``.npy``) or which is itself the tile
     (geoinfo ``.tiff``).
     """
-    from datasets.dclimate import is_cell_path
+    from datasets.zone_zarr import is_cell_path
 
-    if path.is_dir() or is_cell_path(path):  # dClimate cells are virtual paths
+    if path.is_dir() or is_cell_path(path):  # zone-zarr cells are virtual paths
         return path.name
     if path.suffix == ".npy":
         return path.parent.name
@@ -269,17 +269,20 @@ def build_tile_index(
         logger.info(f"Tile index (tesserav1.1_global): {len(paths)} tiles from {npy_root}")
         return paths, STRtree(geoms)
 
-    # ── tessera v1.1 dClimate: virtual 0.1° cells over a streamed zarr store ─
-    if embedding_name == "tesserav1.1_dclimate":
-        if year is None:
-            raise ValueError("--year is required for tesserav1.1_dclimate.")
-        from datasets.dclimate import CellGrid, CellPaths
+    # ── streamed per-UTM-zone zarr (dClimate, OlmoEarth): virtual 0.1° cells ─
+    from datasets.zone_zarr import SOURCES as ZONE_ZARR_SOURCES
 
-        # Arithmetic index over the global 0.1° lattice: nothing is listed or
-        # opened here, so a forking caller holds no store client yet.
-        # embedding_dir is the local zarr cache, not a tile directory.
-        logger.info(f"Tile index (tesserav1.1_dclimate): global 0.1° cells, cache {embedding_dir}")
-        return CellPaths(embedding_dir, year), CellGrid()
+    if embedding_name in ZONE_ZARR_SOURCES:
+        if year is None:
+            raise ValueError(f"--year is required for {embedding_name}.")
+        from datasets.zone_zarr import build_index
+
+        # Arithmetic index over the global 0.1° lattice (masked to published
+        # coverage where the source has it): no store is opened here, so a
+        # forking caller holds no client yet. embedding_dir is the local
+        # cache, not a tile directory.
+        logger.info(f"Tile index ({embedding_name}): global 0.1° cells, cache {embedding_dir}")
+        return build_index(embedding_name, embedding_dir, year)
 
     # ── tessera v2: NPY subdirs, geometry derived from the tile names ────────
     if embedding_name == "tesserav2":
@@ -532,12 +535,12 @@ def open_tile(path: Path) -> xr.DataArray:
     """Open a .zarr or .tif tile as a (band, y, x) DataArray with CRS set."""
     import rioxarray as rxr
 
-    from datasets.dclimate import is_cell_path, open_dclimate_cell
+    from datasets.zone_zarr import is_cell_path, open_cell
 
-    # Virtual dClimate cell: nothing exists at the path, so test it before any
+    # Virtual zone-zarr cell: nothing exists at the path, so test it before any
     # filesystem-based branch.
     if is_cell_path(path):
-        return open_dclimate_cell(path)
+        return open_cell(path)
 
     # .zarr FIRST: a zarr store is itself a directory, so this must be tested
     # before the is_dir() branch below — otherwise every zarr tile is misrouted

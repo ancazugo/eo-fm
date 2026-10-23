@@ -60,6 +60,8 @@ LEGACY_OUTPUT_NAMES: dict[str, str] = {
     "GeoTessera_v1.1_global": "tesserav1.1_global",
     "GeoTessera_v1.1_dClimate": "tesserav1.1_dclimate",
     "GeoTessera_v2": "tesserav2",
+    "OlmoEarth_v1.3": "olmoearth_v1.3",
+    "OlmoEarth_v1.3_d64": "olmoearth_v1.3_d64",
     "AlphaEarth": "alpha_earth",
     "AlphaEarthCoop": "alpha_earth_coop",
     "EmbeddedSeamless": "seamless",

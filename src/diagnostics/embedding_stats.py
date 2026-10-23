@@ -77,6 +77,16 @@ FAMILIES: dict[str, dict] = {
         "prefix": "patch_", "suffix": ".npy", "embedding_name": "tesserav1.1_dclimate",
         "note": "dequantized at extraction time; streamed from the dClimate zarr store",
     },
+    "olmoearth_v1.3": {
+        "subdir": "OlmoEarth_v1.3", "year": True, "kind": "npy",
+        "prefix": "patch_", "suffix": ".npy", "embedding_name": "olmoearth_v1.3",
+        "note": "dequantized at extraction time; 2017 only partly covered at release",
+    },
+    "olmoearth_v1.3_d64": {
+        "subdir": "OlmoEarth_v1.3_d64", "year": True, "kind": "npy",
+        "prefix": "patch_", "suffix": ".npy", "embedding_name": "olmoearth_v1.3_d64",
+        "note": "Matryoshka bands 0:64 of olmoearth_v1.3; never pool with the 128-d key",
+    },
     "tesserav2": {
         "subdir": "GeoTessera_v2", "year": True, "kind": "npy",
         "prefix": "patch_", "suffix": ".npy", "embedding_name": "tesserav2",
