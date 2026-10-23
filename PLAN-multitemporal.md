@@ -4,8 +4,9 @@ Written against `55ea103` on `design/global-splits` (2026-10-23). This is a sepa
 `PLAN-V3.md`. The benchmark chapter (Phases 2–4 there) keeps its own gates, and nothing here
 blocks them.
 
-**Deliverable:** a global LCZ map on **`tesserav1.1_global`**, produced by a **segmentation**
-model trained on three label sources:
+**Deliverable:** a global LCZ map on the **downloaded global Tessera v1.1** (the complete
+2017–2025 dClimate run, streamed and cached from source.coop; registry key `tesserav1.1_dclimate`).
+It is produced by a **segmentation** model trained on three label sources:
 
 - So2Sat LCZ42 (51 cities, imagery 2016–18);
 - WUDAPT LCZ-Generator training areas (~1,250 urban areas, mostly labelled 2019–2024, variable quality);
@@ -42,7 +43,7 @@ Contents:
 
 | # | Decision | Why |
 |---|---|---|
-| D0 | **The embedding product is `tesserav1.1_global`** (`/tessera/v1.1`, the "cambridge" v1.1 run). No other v1.1 product is mixed in, at any stage: not the per-city geotessera download, and not the streamed `tesserav1.1_dclimate` run. The same applies to OlmoEarth. | Same version label, different inference runs. Task 1.5.1 found matched-channel r ≈ 0 between v1.1 products (a linear map recovers only R² 0.89). Mixing them would make product differences look like LCZ differences. If S1.0 finds a year missing from `/tessera/v1.1`, the fallback is to move **everything** to one other complete run and retrain. It is never filling the gaps from another product. |
+| D0 | **The embedding product is the downloaded global v1.1** (dClimate run; registry key `tesserav1.1_dclimate`; Zarr store `zarr/v1.1-dclimate`, cached under `${DATA_DIR}/input/GeoTessera/v1.1-dclimate_cache`), like AlphaEarth coop and OlmoEarth. It is **not** the `/tessera/v1.1` folder: that is the "cambridge" archive, which the registry confusingly keys as `tesserav1.1_global` and on which every existing v1.1 checkpoint was trained. No other v1.1 product is mixed in, at any stage: not the cambridge archive, not the per-city geotessera download. The same applies to OlmoEarth. | Same version label, different inference runs. Task 1.5.1 found matched-channel r ≈ 0 between v1.1 products (a linear map recovers only R² 0.89). Mixing them would make product differences look like LCZ differences. So **no existing v1.1 checkpoint, cache or number carries over**: everything in this plan is extracted and trained on the downloaded product. If a needed year turns out to be incomplete in it, cut that year or wait for a top-up. Never fill it from another product. |
 | D1 | **Segmentation is the main pipeline.** The patch classifier stays as baseline, as the test-A reference, and as the E3 teacher. | About 60% of QC-passing WUDAPT polygons cannot contain a 320 m square, so only segmentation can learn from them. The gap after the TTA fix is ~0.06 kappa (U-Net 0.602–0.607 against classifier 0.6675 on the same patches). |
 | D2 | **One pooled model, applied to every year.** There are no per-year models and nothing to merge. Per-year predictions are combined only by seed averaging and, in stage 2, the temporal HMM. | Per-year models would each see a fraction of the labels, each with its own biases, which show up as spurious change. One model with one decision rule makes year-to-year differences attributable to the embeddings. |
 | D3 | **The sample is (place, year), and each label is paired with the year it describes.** So2Sat uses 2017–18, WUDAPT uses `clip(label_year, 2017, 2025)`, and OSM uses its 2024–25 snapshot. Stage 1 uses these source years only. Stage 2 may extend a label to other years, but only where the stability rule (S2.1) allows. | This needs no change labels: it only means extracting the 1–3 label years each AOI has. Forcing everything onto one late year would put So2Sat (the cleanest source and test A) 7–9 years out of date. Year matching is still tested against that alternative (ablation A1, S1.3). |
@@ -57,7 +58,8 @@ Contents:
 
 | Need | Where it lives |
 |---|---|
-| `tesserav1.1_global` tile index and reader | `src/datasets/tiles.py::build_tile_index` (needs the sidecar fix, S1.0) |
+| Streamed reader for the downloaded global v1.1 (per-UTM-zone Zarr → virtual 0.1° cells, lazy, cached) | `src/datasets/zone_zarr.py` (`tesserav1.1_dclimate`); also serves OlmoEarth v1.3 for benchmark comparisons only (D0) |
+| Multi-zone patch merge | `src/datasets/tiles.py::merge_multi_crs` (zone-straddling truncation open since PLAN-v3 revC B4; see S1.0.3) |
 | Product identity / basis checker | `src/diagnostics/tessera_product_check.py`, last report in `diagnostics/tessera_product_check.md` |
 | WUDAPT harmonisation: author collapse, QC weights, `w_time`, consensus bitmask | `lcz_wudapt` (`quality.py`, `consensus.py`, `qc.py`) |
 | Culture-10 protection: forced to test, 1.3 km buffer, So2Sat wins | `lcz_wudapt/splits.py`, `src/build_wudapt_train_gpkg.py` |
@@ -73,7 +75,6 @@ Contents:
 | OA_w / kappa_w / OA_u / OA_bu (Bechtel 2020), per-city kappa | `training/lcz_metrics.py`, `training/evaluate.py` |
 | Stability-mask stage (to be **rewritten** in stage 2, S2.1) | `lcz_labels/change_mask.py` |
 | OSM tag → LCZ evidence | `docs/osm_lcz_tag_mapping.md` |
-| Streamed dClimate v1.1 and OlmoEarth v1.3 readers | `src/datasets/zone_zarr.py`. Benchmark comparisons only (D0) |
 
 Current standing (W&B, culture-10 test, MobileNet-small, Tessera v2 2017):
 
@@ -89,33 +90,61 @@ The E-arms exclude culture-10 plus a buffer, so this gain holds for unseen citie
 
 Each label is used at its own year (D3). No label is moved between years, and no change is claimed.
 
-## S1.0 — Embedding sign-off for `tesserav1.1_global` (blocking, CPU only, ~1 day)
+## S1.0 — Embedding sign-off for the downloaded global v1.1 (blocking, mostly CPU + download, ~2–3 days)
 
-### Task S1.0.1 — Per-year inventory and the sidecar filter
+### Task S1.0.1 — Download the label years only
 
-`build_tile_index("tesserav1.1_global")` skips every NPY tile without a `global_0.1_degree_tiff_all/{tile}.tiff` sidecar. This is despite `open_tile` georeferencing from the tile name when the sidecar is missing, and `tessera_grid_geometry` matching the sidecar geometry on 699/699 tiles.
+Stream and cache through `zone_zarr.py`, exactly as for AlphaEarth coop and OlmoEarth. Stage 1 needs only:
 
-1. Report, for each year 2017–2025 under `/tessera/v1.1/global_0.1_degree_representation/{year}`:
-   - NPY tile count;
-   - the count that has a sidecar;
-   - the count the index admits.
-2. Let the index fall back to the tile-name geometry, as the v2 branch does.
-3. Regenerate the coverage table for the **label years actually needed**: the footprint coverage of So2Sat cities at 2017–18, of every WUDAPT AOI at its label years, and of OSM-label AOIs at 2024–25. Today's figure is 3% mean footprint coverage of non-So2Sat cities at 2017, which most likely reflects the sidecar filter, not missing embeddings.
+- So2Sat cities at 2017 and 2018;
+- every WUDAPT AOI at its label years (1–3 per AOI);
+- OSM-label AOIs at 2024 and 2025.
 
-**Pre-registration:** tile counts are similar across years, and most of the gap between v1.1's 3% and v2's 34% (same cities, 2017) closes once the sidecar filter is removed.
+All nine years for every AOI are needed only in stage 2.
 
-**If a needed year is genuinely missing** from `/tessera/v1.1`, stop and decide per D0. Do not fill it from dClimate.
+- Before starting, estimate the cache size from the AOI footprints × years, and report it.
+- Extract with `--skip-existing`, so an interrupted or topped-up run resumes.
 
-### Task S1.0.2 — Basis stability across years
+### Task S1.0.2 — Real coverage, per AOI and year
+
+The dClimate index has **no coverage mask**: it lists every 0.1° cell, ocean included, and ocean reads as all-NaN. So `check_embedding_coverage.py` over-reports, and coverage has to be measured from the values themselves.
+
+- For each AOI × needed year, report the fraction of valid pixels (`scales` finite, not NaN/inf).
+- Flag AOI-years below 75% valid, the crop threshold in S1.3.2.
+
+There is no landmask, so water is embedded rather than nodata. That is good for LCZ G, but check the G-class pixel counts against what So2Sat and WUDAPT label: the cambridge archive may have treated water differently.
+
+**Pre-registration:** the downloaded product is complete for 2017–2025 over all So2Sat and WUDAPT AOIs, at ≥ 95% valid pixels outside cloud-persistent regions.
+
+**If a needed year is incomplete** for some AOIs, drop those AOI-years from training and report them. Do not fill them from another product (D0).
+
+### Task S1.0.3 — UTM-zone seams
+
+The store is one group per UTM zone. A crop that crosses a zone boundary is assembled by `merge_multi_crs`, which:
+
+- truncated 22% of zone-straddling patches in PLAN-v3 revC (B4, trigger still unidentified);
+- turns NaN into 0 for zone-crossing patches (registry note).
+
+Either fix B4 first, or make the crop sampler (S1.3.4) reject crops that straddle a zone boundary, and report how many it rejects. A global map crosses all 60 zones, so S1.5 inference must be checked at a few zone seams too.
+
+### Task S1.0.4 — Identity against the cambridge archive (informational)
+
+Run `tessera_product_check.py` between the downloaded v1.1 and the cambridge archive (`tesserav1.1_global`, `/tessera/v1.1`), for 2017, on So2Sat patch ids.
+
+This is expected to show two distinct bases, as the registry already records. The result does not block anything. It decides only how past v1.1 numbers may be cited:
+- identical bases → past numbers are comparable;
+- distinct bases → past numbers are from a different product, and the R0 baselines (S1.3.6) replace them.
+
+### Task S1.0.5 — Basis stability across years
 
 Year matching mixes years in one training set, so stage 1 needs this.
 
-Run `tessera_product_check.py` year against year on identical So2Sat patch ids: 2017 vs 2018, 2017 vs 2021, 2017 vs 2024.
+Run `tessera_product_check.py` year against year on the downloaded product, on identical So2Sat patch ids: 2017 vs 2018, 2017 vs 2021, 2017 vs 2024.
 
 - Matched-channel r should be high: same weights, different inputs.
 - A year with r ≈ 0 is a different inference run, and **stops the plan** for that year.
 
-### Task S1.0.3 — Coarse drift readout (no OSM history needed)
+### Task S1.0.6 — Coarse drift readout (no OSM history needed)
 
 On So2Sat LCZ G patches in all 51 cities, report the per-year distribution of cosine and L2 distance to 2017, together with the L2-norm distribution. Call out the 2021→2022 step, when Sentinel-1B was lost.
 
@@ -125,12 +154,14 @@ This is a sanity check that year matching is not mixing embeddings on different 
 
 Report:
 
-- the per-year inventory;
-- the coverage table for the needed years;
+- the cache size and download status;
+- valid-pixel coverage per AOI × needed year, with the dropped AOI-years;
+- the zone-seam decision (B4 fixed, or straddling crops rejected, with counts);
+- the identity readout against the cambridge archive;
 - the year-pair basis table;
 - the G-patch drift curve.
 
-**Decision:** go, or a D0 product decision.
+**Decision:** go, or cut years/AOIs.
 
 ---
 
@@ -268,7 +299,7 @@ Report the label inventory, the filtering attrition table, and the consensus har
 
 | | Content | Shape / dtype |
 |---|---|---|
-| **x** | `tesserav1.1_global` embedding of the sample's year, dequantised (int8 × scale), per-channel normalised with train-set statistics stored in the checkpoint (repo convention) | 128 × H × W, float32, H = W ∈ {64, 96} |
+| **x** | downloaded global v1.1 embedding of the sample's year, dequantised (int8 × per-pixel scale), per-channel normalised with train-set statistics stored in the checkpoint (repo convention) | 128 × H × W, float32, H = W ∈ {64, 96} |
 | **target** | per-pixel 17-bit label set valid at that year | H × W, int32 bitmask |
 | **valid** | labelled ∧ eroded 1 px ∧ embedding not nodata ∧ outside every held-out buffer | H × W, bool |
 | **weight** | source weight × polygon/consensus confidence | H × W, float |
@@ -370,7 +401,7 @@ Extend `PixelWindowDataset` or add `src/datasets/multisource_seg.py`. Either way
 
 | Rung | Adds | Runs |
 |---|---|---|
-| R0 | re-score existing FCN8 / U-Net with fixed TTA; v1.1 So2Sat seg baseline at 2017 | eval only + 3 |
+| R0 | re-score existing FCN8 / U-Net with fixed TTA (old products, reference only); So2Sat seg baseline at 2017 **on the downloaded v1.1** | eval only + 3 |
 | R1 | So2Sat only, 2017 + 2018 embeddings | 3 + LR sweep 3 |
 | R2 | + WUDAPT, year-matched, consensus sets, QC weights | 3 + U-Net medium 1 |
 | **A1** | ablation on R2: every WUDAPT and So2Sat sample at **one fixed year (2024)** instead of its label year | 3 |
@@ -387,7 +418,7 @@ Source-mix and α/β sweeps run on CV folds with FCN8, never on test.
 - Both arms are scored the same way: test A at 2017, test B at each polygon's label year.
 - **A1 ties R2** (within the CI): the assumption holds for the labelled ground. Year matching is kept anyway, because it costs nothing at training time, but stage 2 can rely more on stability extension.
 - **R2 beats A1:** the gap measures how much label-year mismatch costs. Report it per region and label-year bin: the expected losers are fast-growing peri-urban areas, and So2Sat cities at 2024.
-- **A1 beats R2:** a single year has better embeddings, e.g. later years are cleaner or 2017 is weaker. Check S1.0.3 before accepting it, and record it for S2.2.
+- **A1 beats R2:** a single year has better embeddings, e.g. later years are cleaner or 2017 is weaker. Check the S1.0.6 drift curve before accepting it, and record it for S2.2.
 
 ### GATE S1.3
 
@@ -617,10 +648,11 @@ Change accuracy and change area cannot be checked without labels. Use the standa
 
 ## Carried over, lower priority
 
-- **v1.1 patch-classifier track.** Rebuild E1–E3 on `tesserav1.1_global` (`build_wudapt_train_gpkg.py --output-name GeoTessera_v1.1_global --embedding-name tesserav1.1_global`) with a v1.1 teacher. It is needed anyway as the E3 veto teacher, the test-A reference, and the GATE S1 comparison.
+- **v1.1 patch-classifier track, on the downloaded product.** Retrain the MobileNet-small baseline and rebuild E1–E3 (`build_wudapt_train_gpkg.py --embedding-name tesserav1.1_dclimate` with a matching `--output-name`) with a teacher trained on the same product. It is needed anyway as the E3 veto teacher, the test-A reference, and the GATE S1 comparison. **Do this early**: it is the first reading of how the downloaded product compares with v2 and the cambridge archive.
   - Compare against v2-E3 ensemble-to-ensemble (`seed_ensemble.py --k`).
   - v2 cannot be the map product: it lacks global coverage for all years, and its basis differs (D0).
-- **Other embeddings** (dClimate v1.1, OlmoEarth v1.3, v2). Benchmark-chapter comparisons on test A/B only; never part of the map (D0).
+- **Other embeddings** (the cambridge v1.1 archive, OlmoEarth v1.3, v2). Benchmark-chapter comparisons on test A/B only; never part of the map (D0).
+- **Cambridge sidecar filter.** `build_tile_index("tesserav1.1_global")` drops NPY tiles without a `tiff_all` sidecar, which probably explains its 3% coverage of non-So2Sat cities. Fixing it matters for benchmark comparisons only.
 - **Label-shift correction per city** (BBSE/EM on predicted priors). Campaign doc open direction #1. Cheap and post-hoc.
 - **lczkit / `lcz_labels` morphometric *labels*** (rule-based LCZ from form parameters). Their 2D parameters enter the plan only as auxiliary targets (R6). Rule-based labels need heights, which here would come from tags or AI rasters, so they stay dormant.
 - **Demuzere noisy student** (`--pseudo-holdout-km 30` re-run). Benchmark chapter only (D5).
@@ -632,16 +664,18 @@ Change accuracy and change area cannot be checked without labels. Use the standa
 3. The GATE S1 go criteria (proposed above): confirm or change before R0 runs.
 4. Demuzere-based labels: confirm they stay out of the map recipe (D5).
 5. The similarity threshold for admitting a coarse WUDAPT set (0.67 proposed): check how much area it moves to "unlabelled" before fixing it.
-6. Stage 2: the R2 coverage threshold (0.90 or 0.95), after the manual check; and whether to accept per-year linear alignment if it helps flip rate but costs ≤ 0.01 test-B kappa.
+6. Registry naming: `tesserav1.1_global` points at the cambridge archive, not the global product. Rename it (e.g. `tesserav1.1_cambridge`) to stop the two being confused? That would need a compatibility alias, because run names and checkpoints carry the old key.
+7. Stage 2: the R2 coverage threshold (0.90 or 0.95), after the manual check; and whether to accept per-year linear alignment if it helps flip rate but costs ≤ 0.01 test-B kappa.
 
 ## Budget (rough)
 
 | Stage | Phase | Cost |
 |---|---|---|
-| 1 | S1.0–S1.2 | CPU; embedding extraction for the label years only (1–3 per AOI) |
+| 1 | S1.0–S1.2 | download + extraction of the label years only (1–3 per AOI); CPU |
+| 1 | carried-over patch track | ~10 MobileNet runs on the downloaded product (baseline + E3, seeds) |
 | 1 | S1.3 | ~28 U-Net/FCN8 runs (incl. A1 and U-Net medium) + ~19 FCN8 CV/sweep runs |
 | 1 | S1.5 | inference for ~1,250 AOIs × 1 year × 3 seeds, plus culture-10 at 2017 |
 | 2 | S2.1 | CPU; OSM history extraction for ~1,250 AOIs |
 | 2 | S2.2–S2.3 | CPU on cached stable-pixel embeddings + 6 runs |
-| 2 | S2.4 | inference for ~1,250 AOIs × 9 years × 3 seeds, one tile read per pass |
+| 2 | S2.4 | download of the remaining years; inference for ~1,250 AOIs × 9 years × 3 seeds, one tile read per pass |
 | 2 | S2.5 | one labelling session: ~200 stability sites + a few hundred change sites |
